@@ -38,6 +38,7 @@ import {
   resolveCellStatus,
   MAX_TERMINALS,
 } from "./gridTabs";
+import { fetchServerGridState, saveServerGridState, parseServerGridState, normalizedGridJson } from "./gridStateServer";
 import { rosterCellsKey, staleCacheKeys } from "./rosterCache";
 import type { RunCommand } from "./runCommand";
 import { EMPTY_SESSION_META, isPrPhase, mergeSessionMeta, type PrPhase, type WorkPhase } from "./rosterPhase";
@@ -59,7 +60,18 @@ import { usePubSub } from "../composables/usePubSub";
 // reconnect when their page is shown again.
 const init = initialState(localStorage.getItem(STATE_KEY), localStorage.getItem(LEGACY_KEY));
 const state = ref<GridState>(init.state);
-const persist = () => localStorage.setItem(STATE_KEY, JSON.stringify(state.value));
+// The NORMALIZED (session-cell only) grid last synced with the server. Keying sync off the
+// normalized form — not the raw state — means a transient launch/command cell (session=null,
+// e.g. the half-filled "+" launcher) is neither broadcast nor clobbered by our own echo.
+let lastSyncedNorm = "";
+const persist = () => {
+  localStorage.setItem(STATE_KEY, JSON.stringify(state.value));
+  const norm = normalizedGridJson(state.value);
+  if (norm !== lastSyncedNorm) {
+    lastSyncedNorm = norm;
+    saveServerGridState(state.value); // mirror so every open browser applies it live
+  }
+};
 // Write the migrated state before dropping the legacy key, so a reload between
 // migration and the first change can't lose the sessions.
 if (init.migrated) {
@@ -67,6 +79,45 @@ if (init.migrated) {
   localStorage.removeItem(LEGACY_KEY);
 }
 watch(state, persist, { deep: true });
+
+// Adopt a server grid when its SESSION cells differ from ours. Comparing normalized forms makes
+// our own echo — and a peer update that leaves the session set unchanged — a no-op, so a launch
+// cell we're mid-edit is never disturbed. `server` is already normalized (parseServerGridState).
+function adoptGrid(server: GridState) {
+  const json = JSON.stringify(server);
+  if (json === normalizedGridJson(state.value)) {
+    lastSyncedNorm = json;
+    return;
+  }
+  lastSyncedNorm = json;
+  state.value = server;
+}
+
+// Every browser shows the SAME grid: on load take the server's grid if it has one, else seed
+// the server from this browser's local grid. Then live updates (below) keep them identical.
+void fetchServerGridState().then((server) => {
+  if (server) adoptGrid(server);
+  else {
+    lastSyncedNorm = normalizedGridJson(state.value);
+    saveServerGridState(state.value);
+  }
+});
+
+// Live sync: apply a grid another browser/tab published. The echo of our own change matches
+// what we already show and is skipped inside adoptGrid. A socket reconnect can miss events, so
+// re-fetch the authoritative grid then.
+const pubsub = usePubSub();
+const unsubscribeGridState = pubsub.subscribe("grid-state", (data) => {
+  const remote = parseServerGridState(data);
+  if (remote) adoptGrid(remote);
+});
+const offGridReconnect = pubsub.onReconnect(() => {
+  void fetchServerGridState().then((server) => server && adoptGrid(server));
+});
+onBeforeUnmount(() => {
+  unsubscribeGridState();
+  offGridReconnect();
+});
 
 // Feed the tab-close guard: warn on close/reload while any cell runs a session or
 // command (counts every page, not just the mounted one).
@@ -378,7 +429,9 @@ function configureAppearance() {
 </script>
 
 <template>
-  <div class="flex flex-col h-screen w-screen overflow-hidden">
+  <!-- 100dvh, not h-screen: on mobile 100vh exceeds the visual viewport (address bar), pushing
+       an expanded cell's key bar below the fold. -->
+  <div class="flex flex-col h-[100dvh] w-screen overflow-hidden">
     <AppToolbar
       :add-terminal-active="launchOpen"
       :auto-sort="state.sortMode === 'auto'"

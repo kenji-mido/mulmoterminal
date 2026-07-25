@@ -23,6 +23,20 @@ function mountSidebar(over: { sessions: Session[]; activeId?: string | null; fil
 }
 
 describe("Sidebar", () => {
+  it("emits 'hide' with the session id when the ✕ is clicked, without selecting it", async () => {
+    const wrapper = mountSidebar({ sessions: [row({ id: "a", title: "Alpha" })] });
+    await wrapper.find('[data-testid="session-hide"]').trigger("click");
+    expect(wrapper.emitted("hide")).toEqual([["a"]]);
+    expect(wrapper.emitted("select")).toBeUndefined(); // @click.stop — hiding isn't selecting
+  });
+
+  it("emits 'delete' with the session id when the 🗑 is clicked, without selecting it", async () => {
+    const wrapper = mountSidebar({ sessions: [row({ id: "a", title: "Alpha" })] });
+    await wrapper.find('[data-testid="session-delete"]').trigger("click");
+    expect(wrapper.emitted("delete")).toEqual([["a"]]);
+    expect(wrapper.emitted("select")).toBeUndefined();
+  });
+
   it("renders sessions and shows the working spinner", () => {
     const wrapper = mountSidebar({
       sessions: [row({ id: "a", title: "Alpha", working: true }), row({ id: "b", title: "Beta" })],

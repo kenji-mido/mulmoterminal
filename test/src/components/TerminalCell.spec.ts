@@ -164,21 +164,27 @@ describe("TerminalCell", () => {
     expect((w.find('[data-testid="cell-dir-go"]').element as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it("the folder button opens the OS folder picker and fills the working directory", async () => {
+  it("the folder button opens the in-browser folder picker and fills the working directory on select", async () => {
     const w = mountCell(null, { defaultCwd: "/home/me/default" });
     await flushPromises();
-    let body: string | undefined;
-    globalThis.fetch = vi.fn((url: string, init?: { body?: string }) => {
+    const urls: string[] = [];
+    globalThis.fetch = vi.fn((url: string) => {
       const u = String(url);
-      if (u.includes("/api/pick-file")) {
-        body = init?.body;
-        return Promise.resolve({ ok: true, json: async () => ({ paths: ["/picked/dir"] }) });
+      urls.push(u);
+      if (u.includes("/api/dir-list")) {
+        return Promise.resolve({ ok: true, json: async () => ({ path: "/picked/dir", parent: "/", home: "/home/me", entries: [] }) });
       }
       return Promise.resolve({ ok: true, json: async () => ({ working: false, waiting: false, lastPrompt: null }) });
     }) as unknown as typeof fetch;
+    // 📁 opens the in-browser picker (never the native OS dialog — /api/pick-file is not hit).
     await w.find('[aria-label="Choose the working directory"]').trigger("click");
     await flushPromises();
-    expect(body).toContain('"directory":true');
+    expect(w.find('[role="dialog"][aria-label="Select folder"]').exists()).toBe(true);
+    expect(urls.some((u) => u.includes("/api/pick-file"))).toBe(false);
+    expect(urls.some((u) => u.includes("/api/dir-list"))).toBe(true);
+    // Choosing the shown folder fills the working-directory field.
+    await w.find('[data-testid="dir-pick-confirm"]').trigger("click");
+    await flushPromises();
     expect((w.find('[data-testid="cell-dir-input"]').element as HTMLInputElement).value).toBe("/picked/dir");
   });
 

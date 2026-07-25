@@ -12,6 +12,7 @@ import path from "node:path";
 import express, { type Express } from "express";
 import { mountAllRoutes } from "../infra/plugins-registry.js";
 import { mountConfigRoutes } from "../config/config-routes.js";
+import { mountGridStateRoutes } from "../config/grid-state-routes.js";
 import { mountFilesBrowseRoutes } from "../files/files-browse.js";
 import { mountTmuxRoutes } from "../infra/tmux-routes.js";
 import { mountHookRoute } from "../routes/hook-routes.js";
@@ -25,6 +26,7 @@ import { mountOpenDirRoute } from "../files/open-dir.js";
 import { mountGitRemoteRoute } from "../git/gitRemote.js";
 import { mountWorktreeRoutes } from "../git/worktree-routes.js";
 import { mountPickFileRoute } from "../files/pick-file.js";
+import { mountDirListRoute } from "../files/dir-list.js";
 import { mountCommandSummaryRoute } from "../session/command-summary.js";
 import { mountCostRoute } from "../session/cost.js";
 import { mountCollectionRoutes } from "../backends/collections.js";
@@ -55,7 +57,7 @@ import { SPA_FALLBACK_RE } from "../infra/spa-fallback.js";
 
 export interface AppRouteDeps {
   clientDir: string;
-  isAllowedOrigin: (origin: string | undefined) => boolean;
+  isAllowedOrigin: (origin: string | undefined, host?: string) => boolean;
   publish: (channel: string, data: unknown) => void;
   sessionChannel: (id: string) => string;
   toolStores: ReturnType<typeof createToolStores>;
@@ -215,6 +217,7 @@ function mountSessionFacingRoutes(app: Express, deps: AppRouteDeps): void {
   // GRID-ONLY (dev_tool): backs the grid launcher's default dir + the settings
   // modal's directory presets. The single view never calls it.
   mountConfigRoutes(app, CLAUDE_CWD);
+  mountGridStateRoutes(app, { isAllowedOrigin: deps.isAllowedOrigin, publish: deps.publish });
 
   // Project-scoped file browsing + editing for the full-screen Files view
   // (GET /api/files/browse/{list,text,md}, PUT .../write — all ?cwd=&path=). Each
@@ -242,6 +245,7 @@ function mountSessionFacingRoutes(app: Express, deps: AppRouteDeps): void {
   // path(s) — how a browser tab inserts a real filesystem path into the terminal
   // (the browser hides paths from drag/drop and <input type=file>).
   mountPickFileRoute(app, { isAllowedOrigin: deps.isAllowedOrigin });
+  mountDirListRoute(app);
 
   // POST /api/command/summarize runs `claude -p` headless over a Run cell's captured
   // terminal output and returns a short Errors/Warnings/cause/fix summary (issue #246).

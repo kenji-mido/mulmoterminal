@@ -27,12 +27,14 @@ import { connWsUrl, type LaunchChoice } from "../components/wsUrl";
 import { reconnectDelayMs, shouldReconnect } from "./reconnectPolicy";
 import type { RunCommand } from "../components/runCommand";
 import { readableSlot, type SlotCandidate, type SlotInfo } from "./readableSlot";
-import { messageEffect } from "./serverMessage";
+import { messageEffect, type ParsedServerMessage } from "./serverMessage";
 import { enterKeyOverride, submitSequence, DEFAULT_TERMINAL_SUBMIT_MODE, type EnterKeyEvent, type TerminalSubmitMode } from "../../common/terminalSubmit";
 import { getTerminalSubmitMode } from "./terminalSubmitMode";
 import { createFilePathLinkProvider } from "./terminalFilePathLinkProvider";
 
-export type ConnStatus = "connecting" | "connected" | "disconnected";
+// "superseded" is a distinct terminal state — the session is alive but another window took it
+// over — so the view can offer a one-click Reconnect (a plain "disconnected" drop auto-retries).
+export type ConnStatus = "connecting" | "connected" | "disconnected" | "superseded";
 
 // Enter submits and Shift/Option+Enter make a newline — but which BYTES carry each meaning
 // depends on the host's Claude binding, so the choice lives in `enterKeyOverride` (keyed by
@@ -134,13 +136,21 @@ function fitAndSyncSize(c: Conn): void {
   c.term.scrollToBottom();
 }
 
-// The reactive projection the view binds to (status pill, RunMenu cwd). Keyed by
-// the same slot key; a slot that hasn't connected yet (or was released) is absent.
-export const connView = reactive(new Map<string, { status: ConnStatus; serverCwd: string | null }>());
+// The reactive projection the view binds to (status pill, RunMenu cwd, resume-stuck banner).
+// Keyed by the same slot key; a slot that hasn't connected yet (or was released) is absent.
+export const connView = reactive(new Map<string, { status: ConnStatus; serverCwd: string | null; needsPrompt?: boolean }>());
 
 function setStatus(c: Conn, s: ConnStatus) {
   const v = connView.get(c.key);
   if (v) v.status = s;
+}
+
+// Claude prints this when a resumed session is paused on a deferred tool and can't continue on
+// its own — the fix is literally to send any prompt. We surface a one-tap "continue" for it.
+const RESUME_NEEDS_PROMPT = "Provide a prompt to continue the conversation";
+function setNeedsPrompt(c: Conn, value: boolean) {
+  const v = connView.get(c.key);
+  if (v) v.needsPrompt = value;
 }
 
 // Claude Code emits OSC 52 with an EMPTY selection (`ESC ] 52 ; ; <base64>`), which
@@ -341,9 +351,13 @@ function connect(c: Conn) {
   c.sawExit = false;
   setStatus(c, "connecting");
   // Drop the previous session's resolved cwd so the Run menu can't list/launch the
-  // prior project's scripts before the new `session` message arrives.
+  // prior project's scripts before the new `session` message arrives; clear any stale
+  // resume-needs-prompt banner from the previous attempt.
   const v = connView.get(c.key);
-  if (v) v.serverCwd = c.target.cwd;
+  if (v) {
+    v.serverCwd = c.target.cwd;
+    v.needsPrompt = false;
+  }
 
   // Resume the known id (server-learned, or the prop) so a reconnect re-attaches the
   // same session instead of spawning a fresh one each retry.
@@ -365,7 +379,10 @@ function connect(c: Conn) {
   };
   sock.onclose = () => {
     if (sock !== c.ws) return;
-    setStatus(c, "disconnected");
+    // The superseded banner already set the durable "superseded" state (another window holds
+    // it); the close that follows must not downgrade it to a plain "disconnected", or the
+    // Reconnect affordance keyed on it would vanish. scheduleReconnect no-ops here (sawExit).
+    if (connView.get(c.key)?.status !== "superseded") setStatus(c, "disconnected");
     scheduleReconnect(c);
   };
   sock.onerror = () => {
@@ -374,10 +391,25 @@ function connect(c: Conn) {
   };
 }
 
+// A terminal-end frame (exit / superseded / error): apply its banner + status and stop
+// auto-reconnect (sawExit). superseded stays reconnectable — the session is alive in another
+// window — so it gets its own status; the rest are plain disconnects.
+function applyTerminalEnd(c: Conn, msg: ParsedServerMessage): void {
+  const effect = messageEffect(msg.type, !!c.target.command, msg.message);
+  if (!effect.terminal) return;
+  c.sawExit = true;
+  if (effect.banner) c.term.write(effect.banner);
+  setStatus(c, msg.type === "superseded" ? "superseded" : "disconnected");
+  if (effect.callsOnExit) c.handlers.onExit?.();
+}
+
 function handleMessage(c: Conn, event: MessageEvent) {
   const msg = JSON.parse(event.data);
   if (msg.type === "output") {
     c.term.write(msg.data);
+    // A resumed session paused on a deferred tool prints RESUME_NEEDS_PROMPT and waits — flag it
+    // so the view can offer a one-tap "continue" (the marker text survives xterm's ANSI framing).
+    if (typeof msg.data === "string" && msg.data.includes(RESUME_NEEDS_PROMPT)) setNeedsPrompt(c, true);
   } else if (msg.type === "session") {
     // Server reports the live session id — remember it so a later reconnect resumes
     // THIS session (esp. brand-new sessions that had no id yet) and the effective cwd.
@@ -390,15 +422,7 @@ function handleMessage(c: Conn, event: MessageEvent) {
       c.handlers.onCwd?.(msg.cwd);
     }
   } else {
-    // exit / superseded / error — a terminal message. messageEffect decides which retries,
-    // which fires onExit (NOT superseded — the session is alive in another tab), and the
-    // wording; this applies it.
-    const effect = messageEffect(msg.type, !!c.target.command, msg.message);
-    if (!effect.terminal) return;
-    c.sawExit = true;
-    if (effect.banner) c.term.write(effect.banner);
-    setStatus(c, "disconnected");
-    if (effect.callsOnExit) c.handlers.onExit?.();
+    applyTerminalEnd(c, msg);
   }
 }
 
@@ -440,6 +464,17 @@ export function detach(key: string, el: HTMLElement | null) {
   c.handlers = {};
   if (c.host.parentElement) c.host.remove();
   c.attachedEl = null;
+}
+
+// Take a stopped slot back: re-open its socket at the SAME target, which reattaches the live
+// session (and supersedes whatever window holds it now). Only acts on a slot that stopped on a
+// terminal message (sawExit) — a live or auto-retrying one is left alone. connect() clears
+// sawExit and closes the old (already-closed) socket itself.
+export function reconnect(key: string) {
+  const c = conns.get(key);
+  if (!c || !c.sawExit) return;
+  c.reconnectAttempts = 0;
+  connect(c);
 }
 
 // connectKey changed (session switch / relaunch in the same slot): point the slot
@@ -508,6 +543,7 @@ export function submitText(key: string, text: string): boolean {
   if (!c) return false;
   const sock = c.ws;
   if (!sock || sock.readyState !== WebSocket.OPEN) return false;
+  setNeedsPrompt(c, false); // a prompt is on its way — clear the resume-stuck banner
   const submit = submitBytesFor(c);
   sock.send(JSON.stringify({ type: "input", data: text }));
   setTimeout(() => {
@@ -576,6 +612,39 @@ export function insertText(key: string, text: string) {
   if (!c) return;
   if (c.ws?.readyState === WebSocket.OPEN) c.ws.send(JSON.stringify({ type: "input", data: text }));
   c.term.focus();
+}
+
+// Send a raw key sequence (Tab, Esc, Ctrl-C…) straight to the PTY — for the on-screen key bar,
+// which has no physical keyboard for these. No submit; no focus change, so tapping a key doesn't
+// dismiss/re-open the mobile keyboard.
+export function sendKey(key: string, data: string): void {
+  const c = conns.get(key);
+  if (c?.ws?.readyState === WebSocket.OPEN) c.ws.send(JSON.stringify({ type: "input", data }));
+}
+
+// Arrow keys are mode-sensitive: a TUI in application-cursor-keys mode (DECCKM — Claude Code's
+// TUI, vim, less…) expects ESC O A, while a normal shell expects ESC [ A. xterm tracks the
+// current mode, so read it and send the right form — a fixed sequence works in only one mode
+// and looks dead (or echoes ^[[A) in the other. This is what xterm itself does for a real arrow.
+export type ArrowDir = "up" | "down" | "right" | "left";
+const ARROW_FINAL: Record<ArrowDir, string> = { up: "A", down: "B", right: "C", left: "D" };
+// ESC O x in application-cursor-keys mode, ESC [ x otherwise. Pure so the mode split is tested
+// without standing up a terminal.
+export function arrowSequence(dir: ArrowDir, appMode: boolean): string {
+  return (appMode ? "\x1bO" : "\x1b[") + ARROW_FINAL[dir];
+}
+export function sendArrow(key: string, dir: ArrowDir): void {
+  const c = conns.get(key);
+  if (c?.ws?.readyState !== WebSocket.OPEN) return;
+  c.ws.send(JSON.stringify({ type: "input", data: arrowSequence(dir, c.term.modes.applicationCursorKeysMode) }));
+}
+
+// The session this slot is currently connected as (server-learned, or the target's). Lets a
+// view tell a real session SWITCH (retarget) apart from the slot merely learning its own
+// freshly-minted id (null → X via the `session` message), which must NOT reconnect.
+export function slotSessionId(key: string): string | null {
+  const c = conns.get(key);
+  return c ? (c.knownSessionId ?? c.target.sessionId) : null;
 }
 
 export function focus(key: string) {

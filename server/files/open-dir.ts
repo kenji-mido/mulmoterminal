@@ -12,7 +12,7 @@ export function openCommand(platform: NodeJS.Platform): string {
 }
 
 interface OpenDirOptions {
-  isAllowedOrigin: (origin?: string) => boolean;
+  isAllowedOrigin: (origin?: string, host?: string) => boolean;
 }
 
 // POST /api/open-dir { path } — reveal an absolute, existing directory in the OS

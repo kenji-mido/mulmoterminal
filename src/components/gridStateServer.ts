@@ -1,0 +1,52 @@
+// Server-side mirror of the grid layout (GET/POST /api/grid-state), so a SECOND browser
+// — a phone over Tailscale, an SSH forward — reconstructs the same grid instead of the
+// empty one localStorage alone gives a fresh client. The running sessions are alive and
+// reattachable server-side; this is what lets a new browser SEE which cells to show.
+//
+// localStorage stays the fast local cache and the authority for a browser that already has
+// a grid; the server is consulted only to seed a fresh client (see GridView), and is kept
+// current by a debounced mirror of every change.
+import { parseGridState, type GridState } from "./gridTabs";
+
+// Validate a raw grid blob (a fetch response's `state`, or a pub/sub payload) through the SAME
+// validator the localStorage path uses — the client owns the schema. Null when absent/invalid.
+export function parseServerGridState(state: unknown): GridState | null {
+  if (state == null) return null;
+  return parseGridState(JSON.stringify(state));
+}
+
+// The canonical, comparable form of a grid: only the persistent SESSION cells (parseGridState
+// drops the transient launch/command cells and renumbers uids). Sync keys off this so opening
+// the launcher's "+" cell — which adds a session-less cell — is NOT a change to broadcast, and
+// a peer's echo can't wipe that half-filled cell back out.
+export function normalizedGridJson(state: GridState): string {
+  return JSON.stringify(parseGridState(JSON.stringify(state)) ?? state);
+}
+
+// Fetch the shared grid, or null when nothing is saved / the request fails.
+export async function fetchServerGridState(): Promise<GridState | null> {
+  try {
+    const res = await fetch("/api/grid-state");
+    if (!res.ok) return null;
+    const body = await res.json();
+    return parseServerGridState(body?.state);
+  } catch {
+    return null;
+  }
+}
+
+// Debounced so a burst of reactive changes (a drag, a page of cells launching) collapses to
+// one write. Fire-and-forget: a failed mirror just means the other browser seeds a beat
+// later; localStorage already holds the authoritative local copy.
+let timer: ReturnType<typeof setTimeout> | null = null;
+export function saveServerGridState(state: GridState, delayMs = 800): void {
+  if (timer) clearTimeout(timer);
+  timer = setTimeout(() => {
+    timer = null;
+    void fetch("/api/grid-state", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ state }),
+    }).catch(() => {});
+  }, delayMs);
+}

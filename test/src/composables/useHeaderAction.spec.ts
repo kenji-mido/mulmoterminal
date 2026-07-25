@@ -9,6 +9,7 @@ const m = vi.hoisted(() => ({
   submitText: vi.fn(),
   insertText: vi.fn(),
   openTerminalAt: vi.fn(),
+  openFilePicker: vi.fn(),
 }));
 vi.mock("../../../src/composables/useFilesView", () => ({ filesGotoIndex: m.filesGotoIndex }));
 vi.mock("../../../src/composables/usePrsView", () => ({ prsGotoIndex: m.prsGotoIndex }));
@@ -17,6 +18,7 @@ vi.mock("../../../src/composables/useCollectionBrowse", () => ({ browseGotoIndex
 vi.mock("../../../src/composables/useAccountingView", () => ({ accountingViewOpen: m.accountingViewOpen }));
 vi.mock("../../../src/composables/useTerminalConnections", () => ({ submitText: m.submitText, insertText: m.insertText }));
 vi.mock("../../../src/composables/useNewTerminal", () => ({ openTerminalAt: m.openTerminalAt }));
+vi.mock("../../../src/composables/useFilePicker", () => ({ openFilePicker: m.openFilePicker }));
 
 import { runHeaderButton } from "../../../src/composables/useHeaderAction";
 import type { HeaderButton } from "../../../src/composables/useHeaderButtons";
@@ -46,12 +48,36 @@ describe("runHeaderButton", () => {
     open.mockRestore();
   });
 
-  it("open reveal → POST /api/open-dir", () => {
+  it("open reveal → POST /api/open-dir (desktop: native file manager)", () => {
     const f = vi.fn(() => Promise.resolve({ ok: true } as Response));
     vi.stubGlobal("fetch", f);
     runHeaderButton(btn({ run: "open", open: { reveal: "/dir" } }), null, null);
     expect(f).toHaveBeenCalledWith("/api/open-dir", expect.objectContaining({ method: "POST" }));
     vi.unstubAllGlobals();
+  });
+
+  it("open reveal on a touch device → in-app file browser, not the host file manager", () => {
+    const orig = window.matchMedia;
+    window.matchMedia = ((q: string) => ({
+      matches: q.includes("coarse"),
+      media: q,
+      onchange: null,
+      addListener() {},
+      removeListener() {},
+      addEventListener() {},
+      removeEventListener() {},
+      dispatchEvent: () => false,
+    })) as unknown as typeof window.matchMedia;
+    const f = vi.fn(() => Promise.resolve({ ok: true } as Response));
+    vi.stubGlobal("fetch", f);
+    try {
+      runHeaderButton(btn({ run: "open", open: { reveal: "/dir" } }), null, null);
+      expect(m.filesGotoIndex).toHaveBeenCalledWith("/dir");
+      expect(f).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+      window.matchMedia = orig;
+    }
   });
 
   it("open files → filesGotoIndex; open view routes to the matching nav (else files)", () => {
@@ -68,22 +94,18 @@ describe("runHeaderButton", () => {
     expect(m.openTerminalAt).toHaveBeenCalledWith("/proj", "cell-4");
   });
 
-  it("open pickFile → POST /api/pick-file, inserts the chosen path(s) into the slot", async () => {
-    const f = vi.fn(() => Promise.resolve({ ok: true, json: async () => ({ paths: ["/a/b.ts"] }) } as unknown as Response));
-    vi.stubGlobal("fetch", f);
-    runHeaderButton(btn({ run: "open", open: { pickFile: true } }), "single", null);
-    await vi.waitFor(() => expect(m.insertText).toHaveBeenCalled());
-    expect(f).toHaveBeenCalledWith("/api/pick-file", expect.objectContaining({ method: "POST" }));
+  it("open pickFile → opens the in-browser file picker seeded at the cwd; its onSelect inserts the path", () => {
+    runHeaderButton(btn({ run: "open", open: { pickFile: true } }), "single", "/proj");
+    expect(m.openFilePicker).toHaveBeenCalledWith(expect.objectContaining({ start: "/proj" }));
+    // Simulate the user choosing a file — the request's callback inserts it into the slot.
+    const req = m.openFilePicker.mock.calls[0][0] as { onSelect: (paths: string[]) => void };
+    req.onSelect(["/a/b.ts"]);
     expect(m.insertText).toHaveBeenCalledWith("single", expect.stringContaining("/a/b.ts"));
-    vi.unstubAllGlobals();
   });
 
-  it("open pickFile without a slot key is a no-op (no dialog)", () => {
-    const f = vi.fn();
-    vi.stubGlobal("fetch", f);
+  it("open pickFile without a slot key is a no-op (no picker)", () => {
     runHeaderButton(btn({ run: "open", open: { pickFile: true } }), null, null);
-    expect(f).not.toHaveBeenCalled();
-    vi.unstubAllGlobals();
+    expect(m.openFilePicker).not.toHaveBeenCalled();
   });
 
   it("shell → defensive no-op warn (Terminal.vue emits `run` instead; server suppresses shell here)", () => {

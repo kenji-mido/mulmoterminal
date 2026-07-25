@@ -5,14 +5,15 @@ import type { Server as HttpServer } from "node:http";
 // Channel names are socket.io rooms — subscribe/unsubscribe map to
 // socket.join / socket.leave, and publish broadcasts to the room.
 // socket.io handles reconnect / heartbeat / transport for us.
-export function createPubSub(server: HttpServer, isAllowedOrigin: (origin?: string) => boolean = () => true) {
+export function createPubSub(server: HttpServer, isAllowedOrigin: (origin?: string, host?: string) => boolean = () => true) {
   const io = new IOServer(server, {
     path: "/ws/pubsub",
     transports: ["websocket"],
     // Reject cross-origin connections so an untrusted website can't subscribe to
-    // session activity. allowRequest covers the websocket handshake; cors covers
-    // any polling/preflight.
-    allowRequest: (req, cb) => cb(null, isAllowedOrigin(req.headers.origin)),
+    // session activity. allowRequest covers the websocket handshake (the real gate —
+    // it sees the request's Host, so a same-origin remote page over Tailscale is
+    // allowed); cors only stamps headers on any polling/preflight.
+    allowRequest: (req, cb) => cb(null, isAllowedOrigin(req.headers.origin, req.headers.host)),
     cors: {
       origin: (origin, cb) => cb(null, isAllowedOrigin(origin)),
       credentials: true,

@@ -54,7 +54,7 @@ const liveDeps: GoogleRouteDeps = {
 };
 
 interface GoogleRouteOptions {
-  isAllowedOrigin: (origin?: string) => boolean;
+  isAllowedOrigin: (origin?: string, host?: string) => boolean;
 }
 
 const failed = (res: Response, cause: unknown, fallback: string): void => {
@@ -81,7 +81,7 @@ async function readStatus(deps: GoogleRouteDeps): Promise<GoogleStatus> {
 // it, any site the user visits could POST /unlink and silently drop their account link.
 export function mountGoogleRoutes(app: Express, { isAllowedOrigin }: GoogleRouteOptions, deps: GoogleRouteDeps = liveDeps): void {
   const forbidden = (req: Request, res: Response): boolean => {
-    if (isAllowedOrigin(req.headers.origin)) return false;
+    if (isAllowedOrigin(req.headers.origin, req.headers.host)) return false;
     res.status(403).json({ error: "forbidden origin" });
     return true;
   };

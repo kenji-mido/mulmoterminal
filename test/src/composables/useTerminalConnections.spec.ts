@@ -111,6 +111,30 @@ describe("useTerminalConnections — detached-slot state replay", () => {
     conn.release("cell-race"); // tear the slot down so it can't leak into the next test
   });
 
+  it("marks a superseded slot and reconnect() takes it back, resuming the same session", () => {
+    conn.attach("cell-race", target(null), { onSession: vi.fn(), onCwd: vi.fn() }, document.createElement("div"));
+    const ws = FakeWebSocket.instances.at(-1);
+    ws?.onopen?.();
+    ws?.onmessage?.({ data: JSON.stringify({ type: "session", id: "sess-abc", cwd: "/resolved" }) });
+    // Another window takes the session over; the server then closes this socket.
+    ws?.onmessage?.({ data: JSON.stringify({ type: "superseded" }) });
+    ws?.onclose?.();
+    // The close must NOT downgrade "superseded" to "disconnected", and no auto-reconnect fires.
+    expect(conn.connView.get("cell-race")?.status).toBe("superseded");
+    expect(FakeWebSocket.instances).toHaveLength(1);
+
+    // Reconnect opens a fresh socket that resumes the same session id.
+    conn.reconnect("cell-race");
+    expect(conn.connView.get("cell-race")?.status).toBe("connecting");
+    const ws2 = FakeWebSocket.instances.at(-1);
+    expect(ws2).not.toBe(ws);
+    expect(ws2?.url).toContain("session=sess-abc");
+
+    // A second reconnect while it's connecting again (sawExit already cleared) is a no-op.
+    conn.reconnect("cell-race");
+    expect(FakeWebSocket.instances).toHaveLength(2);
+  });
+
   it("replays a session id learned WHILE DETACHED to the handlers bound on reattach", () => {
     const first = { onSession: vi.fn(), onCwd: vi.fn() };
     const el1 = document.createElement("div");
@@ -547,5 +571,17 @@ describe("isClaudeTarget", () => {
     expect(conn.isClaudeTarget({ ...base, codex: true })).toBe(false);
     expect(conn.isClaudeTarget({ ...base, command: { source: "script", index: 0, label: "dev", cwd: null } })).toBe(false);
     expect(conn.isClaudeTarget({ ...base, devTerminal: true })).toBe(false);
+  });
+});
+
+describe("arrowSequence", () => {
+  it("uses ESC [ x in normal mode and ESC O x in application-cursor-keys mode", () => {
+    expect(conn.arrowSequence("up", false)).toBe("\x1b[A");
+    expect(conn.arrowSequence("down", false)).toBe("\x1b[B");
+    expect(conn.arrowSequence("right", false)).toBe("\x1b[C");
+    expect(conn.arrowSequence("left", false)).toBe("\x1b[D");
+    // DECCKM on (Claude Code's TUI, vim, less): the O form.
+    expect(conn.arrowSequence("up", true)).toBe("\x1bOA");
+    expect(conn.arrowSequence("left", true)).toBe("\x1bOD");
   });
 });

@@ -9,6 +9,7 @@ import { useTheme, currentTermTheme, termThemeFor, type ThemeId } from "../compo
 import { badgeStyleFor } from "./dirBadge";
 import { terminalHeaderStyleFor } from "./cellHeaderStyle";
 import { useVoiceInput } from "../composables/useVoiceInput";
+import { useMobileKeys } from "../composables/useMobileKeys";
 import { useGitStatus } from "../composables/useGitStatus";
 import * as conn from "../composables/useTerminalConnections";
 import RunMenu from "./RunMenu.vue";
@@ -108,6 +109,56 @@ const statusClass = computed(() => {
   if (status.value === "connecting") return "bg-[var(--warn-bg)] text-warn";
   return "bg-[var(--err-deep)] text-err";
 });
+// Take the session back after another window (a phone / another tab) superseded this one:
+// re-attaches this slot, which in turn supersedes the window that holds it now.
+function reconnectHere() {
+  conn.reconnect(slotKey);
+}
+
+// A resumed session can pause on a deferred tool and wait for a prompt (Claude prints "Provide
+// a prompt to continue…"). Surface a one-tap Continue that sends a prompt to unstick it.
+const needsPrompt = computed(() => conn.connView.get(slotKey)?.needsPrompt ?? false);
+function sendContinue() {
+  conn.submitText(slotKey, "continue");
+}
+
+// On-screen input aids (key bar + text field) for a device with no physical keyboard, where
+// xterm's own hidden textarea can't reliably raise the soft keyboard or send Esc/Ctrl/arrows.
+// Only meaningful for the PRIMARY terminal — the chat single view, or an expanded grid cell —
+// never a grid thumbnail or a one-off command cell; the ⌨ toggle lives there too. `mobileKeys`
+// (persisted, default = touch-detected) decides whether they're actually shown, so a device
+// whose touch auto-detect misreads can still turn them on by hand.
+const mobileKeys = useMobileKeys();
+const primaryTerminal = computed(() => !props.command && (!props.devTerminal || props.expanded));
+const showMobileAids = computed(() => primaryTerminal.value && mobileKeys.value);
+
+// Special keys → the PTY. Fixed-sequence keys (Esc/Tab/Ctrl-C) carry `seq`; arrows carry a
+// direction so the sequence tracks the terminal's cursor-keys mode (see conn.sendArrow). Arrows
+// drive history/menu nav (↑ recalls prior input), Tab completes, Esc cancels, Ctrl-C interrupts.
+type TermKey = { label: string; seq: string } | { label: string; arrow: "up" | "down" | "right" | "left" };
+const TERM_KEYS: TermKey[] = [
+  { label: "Esc", seq: "\x1b" },
+  { label: "Tab", seq: "\t" },
+  { label: "Ctrl-C", seq: "\x03" },
+  { label: "↑", arrow: "up" },
+  { label: "↓", arrow: "down" },
+  { label: "←", arrow: "left" },
+  { label: "→", arrow: "right" },
+];
+function tapTermKey(k: TermKey): void {
+  if ("arrow" in k) conn.sendArrow(slotKey, k.arrow);
+  else conn.sendKey(slotKey, k.seq);
+}
+
+// The text field's content → the PTY, committed like a keyboard turn (multi-line as a bracketed
+// paste so the agent takes it as one edit). The native field means the soft keyboard + IME work.
+const mobileInput = ref("");
+function sendMobileInput() {
+  const text = mobileInput.value;
+  if (!text.trim()) return;
+  const ok = text.includes("\n") ? conn.pasteAndSubmit(slotKey, text) : conn.submitText(slotKey, text);
+  if (ok) mobileInput.value = "";
+}
 // The server-resolved cwd of the connected session (the open project), used by the
 // Run menu so it lists THAT directory's scripts. Falls back to the requested cwd.
 const serverCwd = computed(() => conn.connView.get(slotKey)?.serverCwd ?? props.cwd ?? null);
@@ -231,15 +282,18 @@ onActivated(() => {
 });
 
 // Reconnect (resume a different session / start fresh) on every user action.
-// A user action picks a new target, so point the slot at the new session/cwd and
-// reconnect (closing the previous socket, which falls back to the server's grace).
-watch(
-  () => props.connectKey,
-  () => {
-    conn.retarget(slotKey, currentTarget());
-    conn.focus(slotKey);
-  },
-);
+// Point the slot at a new target and reconnect when: connectKey ticks (a user action — pick /
+// relaunch / re-select the same session), OR the session id switches to a DIFFERENT one than
+// we're connected as. The latter matters in the grid, where live-sync can reassign a cell to
+// another session WITHOUT a connectKey tick — without this the slot stays wired to its old
+// session while another cell adopts it, and the two evict each other (superseded ping-pong).
+// The guard (`!== slotSessionId`) skips the benign null→id case: the slot just learned its own
+// freshly-minted id, which is already what it's connected as — reconnecting there would be wrong.
+watch([() => props.connectKey, () => props.sessionId], ([ck], [prevCk]) => {
+  if (ck === prevCk && props.sessionId === conn.slotSessionId(slotKey)) return;
+  conn.retarget(slotKey, currentTarget());
+  conn.focus(slotKey);
+});
 
 // Report to the server whether this terminal is the user's actively-viewed pane, so
 // an unfocused grid cell can surface blocked/done and a viewed one stays suppressed.
@@ -364,7 +418,7 @@ onUnmounted(() => {
   <div class="relative flex h-full min-h-0 min-w-0 flex-1 flex-col bg-base">
     <div
       v-if="!hideHeader"
-      class="flex items-center gap-3 bg-[var(--cell-header-bg,var(--bg-panel))] px-4 py-2 font-sans text-[14px] text-[var(--cell-header-fg,var(--text))]"
+      class="flex flex-wrap items-center gap-x-3 gap-y-1 bg-[var(--cell-header-bg,var(--bg-panel))] px-4 py-2 font-sans text-[14px] text-[var(--cell-header-fg,var(--text))]"
       :style="headerStyle"
     >
       <span class="font-semibold">Terminal</span>
@@ -377,6 +431,20 @@ onUnmounted(() => {
       >
       <GitBranchChip :status="gitStatus" />
       <span class="rounded-[4px] px-2 py-0.5 text-[12px]" :class="statusClass">{{ status }}</span>
+      <!-- On-screen keys toggle. Kept OUT of the right-hand overflow group so it stays reachable
+           on a narrow phone where that group can be pushed off-screen. -->
+      <button
+        v-if="primaryTerminal"
+        type="button"
+        class="inline-flex flex-none cursor-pointer items-center rounded-[4px] border-0 bg-transparent p-0.5 hover:bg-selected hover:text-fg"
+        :class="mobileKeys ? 'text-accent' : 'text-[var(--cell-btn,var(--text-muted))]'"
+        :title="mobileKeys ? 'Hide on-screen keys' : 'Show on-screen keys'"
+        :aria-label="mobileKeys ? 'Hide on-screen keys' : 'Show on-screen keys'"
+        data-testid="term-keys-toggle"
+        @click="mobileKeys = !mobileKeys"
+      >
+        <span class="material-symbols-outlined text-[18px]">keyboard</span>
+      </button>
       <RunMenu v-if="runMenu" :cwd="serverCwd" @run="(c) => emit('run', c)" />
       <SkillMenu v-if="runMenu" :cwd="serverCwd" @skill="onSkill" />
       <div class="ml-auto inline-flex items-center gap-1">
@@ -418,6 +486,22 @@ onUnmounted(() => {
       @dragleave="dragOver = false"
       @drop="onDrop"
     />
+    <!-- Superseded: this session is live in another window (a phone / another tab). Offer to
+         take it back here rather than forcing a page reload. -->
+    <div
+      v-if="status === 'superseded'"
+      class="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-[rgba(0,0,0,0.55)] p-4 text-center"
+      data-testid="term-superseded"
+    >
+      <p class="m-0 max-w-[320px] font-sans text-[13px] text-fg">This session is open in another window.</p>
+      <button
+        class="cursor-pointer rounded-md border border-accent bg-accent px-4 py-2 text-[13px] font-semibold text-[var(--accent-fg,#fff)] hover:opacity-90"
+        data-testid="term-reconnect"
+        @click="reconnectHere"
+      >
+        Reconnect here
+      </button>
+    </div>
     <Transition
       enter-active-class="transition-opacity duration-200 ease-[ease]"
       leave-active-class="transition-opacity duration-200 ease-[ease]"
@@ -433,6 +517,63 @@ onUnmounted(() => {
         <span>{{ dropHintText }}</span>
       </div>
     </Transition>
+    <!-- Resume paused on a deferred tool: Claude is waiting for a prompt. One tap sends one. -->
+    <div
+      v-if="needsPrompt"
+      data-testid="term-needs-prompt"
+      class="flex flex-none items-center gap-2 border-t border-t-border bg-[var(--warn-bg,#3a2f00)] px-3 py-2 font-sans text-[13px] text-[var(--warn-text,#e0a030)]"
+    >
+      <span class="material-symbols-outlined shrink-0 text-[18px]" aria-hidden="true">pause_circle</span>
+      <span class="min-w-0 flex-auto">This resumed session is paused and needs a prompt to continue.</span>
+      <button
+        class="flex-none cursor-pointer rounded-md border border-accent bg-accent px-3 py-1 text-[13px] font-semibold text-[var(--accent-fg,#fff)] hover:opacity-90"
+        data-testid="term-continue"
+        @click="sendContinue"
+      >
+        Continue
+      </button>
+    </div>
+    <!-- Touch-device input aids (below the terminal, shrinking it — FitAddon refits): a row of
+         special keys the soft keyboard lacks, and a native text field so typing/IME work. -->
+    <!-- pb lifts the keys/input clear of the phone's bottom edge (home-indicator / gesture bar,
+         via safe-area-inset) plus extra, so they sit higher and stay tappable. -->
+    <div
+      v-if="showMobileAids"
+      class="flex flex-none flex-col gap-1 border-t border-t-border bg-panel px-2 pt-1.5 pb-[calc(env(safe-area-inset-bottom,0px)+1rem)]"
+    >
+      <div class="flex gap-1 overflow-x-auto" data-testid="term-key-row">
+        <button
+          v-for="k in TERM_KEYS"
+          :key="k.label"
+          type="button"
+          class="flex-none cursor-pointer rounded-md border border-border bg-elevated px-2.5 py-1 font-mono text-[13px] text-fg hover:bg-hover"
+          @click="tapTermKey(k)"
+        >
+          {{ k.label }}
+        </button>
+      </div>
+      <div class="flex items-end gap-1.5" data-testid="cell-mobile-input">
+        <textarea
+          v-model="mobileInput"
+          rows="1"
+          inputmode="text"
+          autocapitalize="off"
+          autocorrect="off"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="Type here, then Send…"
+          class="max-h-24 min-h-[34px] flex-auto resize-none rounded-md border border-border bg-elevated px-2 py-1.5 font-mono text-[13px] text-fg outline-none focus:border-accent"
+          @keydown.enter.exact.prevent="sendMobileInput"
+        />
+        <button
+          class="flex-none cursor-pointer rounded-md border border-accent bg-accent px-3 py-2 text-[13px] font-semibold text-[var(--accent-fg,#fff)] disabled:cursor-default disabled:opacity-40"
+          :disabled="!mobileInput.trim()"
+          @click="sendMobileInput"
+        >
+          Send
+        </button>
+      </div>
+    </div>
   </div>
 </template>
 

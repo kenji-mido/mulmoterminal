@@ -56,7 +56,7 @@ export function parsePickerOutput(stdout: string): string[] {
 }
 
 interface PickFileOptions {
-  isAllowedOrigin: (origin?: string) => boolean;
+  isAllowedOrigin: (origin?: string, host?: string) => boolean;
 }
 
 // POST /api/pick-file — open the OS file dialog and return the chosen absolute
@@ -65,7 +65,7 @@ interface PickFileOptions {
 // { paths: [] }. Same-origin guarded like the other local-action routes.
 export function mountPickFileRoute(app: Express, { isAllowedOrigin }: PickFileOptions) {
   app.post("/api/pick-file", (req: Request, res) => {
-    if (!isAllowedOrigin(req.headers.origin)) return res.status(403).json({ error: "forbidden origin" });
+    if (!isAllowedOrigin(req.headers.origin, req.headers.host)) return res.status(403).json({ error: "forbidden origin" });
     const directory = isRecord(req.body) && req.body.directory === true;
     const { cmd, args } = pickFileCommand(process.platform, directory);
     const child = spawn(cmd, args, { stdio: ["ignore", "pipe", "pipe"] });

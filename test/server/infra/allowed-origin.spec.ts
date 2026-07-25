@@ -113,4 +113,36 @@ describe("isAllowedOrigin", () => {
       expect(isAllowedOrigin(origin)).toBe(false);
     });
   });
+
+  // Remote use (a phone over Tailscale, an SSH port-forward): the page is served BY this
+  // server, so its Origin equals the Host the request arrived on. Passing that Host lets the
+  // exact-match case through WITHOUT widening the cross-site hole — a hostile page's Origin
+  // is its own domain, which never equals our Host.
+  describe("a remote origin matching the request's own Host is allowed", () => {
+    // The scheme is never consulted (as the refused-origin cases above rely on too), so these
+    // carry https to keep the linter happy; the host:port is the whole decision.
+    it("allows a Tailscale IP page hitting the same IP:port", () => {
+      expect(isAllowedOrigin("https://100.64.0.1:34567", "100.64.0.1:34567")).toBe(true);
+    });
+
+    it("allows a MagicDNS name page hitting the same host:port", () => {
+      expect(isAllowedOrigin("https://phoenix.tail1234.ts.net:34567", "phoenix.tail1234.ts.net:34567")).toBe(true);
+    });
+
+    it("matches the host case-insensitively", () => {
+      expect(isAllowedOrigin("https://Phoenix.Local:34567", "phoenix.local:34567")).toBe(true);
+    });
+
+    it("still refuses a cross-site page even when a Host is present (Origin != Host)", () => {
+      expect(isAllowedOrigin("https://evil.com", "100.64.0.1:34567")).toBe(false);
+    });
+
+    it("is port-sensitive — a different port is a different origin", () => {
+      expect(isAllowedOrigin("https://phoenix.local:9999", "phoenix.local:34567")).toBe(false);
+    });
+
+    it("ignores the Host for a loopback origin, which is allowed on its own", () => {
+      expect(isAllowedOrigin("http://localhost:34567", "example.com")).toBe(true);
+    });
+  });
 });

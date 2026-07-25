@@ -14,11 +14,14 @@ import PrsOverlay from "./components/PrsOverlay.vue";
 import FilesOverlay from "./components/FilesOverlay.vue";
 import GridView from "./components/GridView.vue";
 import AppSettingsModal from "./components/AppSettingsModal.vue";
+import FilePickerHost from "./components/FilePickerHost.vue";
+import ConfirmDialog from "./components/ConfirmDialog.vue";
 import AppToolbar from "./components/AppToolbar.vue";
 import { useSessions, type Filter } from "./composables/useSessions";
 import { browseClose } from "./composables/useCollectionBrowse";
 import { registerChatOpener, startCollectionChat } from "./composables/useChatLauncher";
 import { useAppConfig } from "./composables/useAppConfig";
+import { isTouchDevice } from "./composables/touchDevice";
 import { useDirConfig } from "./composables/useDirConfig";
 import { useFaviconState } from "./composables/useFaviconState";
 import { usePendingScript, type PendingCommand } from "./composables/usePendingScript";
@@ -178,6 +181,18 @@ function toggleLayout() {
   layout.value = layout.value === "vertical" ? "horizontal" : "vertical";
 }
 
+const touchDevice = isTouchDevice();
+// Two SEPARATE responsive decisions:
+//  • compactSessions — drop the 260px sidebar for the compact top-tab layout, but ONLY when the
+//    width truly can't fit the sidebar next to a usable terminal (a phone / a folded foldable).
+//    Above 640px the user keeps their vertical-sidebar preference.
+//  • fillTerminal — give the terminal the full width (hide the GUI/Canvas panel + splitter) on a
+//    phone AND on a touch device up to tablet width: an UNFOLDED foldable (~700–850px) still
+//    wants the terminal to fill rather than share with the Canvas — WITHOUT losing the sidebar.
+const compactSessions = computed(() => viewportWidth.value < 640);
+const fillTerminal = computed(() => viewportWidth.value < 640 || (touchDevice && viewportWidth.value < 1024));
+const effectiveLayout = computed<Layout>(() => (compactSessions.value ? "horizontal" : layout.value));
+
 // Tools pane visibility, persisted across reloads (mirrors MulmoClaude's
 // right-sidebar toggle).
 const showTools = ref(localStorage.getItem("tools_pane_visible") === "true");
@@ -207,6 +222,41 @@ function selectSession(id: string, agent: "claude" | "codex" = "claude") {
   singleAgent.value = agent; // resume the row's agent (codex rows reconnect via /ws/codex)
   activeId.value = id;
   connectKey.value++;
+}
+
+// Remove a session from the sidebar list: the server persists the hide and reaps it (the
+// transcript stays, so `claude --resume` keeps it). Drop the open view if it was the active
+// one, then refresh so the row disappears.
+async function hideSession(id: string) {
+  if (id === activeId.value) {
+    activeId.value = null;
+    clearDraftHint();
+  }
+  try {
+    await fetch(`/api/session/${encodeURIComponent(id)}/hide`, { method: "POST" });
+  } catch {
+    // best-effort — a failed hide just leaves the row; the refresh below reflects reality
+  }
+  await refresh();
+}
+
+// Permanent delete goes through a confirmation (it removes the transcript — irreversible).
+// The 🗑 parks the id; the ConfirmDialog's confirm runs the delete.
+const pendingDeleteId = ref<string | null>(null);
+async function confirmDelete() {
+  const id = pendingDeleteId.value;
+  pendingDeleteId.value = null;
+  if (!id) return;
+  if (id === activeId.value) {
+    activeId.value = null;
+    clearDraftHint();
+  }
+  try {
+    await fetch(`/api/session/${encodeURIComponent(id)}/delete`, { method: "POST" });
+  } catch {
+    // best-effort — the refresh below reflects whatever actually got removed
+  }
+  await refresh();
 }
 
 // A transient "preparing your draft…" hint, shown over the terminal while a draft
@@ -285,11 +335,13 @@ function onSession(id: string) {
   <KeepAlive>
     <GridView v-if="isGrid" />
   </KeepAlive>
-  <div v-if="!isGrid" class="flex h-screen w-screen flex-col overflow-hidden">
+  <!-- 100dvh, not h-screen (100vh): on mobile the address bar makes the visual viewport shorter
+       than 100vh, so a 100vh column runs its bottom (the terminal's key bar) below the fold. -->
+  <div v-if="!isGrid" class="flex h-[100dvh] w-screen flex-col overflow-hidden">
     <AppToolbar @settings="showSettings = true" />
-    <div :class="['flex min-h-0 w-full flex-1 overflow-hidden', layout === 'horizontal' ? 'flex-col' : 'flex-row']">
+    <div :class="['flex min-h-0 w-full flex-1 overflow-hidden', effectiveLayout === 'horizontal' ? 'flex-col' : 'flex-row']">
       <Sidebar
-        v-if="layout === 'vertical'"
+        v-if="effectiveLayout === 'vertical'"
         v-model:filter="filter"
         :sessions="sessions"
         :loading="loading"
@@ -300,6 +352,8 @@ function onSession(id: string) {
         @new-codex="newCodexSession"
         @toggle-layout="toggleLayout"
         @refresh="refresh"
+        @hide="hideSession"
+        @delete="pendingDeleteId = $event"
       />
       <SessionTabBar
         v-else
@@ -311,6 +365,8 @@ function onSession(id: string) {
         @new-codex="newCodexSession"
         @toggle-layout="toggleLayout"
         @refresh="refresh"
+        @hide="hideSession"
+        @delete="pendingDeleteId = $event"
       />
       <div class="relative flex min-h-0 min-w-0 flex-1">
         <Transition
@@ -331,7 +387,7 @@ function onSession(id: string) {
         <TerminalView
           ref="terminalRef"
           class="min-w-0"
-          :style="{ flex: `0 0 ${terminalWidth}px` }"
+          :style="fillTerminal ? { flex: '1 1 0%' } : { flex: `0 0 ${terminalWidth}px` }"
           persist-key="single"
           :session-id="activeId"
           :codex="singleAgent === 'codex'"
@@ -349,6 +405,7 @@ function onSession(id: string) {
           @run="onRunScript"
         />
         <div
+          v-if="!fillTerminal"
           class="shrink-0 grow-0 basis-[5px] cursor-col-resize border-l border-r border-border bg-panel hover:bg-hover focus-visible:bg-accent focus-visible:outline-none"
           role="separator"
           tabindex="0"
@@ -361,8 +418,8 @@ function onSession(id: string) {
           @mousedown="startDrag"
           @keydown="onSplitterKey"
         />
-        <GuiPanel :session-id="activeId" :send-text-message="sendTextMessage" :tools-open="showTools" @toggle-tools="toggleTools" />
-        <ToolsPane v-if="showTools" :session-id="activeId" @close="toggleTools" />
+        <GuiPanel v-if="!fillTerminal" :session-id="activeId" :send-text-message="sendTextMessage" :tools-open="showTools" @toggle-tools="toggleTools" />
+        <ToolsPane v-if="showTools && !fillTerminal" :session-id="activeId" @close="toggleTools" />
       </div>
     </div>
     <!-- Full-screen collection browser; shown when the launcher / an index card / a
@@ -380,4 +437,17 @@ function onSession(id: string) {
     <FilesOverlay />
     <AppSettingsModal v-if="showSettings" :cwd="effectiveCwd" :session-id="activeId" @configure-appearance="configureAppearance" @close="closeSettings" />
   </div>
+  <!-- App-wide in-browser file picker (the 📎 attach-file button). OUTSIDE the !isGrid block so
+       it's mounted in grid mode too — a grid cell's 📎 opens it as a modal over the grid. It
+       replaces the native OS dialog, which would otherwise open on the server's screen. -->
+  <FilePickerHost />
+  <ConfirmDialog
+    v-if="pendingDeleteId"
+    title="Delete session permanently?"
+    message="This removes the conversation transcript from disk. It can't be undone, and the session will no longer be resumable."
+    confirm-label="Delete"
+    danger
+    @confirm="confirmDelete"
+    @cancel="pendingDeleteId = null"
+  />
 </template>

@@ -7,8 +7,8 @@ import { isRecord } from "../session/transcript.js";
 // absolute, existing. Returns the directory, or null after sending the matching
 // error response — so the caller just does `const dir = resolveDirRequest(...); if (!dir) return;`.
 // Shared by the local-only /api/open-dir and /api/git-remote routes.
-export function resolveDirRequest(req: Request, res: Response, isAllowedOrigin: (origin?: string) => boolean): string | null {
-  if (!isAllowedOrigin(req.headers.origin)) {
+export function resolveDirRequest(req: Request, res: Response, isAllowedOrigin: (origin?: string, host?: string) => boolean): string | null {
+  if (!isAllowedOrigin(req.headers.origin, req.headers.host)) {
     res.status(403).json({ error: "forbidden origin" });
     return null;
   }
