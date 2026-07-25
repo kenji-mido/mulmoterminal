@@ -8,6 +8,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { writeFileAtomic } from "../files/atomic-write.js";
 
 const FILE = path.join(os.homedir(), ".mulmoterminal", "hidden-sessions.json");
 
@@ -22,13 +23,10 @@ function load(): Set<string> {
 
 const hidden = load();
 
+// Atomic (temp + rename) and best-effort — a failed persist just means the hide doesn't
+// survive a restart; the in-memory set already reflects it for this process.
 function save(): void {
-  try {
-    fs.mkdirSync(path.dirname(FILE), { recursive: true });
-    fs.writeFileSync(FILE, JSON.stringify([...hidden]));
-  } catch {
-    // best-effort — a failed persist just means the hide doesn't survive a restart
-  }
+  writeFileAtomic(FILE, JSON.stringify([...hidden])).catch(() => {});
 }
 
 export function isUserHidden(id: string): boolean {

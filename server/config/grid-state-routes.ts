@@ -13,16 +13,16 @@
 // desktop and a phone converge rather than needing per-client merge.
 import os from "node:os";
 import path from "node:path";
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import type { Express, Request } from "express";
+import { isRecord } from "../session/transcript.js";
+import { writeFileAtomic } from "../files/atomic-write.js";
 
 const GRID_STATE_FILE = path.join(os.homedir(), ".mulmoterminal", "grid-state.json");
 
 // A grid is at most 81 cells of small records; 256 KB is generous headroom and still
 // bounds what a client can make us parse and hold.
 const MAX_BODY_BYTES = 256 * 1024;
-
-const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null;
 
 // The minimal envelope check: a real GridState always carries a `cells` array. Anything
 // else (a truncated body, a stray POST) is rejected rather than persisted, so a later GET
@@ -41,10 +41,10 @@ function readGridState(): unknown | null {
   }
 }
 
-function writeGridState(state: unknown): boolean {
+// Atomic (temp + rename) so a crash mid-write can't leave a truncated grid behind.
+async function writeGridState(state: unknown): Promise<boolean> {
   try {
-    mkdirSync(path.dirname(GRID_STATE_FILE), { recursive: true });
-    writeFileSync(GRID_STATE_FILE, JSON.stringify(state));
+    await writeFileAtomic(GRID_STATE_FILE, JSON.stringify(state));
     return true;
   } catch {
     return false;
@@ -69,12 +69,12 @@ export function mountGridStateRoutes(app: Express, { isAllowedOrigin, publish }:
     res.json({ state: readGridState() });
   });
 
-  app.post("/api/grid-state", (req: Request, res) => {
+  app.post("/api/grid-state", async (req: Request, res) => {
     if (!isAllowedOrigin(req.headers.origin, req.headers.host)) return res.status(403).json({ error: "forbidden origin" });
     const body = isRecord(req.body) ? req.body.state : undefined;
     if (!looksLikeGridState(body)) return res.status(400).json({ error: "state must be a grid object with a cells array" });
     if (Buffer.byteLength(JSON.stringify(body)) > MAX_BODY_BYTES) return res.status(413).json({ error: "grid state too large" });
-    if (!writeGridState(body)) return res.status(500).json({ error: "failed to persist grid state" });
+    if (!(await writeGridState(body))) return res.status(500).json({ error: "failed to persist grid state" });
     publish(GRID_STATE_CHANNEL, body);
     res.json({ ok: true });
   });

@@ -19,8 +19,16 @@ export function parseServerGridState(state: unknown): GridState | null {
 // drops the transient launch/command cells and renumbers uids). Sync keys off this so opening
 // the launcher's "+" cell — which adds a session-less cell — is NOT a change to broadcast, and
 // a peer's echo can't wipe that half-filled cell back out.
+//
+// The raw variant takes an already-stringified grid, so a caller that just serialized the
+// state (persist writes it to localStorage anyway) doesn't stringify it a second time.
+export function normalizeRawGridJson(raw: string): string {
+  const parsed = parseGridState(raw);
+  return parsed ? JSON.stringify(parsed) : raw;
+}
+
 export function normalizedGridJson(state: GridState): string {
-  return JSON.stringify(parseGridState(JSON.stringify(state)) ?? state);
+  return normalizeRawGridJson(JSON.stringify(state));
 }
 
 // Fetch the shared grid, or null when nothing is saved / the request fails.

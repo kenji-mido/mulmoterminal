@@ -38,7 +38,7 @@ import {
   resolveCellStatus,
   MAX_TERMINALS,
 } from "./gridTabs";
-import { fetchServerGridState, saveServerGridState, parseServerGridState, normalizedGridJson } from "./gridStateServer";
+import { fetchServerGridState, saveServerGridState, parseServerGridState, normalizedGridJson, normalizeRawGridJson } from "./gridStateServer";
 import { rosterCellsKey, staleCacheKeys } from "./rosterCache";
 import type { RunCommand } from "./runCommand";
 import { EMPTY_SESSION_META, isPrPhase, mergeSessionMeta, type PrPhase, type WorkPhase } from "./rosterPhase";
@@ -65,8 +65,9 @@ const state = ref<GridState>(init.state);
 // e.g. the half-filled "+" launcher) is neither broadcast nor clobbered by our own echo.
 let lastSyncedNorm = "";
 const persist = () => {
-  localStorage.setItem(STATE_KEY, JSON.stringify(state.value));
-  const norm = normalizedGridJson(state.value);
+  const raw = JSON.stringify(state.value);
+  localStorage.setItem(STATE_KEY, raw);
+  const norm = normalizeRawGridJson(raw); // reuse the serialization localStorage needed anyway
   if (norm !== lastSyncedNorm) {
     lastSyncedNorm = norm;
     saveServerGridState(state.value); // mirror so every open browser applies it live
@@ -83,14 +84,12 @@ watch(state, persist, { deep: true });
 // Adopt a server grid when its SESSION cells differ from ours. Comparing normalized forms makes
 // our own echo — and a peer update that leaves the session set unchanged — a no-op, so a launch
 // cell we're mid-edit is never disturbed. `server` is already normalized (parseServerGridState).
+// lastSyncedNorm is set either way (before the deferred watch flush runs persist), so what we
+// just adopted is never re-broadcast.
 function adoptGrid(server: GridState) {
   const json = JSON.stringify(server);
-  if (json === normalizedGridJson(state.value)) {
-    lastSyncedNorm = json;
-    return;
-  }
+  if (json !== normalizedGridJson(state.value)) state.value = server;
   lastSyncedNorm = json;
-  state.value = server;
 }
 
 // Every browser shows the SAME grid: on load take the server's grid if it has one, else seed
