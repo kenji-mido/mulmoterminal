@@ -10,6 +10,7 @@ import { sanitizePtyEnv } from "../infra/pty-env.js";
 import { resolvePtyLaunchForEnv } from "../infra/resolve-bin.js";
 import { withoutUnset } from "./provider-env.js";
 import { tmuxAvailable, tmuxNewSessionArgs, tmuxScrubEnvNames } from "../infra/tmux.js";
+import { PrivateModeTracker } from "./terminal-replay.js";
 import {
   sandboxEnabled,
   sandboxPlatformSupported,
@@ -79,5 +80,5 @@ export function spawnSandboxEntry(sessionId: string, claudeArgs: string[], cwd: 
     console.warn("[sandbox] no Claude credential found in the macOS Keychain — the container may be unauthenticated. Run `claude` on the host to log in.");
   const term = spawnPty("docker", buildDockerRunArgs(sessionId, claudeArgs, cwd, claudeConfig, credentials), cwd);
   console.log(`[pty] spawned claude (pid=${term.pid} via docker sandbox) in ${cwd}`);
-  return { term, ws, buffer: "", cwd, sandbox: true, active: false, agent: "claude" };
+  return { term, ws, buffer: "", modes: new PrivateModeTracker(), cwd, sandbox: true, active: false, agent: "claude" };
 }

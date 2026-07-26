@@ -9,7 +9,7 @@ import { launcherAt, shellInvocation } from "./shell-command.js";
 import { ptys } from "./registry.js";
 import { ptySpawn, spawnPty } from "./pty-spawn.js";
 import { sendExitAndClose, sendFrame } from "./ws-frames.js";
-import { appendBoundedOutput } from "./terminal-replay.js";
+import { appendBoundedOutput, PrivateModeTracker } from "./terminal-replay.js";
 import type { PtyEntry } from "./types.js";
 import type { SpawnDeps } from "./spawn-deps.js";
 
@@ -50,11 +50,12 @@ export function createShellSpawners(deps: SpawnDeps) {
     const { term, tmux } = ptySpawn(sessionId, shell, args, cwd, true);
     console.log(`[pty] spawned launcher (pid=${term.pid}${tmux ? " via tmux" : ""}) in ${cwd}: ${command}`);
 
-    const entry: PtyEntry = { term, ws, buffer: "", cwd, tmux, active: false, agent: "shell" };
+    const entry: PtyEntry = { term, ws, buffer: "", modes: new PrivateModeTracker(), cwd, tmux, active: false, agent: "shell" };
     ptys.set(sessionId, entry);
 
     term.onData((data) => {
       entry.buffer = appendBoundedOutput(entry.buffer, data, deps.outputBufferLimit);
+      entry.modes.feed(data);
       sendFrame(entry.ws, { type: "output", data });
     });
     term.onExit(({ exitCode, signal }) => {

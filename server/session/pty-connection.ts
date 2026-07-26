@@ -68,7 +68,11 @@ export function createConnectionHandlers(deps: ConnectionDeps) {
     if (entry.buffer && ws.readyState === ws.OPEN) {
       // Strip terminal queries from the replay so xterm doesn't re-answer them as stray input
       // (e.g. a DA reply surfacing as "0;276;0c" in the prompt) — see terminal-replay.ts.
-      ws.send(JSON.stringify({ type: "output", data: stripTerminalQueries(entry.buffer) }));
+      // Lead with the live private modes (alt screen, mouse tracking, cursor keys…): the app
+      // set them ONCE at startup, so a chatty session's bounded tail no longer carries them —
+      // without this a reattached browser gets the screen but not the state, and wheel/touch
+      // scrolling and arrow encoding silently break on exactly the long-lived sessions.
+      ws.send(JSON.stringify({ type: "output", data: entry.modes.preamble() + stripTerminalQueries(entry.buffer) }));
     }
     return entry;
   }

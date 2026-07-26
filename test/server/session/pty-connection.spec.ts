@@ -1,6 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { createConnectionHandlers, handleCommandFrame } from "../../../server/session/pty-connection.js";
 import type { PtyEntry } from "../../../server/session/types.js";
+import { PrivateModeTracker } from "../../../server/session/terminal-replay.js";
 
 const OPEN = 1;
 const CLOSED = 3;
@@ -60,7 +61,7 @@ function setup() {
 // PtyEntry carries fields these handlers never touch; the fakes model the ones they do.
 function entryWith(over: Partial<PtyEntry> = {}) {
   const { term } = fakeTerm();
-  return { term, ws: null, buffer: "", cwd: "/ws", active: false, agent: "claude", ...over } as unknown as PtyEntry;
+  return { term, ws: null, buffer: "", modes: new PrivateModeTracker(), cwd: "/ws", active: false, agent: "claude", ...over } as unknown as PtyEntry;
 }
 
 describe("handleClientFrame", () => {
@@ -241,6 +242,16 @@ describe("reattachPty", () => {
     const entry = entryWith({ ws: null, buffer: "previous output" });
     reattachPty(entry, s.ws as never, SESSION);
     expect(s.parsed()).toEqual([{ type: "output", data: "previous output" }]);
+  });
+
+  it("re-asserts the tracked private modes ahead of the tail — a long session's tail no longer carries them", () => {
+    const { reattachPty } = setup();
+    const s = fakeSocket();
+    const modes = new PrivateModeTracker();
+    modes.feed("\x1b[?1049h\x1b[?1000;1006h\x1b[?1h"); // tmux's startup SETs, long since out of the tail
+    const entry = entryWith({ ws: null, buffer: "screen tail", modes });
+    reattachPty(entry, s.ws as never, SESSION);
+    expect(s.parsed()[0].data).toBe("\x1b[?1049h\x1b[?1h\x1b[?1000h\x1b[?1006h" + "screen tail");
   });
 
   it("strips terminal queries from the replay so xterm does not answer them as input", () => {
