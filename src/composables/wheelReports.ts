@@ -44,3 +44,35 @@ export function wheelReportSequence(deltaY: number, col: number, row: number): s
   const button = deltaY < 0 ? 64 : 65;
   return `\x1b[<${button};${col};${row}M`;
 }
+
+/** The touch half of the wheel repair: a phone has no wheel, so a vertical drag on the
+ *  terminal is converted into the same wheel steps the desktop wheel produces. This tracker
+ *  turns a stream of touch Y positions into whole wheel steps — POSITIVE = wheel-down (the
+ *  finger moved UP, pulling later content into view, matching natural touch scrolling) — and
+ *  carries the sub-step remainder so a slow drag still adds up instead of being truncated
+ *  away move by move. */
+export class TouchScrollTracker {
+  private lastY: number | null = null;
+  private carry = 0;
+
+  start(y: number): void {
+    this.lastY = y;
+    this.carry = 0;
+  }
+
+  /** Feed the next Y position; returns the wheel steps to emit for this move (0 while the
+   *  accumulated drag is still shorter than one line of `linePx` pixels). */
+  move(y: number, linePx: number): number {
+    if (this.lastY === null || linePx <= 0) return 0;
+    this.carry += this.lastY - y;
+    this.lastY = y;
+    const steps = Math.trunc(this.carry / linePx);
+    this.carry -= steps * linePx;
+    return steps;
+  }
+
+  end(): void {
+    this.lastY = null;
+    this.carry = 0;
+  }
+}

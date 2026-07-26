@@ -20,7 +20,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { ClipboardAddon, type IClipboardProvider } from "@xterm/addon-clipboard";
 import { swallowsMouseTracking } from "./mouseTrackingModes";
-import { clearResetModes, recordSwallowedModes, wantsWheelReports, wheelReportSequence } from "./wheelReports";
+import { clearResetModes, recordSwallowedModes, TouchScrollTracker, wantsWheelReports, wheelReportSequence } from "./wheelReports";
 import { CanvasAddon } from "@xterm/addon-canvas";
 import "@xterm/xterm/css/xterm.css";
 import { connWsUrl, type LaunchChoice } from "../components/wsUrl";
@@ -216,6 +216,45 @@ function guardMouseTracking(term: Terminal, swallowedMouseModes: Set<number>): v
   });
 }
 
+// The touch counterpart of the custom wheel handler above: a phone has no wheel, so when the
+// swallowed alt-buffer app asked for wheel tracking (Claude's transcript), a one-finger
+// vertical drag on the terminal is converted into the same SGR wheel reports — one per line
+// height of movement, remainder carried (TouchScrollTracker). Outside that case the touch is
+// left alone: the normal buffer keeps xterm's own gesture scrolling of the scrollback.
+// preventDefault only fires while reports are being synthesized, so a plain tap still
+// focuses the terminal and raises the soft keyboard.
+function wireTouchScroll(term: Terminal, host: HTMLDivElement, swallowedMouseModes: Set<number>): void {
+  const tracker = new TouchScrollTracker();
+  const converting = () => term.buffer.active.type === "alternate" && wantsWheelReports(swallowedMouseModes);
+  // The rendered line height, read per event — the font size is fixed but the element only
+  // exists after open(), and a resize refits rows.
+  const linePx = () => (term.element && term.rows > 0 ? Math.max(8, term.element.clientHeight / term.rows) : 16);
+  host.addEventListener(
+    "touchstart",
+    (ev) => {
+      if (converting() && ev.touches.length === 1) tracker.start(ev.touches[0].clientY);
+      else tracker.end(); // a second finger (pinch) hands the gesture back to the browser
+    },
+    { passive: true },
+  );
+  host.addEventListener(
+    "touchmove",
+    (ev) => {
+      if (!converting() || ev.touches.length !== 1) return tracker.end();
+      const steps = tracker.move(ev.touches[0].clientY, linePx());
+      for (let i = Math.abs(steps); i > 0; i--) {
+        const seq = wheelReportSequence(steps, 1, 1);
+        if (seq) term.input(seq, false);
+      }
+      ev.preventDefault(); // the app consumes the drag — don't also rubber-band the page
+    },
+    { passive: false },
+  );
+  const stop = () => tracker.end();
+  host.addEventListener("touchend", stop);
+  host.addEventListener("touchcancel", stop);
+}
+
 // Terminal input -> the slot's CURRENT socket (survives reconnects: `c.ws` is re-read
 // each keystroke, so input always targets the live socket). The Enter-family key handler
 // rides the same socket: keys whose bytes differ from xterm's native \r (per the user's
@@ -281,6 +320,7 @@ function ensure(key: string, target: ConnTarget): Conn {
   const host = document.createElement("div");
   host.style.width = "100%";
   host.style.height = "100%";
+  wireTouchScroll(term, host, swallowedMouseModes);
   term.open(host);
   // Render each glyph in its own cell (canvas) instead of the default DOM renderer, which flows text
   // as inline runs: a full-width CJK glyph that isn't exactly 2× the Latin cell lets a long Japanese
