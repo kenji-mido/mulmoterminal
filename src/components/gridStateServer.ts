@@ -31,15 +31,21 @@ export function normalizedGridJson(state: GridState): string {
   return normalizeRawGridJson(JSON.stringify(state));
 }
 
-// Fetch the shared grid, or null when nothing is saved / the request fails.
-export async function fetchServerGridState(): Promise<GridState | null> {
+// Fetch the shared grid. "The server has no saved grid" (ok + null state — the caller may
+// seed it) is a DIFFERENT answer from "the request failed" (ok:false — a flaky link over
+// Tailscale, a 5xx): a fresh browser whose first GET merely failed must NOT conclude the
+// server is empty and seed its own empty grid, which would broadcast and wipe every open
+// browser's cells. A saved-but-unparsable blob counts as "no saved grid" — overwriting
+// garbage with a valid seed is fine.
+export type GridStateFetch = { ok: true; state: GridState | null } | { ok: false };
+export async function fetchServerGridState(): Promise<GridStateFetch> {
   try {
     const res = await fetch("/api/grid-state");
-    if (!res.ok) return null;
+    if (!res.ok) return { ok: false };
     const body = await res.json();
-    return parseServerGridState(body?.state);
+    return { ok: true, state: parseServerGridState(body?.state) };
   } catch {
-    return null;
+    return { ok: false };
   }
 }
 

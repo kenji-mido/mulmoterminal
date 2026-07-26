@@ -94,13 +94,26 @@ function adoptGrid(server: GridState) {
 
 // Every browser shows the SAME grid: on load take the server's grid if it has one, else seed
 // the server from this browser's local grid. Then live updates (below) keep them identical.
-void fetchServerGridState().then((server) => {
-  if (server) adoptGrid(server);
-  else {
-    lastSyncedNorm = normalizedGridJson(state.value);
-    saveServerGridState(state.value);
-  }
-});
+// Seeding is gated on a SUCCESSFUL "nothing saved" answer — after a mere fetch failure this
+// browser can't know the shared grid is empty, and seeding blind would broadcast an empty
+// grid over everyone's cells. A failed load retries instead (a phone's first GET over a
+// flaky link often fails once, and the pubsub refetch below only covers RE-connects).
+let loadRetryTimer: ReturnType<typeof setTimeout> | null = null;
+function loadSharedGrid() {
+  loadRetryTimer = null;
+  void fetchServerGridState().then((r) => {
+    if (!r.ok) {
+      loadRetryTimer = setTimeout(loadSharedGrid, 3000);
+      return;
+    }
+    if (r.state) adoptGrid(r.state);
+    else {
+      lastSyncedNorm = normalizedGridJson(state.value);
+      saveServerGridState(state.value);
+    }
+  });
+}
+loadSharedGrid();
 
 // Live sync: apply a grid another browser/tab published. The echo of our own change matches
 // what we already show and is skipped inside adoptGrid. A socket reconnect can miss events, so
@@ -111,11 +124,12 @@ const unsubscribeGridState = pubsub.subscribe("grid-state", (data) => {
   if (remote) adoptGrid(remote);
 });
 const offGridReconnect = pubsub.onReconnect(() => {
-  void fetchServerGridState().then((server) => server && adoptGrid(server));
+  void fetchServerGridState().then((r) => r.ok && r.state && adoptGrid(r.state));
 });
 onBeforeUnmount(() => {
   unsubscribeGridState();
   offGridReconnect();
+  if (loadRetryTimer) clearTimeout(loadRetryTimer);
 });
 
 // Feed the tab-close guard: warn on close/reload while any cell runs a session or
