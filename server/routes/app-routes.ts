@@ -52,6 +52,8 @@ import type { createCodexSpawner } from "../session/spawn-codex.js";
 import type { createTranslationWorker } from "../session/translation-worker.js";
 import type { createTitleManager } from "../session/session-title.js";
 import { tmuxHasSession, tmuxKillSession, tmuxListSessionIds, tmuxAttachedClientCount } from "../infra/tmux.js";
+import { hideSessionId } from "../session/hidden-store.js";
+import { deleteSessionTranscripts } from "../session/transcript-delete.js";
 import { resumableSessionPredicate } from "../session/resumable-sessions.js";
 import { SPA_FALLBACK_RE } from "../infra/spa-fallback.js";
 
@@ -286,5 +288,7 @@ function mountSessionFacingRoutes(app: Express, deps: AppRouteDeps): void {
     listTmuxIds: tmuxListSessionIds,
     attachedClientCount: tmuxAttachedClientCount,
     resumablePredicate: resumableSessionPredicate,
+    hideSession: hideSessionId,
+    deleteTranscripts: deleteSessionTranscripts,
   });
 }

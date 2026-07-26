@@ -27,14 +27,16 @@ type Handler = (req: { headers: { origin?: string }; params: { id?: string } }, 
 
 // Mount with the given deps and hand back the two handlers by path — no HTTP server
 // needed (mirrors gitRemote.spec's capture pattern).
-function mountAndCapture(deps: TmuxRouteDeps): { terminate: Handler; cleanup: Handler } {
+function mountAndCapture(deps: TmuxRouteDeps): { terminate: Handler; cleanup: Handler; hide: Handler; del: Handler } {
   const handlers = new Map<string, Handler>();
   const app = { post: (p: string, h: Handler) => handlers.set(p, h) } as unknown as Express;
   mountTmuxRoutes(app, deps);
   const terminate = handlers.get("/api/session/:id/terminate");
   const cleanup = handlers.get("/api/tmux/cleanup-orphans");
-  if (!terminate || !cleanup) throw new Error("routes were not mounted");
-  return { terminate, cleanup };
+  const hide = handlers.get("/api/session/:id/hide");
+  const del = handlers.get("/api/session/:id/delete");
+  if (!terminate || !cleanup || !hide || !del) throw new Error("routes were not mounted");
+  return { terminate, cleanup, hide, del };
 }
 
 const UUID = "01234567-89ab-cdef-0123-456789abcdef";
@@ -49,9 +51,63 @@ function baseDeps(over: Partial<TmuxRouteDeps> = {}): TmuxRouteDeps {
     listTmuxIds: () => [],
     attachedClientCount: () => 0, // nobody else attached, by default
     resumablePredicate: async () => () => false,
+    hideSession: vi.fn(),
+    deleteTranscripts: vi.fn(() => true),
     ...over,
   };
 }
+
+describe("mountTmuxRoutes — POST /api/session/:id/hide and /delete", () => {
+  it("hide persists the hide and reaps, but never touches the transcript", async () => {
+    const hideSession = vi.fn();
+    const deleteTranscripts = vi.fn(() => true);
+    const reapSession = vi.fn();
+    const { hide } = mountAndCapture(baseDeps({ hideSession, deleteTranscripts, reapSession }));
+    const res = makeRes();
+    await hide({ headers: {}, params: { id: UUID } }, res);
+    expect(hideSession).toHaveBeenCalledWith(UUID);
+    expect(reapSession).toHaveBeenCalledWith(UUID);
+    expect(deleteTranscripts).not.toHaveBeenCalled();
+    expect(res.payload).toEqual({ ok: true });
+  });
+
+  it("delete waits for the tmux session to be gone before unlinking — a dying agent's last flush must not resurrect the row", async () => {
+    vi.useFakeTimers();
+    try {
+      const deleteTranscripts = vi.fn(() => true);
+      let hasTmuxCalls = 0;
+      // Call 1 is the direct-kill check; the poll then sees it alive twice before it's gone.
+      const { del } = mountAndCapture(baseDeps({ deleteTranscripts, hasTmux: () => ++hasTmuxCalls <= 3 }));
+      const res = makeRes();
+      const done = del({ headers: {}, params: { id: UUID } }, res) as Promise<unknown>;
+      expect(deleteTranscripts).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(100); // poll 1: still alive
+      expect(deleteTranscripts).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(100); // poll 2: gone -> unlink
+      await done;
+      expect(deleteTranscripts).toHaveBeenCalledTimes(1);
+      expect(res.payload).toEqual({ ok: true, removed: true });
+      await vi.advanceTimersByTimeAsync(2000); // the straggler sweep re-deletes
+      expect(deleteTranscripts).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("delete on an already-idle session (no tmux) unlinks immediately", async () => {
+    vi.useFakeTimers();
+    try {
+      const deleteTranscripts = vi.fn(() => false);
+      const { del } = mountAndCapture(baseDeps({ deleteTranscripts, hasTmux: () => false }));
+      const res = makeRes();
+      await del({ headers: {}, params: { id: UUID } }, res);
+      expect(deleteTranscripts).toHaveBeenCalledTimes(1);
+      expect(res.payload).toEqual({ ok: true, removed: false });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
 
 describe("mountTmuxRoutes — POST /api/session/:id/terminate", () => {
   it("rejects a disallowed origin with 403 and reaps nothing", async () => {

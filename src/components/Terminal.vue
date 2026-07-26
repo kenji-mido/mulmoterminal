@@ -289,8 +289,12 @@ onActivated(() => {
 // session while another cell adopts it, and the two evict each other (superseded ping-pong).
 // The guard (`!== slotSessionId`) skips the benign null→id case: the slot just learned its own
 // freshly-minted id, which is already what it's connected as — reconnecting there would be wrong.
+// A sessionId change alone only counts toward a DIFFERENT session: `null` without a
+// connectKey tick is a CLEARING (the open chat session was hidden/deleted), and retargeting
+// to it would connect session-less — i.e. silently spawn a fresh session nobody asked for.
+// A deliberate "start fresh" always ticks connectKey.
 watch([() => props.connectKey, () => props.sessionId], ([ck], [prevCk]) => {
-  if (ck === prevCk && props.sessionId === conn.slotSessionId(slotKey)) return;
+  if (ck === prevCk && (props.sessionId === null || props.sessionId === conn.slotSessionId(slotKey))) return;
   conn.retarget(slotKey, currentTarget());
   conn.focus(slotKey);
 });

@@ -124,6 +124,18 @@ describe("Terminal.vue — mobile input aids", () => {
     expect(FakeWS.instances.at(-1)?.url).toContain("session=sess-B");
   });
 
+  it("does NOT retarget when the sessionId is CLEARED to null (the open chat session was hidden/deleted)", async () => {
+    setKeys(false);
+    const w = mount(TerminalView, { props: props({ sessionId: "sess-gone" }) });
+    await flushPromises();
+    const before = FakeWS.instances.length;
+    // App.vue clears activeId after a hide/delete — no connectKey tick. Reconnecting
+    // session-less here would silently spawn a fresh session nobody asked for.
+    await w.setProps({ sessionId: null });
+    await flushPromises();
+    expect(FakeWS.instances).toHaveLength(before); // no new socket
+  });
+
   it("shows a Continue banner when a resumed session prints the deferred-tool prompt, and one tap sends 'continue'", async () => {
     setKeys(false);
     const w = mount(TerminalView, { props: props({ sessionId: "sess-stuck" }) });

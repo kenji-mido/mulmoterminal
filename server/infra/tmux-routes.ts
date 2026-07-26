@@ -1,6 +1,4 @@
 import type { Express } from "express";
-import { hideSessionId } from "../session/hidden-store.js";
-import { deleteSessionTranscripts } from "../session/transcript-delete.js";
 
 // Deps injected from index.ts so the origin guard, session-id validation, and the
 // orphan-selection boundary are unit-testable without booting the server (mirrors
@@ -20,7 +18,13 @@ export interface TmuxRouteDeps {
   // Build the resumability predicate for a cleanup pass (awaits any hydration, snapshots
   // the live / grid / on-disk sets). A tmux id is reaped only when it returns false.
   resumablePredicate: () => Promise<(id: string) => boolean>;
+  // Persist a user hide (hidden-store) / remove the session's transcripts (transcript-delete).
+  // Injected like the rest so the hide/delete routes are unit-testable.
+  hideSession: (id: string) => void;
+  deleteTranscripts: (id: string) => boolean;
 }
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // Whether an orphan tmux session is safe to reap. Not resumable is necessary but not
 // sufficient: a second mulmoterminal process may have just created it (no transcript yet)
@@ -52,7 +56,7 @@ export function mountTmuxRoutes(app: Express, deps: TmuxRouteDeps): void {
     if (!deps.isAllowedOrigin(req.headers.origin, req.headers.host)) return res.status(403).json({ error: "forbidden origin" });
     const id = req.params.id;
     if (!deps.isValidSessionId(id)) return res.status(400).json({ error: "invalid session id" });
-    hideSessionId(id);
+    deps.hideSession(id);
     deps.reapSession(id);
     if (deps.hasTmux(id)) deps.killTmux(id);
     return res.json({ ok: true });
@@ -61,13 +65,19 @@ export function mountTmuxRoutes(app: Express, deps: TmuxRouteDeps): void {
   // Permanently delete a session: reap it, then remove its transcript so it's gone from the
   // list AND from `claude --resume`. Destructive and irreversible — the client gates this
   // behind a confirmation. (Hiding is the non-destructive path above.)
-  app.post("/api/session/:id/delete", (req, res) => {
+  app.post("/api/session/:id/delete", async (req, res) => {
     if (!deps.isAllowedOrigin(req.headers.origin, req.headers.host)) return res.status(403).json({ error: "forbidden origin" });
     const id = req.params.id;
     if (!deps.isValidSessionId(id)) return res.status(400).json({ error: "invalid session id" });
     deps.reapSession(id);
     if (deps.hasTmux(id)) deps.killTmux(id);
-    const removed = deleteSessionTranscripts(id);
+    // A LIVE session's agent dies asynchronously and can flush one last transcript write
+    // AFTER an immediate unlink — resurrecting the row ("delete didn't work", sometimes).
+    // Wait (bounded) for the tmux session to actually be gone before deleting, and sweep
+    // once more shortly after for a straggler flush that still slipped past.
+    for (let waited = 0; deps.hasTmux(id) && waited < 20; waited++) await delay(100);
+    const removed = deps.deleteTranscripts(id);
+    setTimeout(() => deps.deleteTranscripts(id), 2000);
     return res.json({ ok: true, removed });
   });
 
