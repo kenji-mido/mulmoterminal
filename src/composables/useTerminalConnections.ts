@@ -644,8 +644,18 @@ export function attach(key: string, target: ConnTarget, handlers: ConnHandlers, 
   // never forward them, leaving the parent persisted as `session: null` and the
   // session unrestorable on reload. Only the new-vs-known case actually fires a
   // useful update; the parent's setters are idempotent for already-known values.
-  if (c.knownSessionId) handlers.onSession?.(c.knownSessionId);
-  if (c.knownCwd) handlers.onCwd?.(c.knownCwd);
+  //
+  // UNLESS the target names a DIFFERENT session: grid live-sync can renumber cells while
+  // this view is detached, so a slot can be reattached FOR another session. Replaying the
+  // old identity then overwrites the new cell's session upward (the grid persists what
+  // onSession reports), duplicating one session across two cells — which fight over it
+  // (mutual supersede) and show the same roster meta. Reconnect at the named session
+  // instead of replaying the stale one.
+  const staleIdentity = target.sessionId !== null && c.knownSessionId !== null && target.sessionId !== c.knownSessionId;
+  if (!staleIdentity) {
+    if (c.knownSessionId) handlers.onSession?.(c.knownSessionId);
+    if (c.knownCwd) handlers.onCwd?.(c.knownCwd);
+  }
   el.appendChild(c.host);
   if (theme) {
     c.theme = theme;
@@ -657,6 +667,7 @@ export function attach(key: string, target: ConnTarget, handlers: ConnHandlers, 
   // before it, not after.
   if (!sameFont(c.font, font)) applyFont(c, font);
   if (created) connect(c);
+  else if (staleIdentity) retarget(key, target);
   fitAndSyncSize(c);
   c.term.focus();
   // The persisted xterm was just re-parented into a new host. The sync fit() above can no-op (same size)
