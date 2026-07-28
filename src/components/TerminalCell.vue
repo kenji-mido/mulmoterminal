@@ -824,6 +824,35 @@ function onSession(id: string) {
   loadInitial(id);
 }
 
+// Grid live-sync can REASSIGN this cell to a different session (adoptGrid replaces the cells;
+// component instances are keyed by uid and reused). Internal state was seeded from the props
+// once at mount, so without this watch the cell would keep showing — and, via onSession's
+// emit, write back into the grid — its OLD session: two cells then converge on one session id
+// and show identical summary/prompt/reply in the roster. Adopting means: take the new
+// session's identity, drop every per-session badge (they belong to the old one), and bump
+// connectKey so the terminal slot retargets. The equality guard skips the echo of our own
+// launch (GridView writes the id this cell just emitted straight back into the prop).
+watch(
+  () => props.initialSessionId,
+  (next) => {
+    if (!next || next === sessionId.value) return;
+    sessionId.value = next;
+    launched.value = true;
+    agent.value = props.initialAgent === "codex" ? "codex" : "claude";
+    cwd.value = props.initialCwd ?? props.defaultCwd;
+    working.value = false;
+    waiting.value = false;
+    activityEvent.value = null;
+    lastPrompt.value = null;
+    aiTitle.value = null;
+    usage.value = null;
+    context.value = null;
+    diff.value = null;
+    connectKey.value++;
+    loadInitial(next);
+  },
+);
+
 // ~-anchored, front-truncated path for the header (keeps the tail). For a managed
 // worktree cell, show "⎇ <repo> (<task>)" instead — the managed path is just noise.
 const dirDisplay = computed(() => formatCwd(cwd.value, props.home));
