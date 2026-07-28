@@ -191,6 +191,34 @@ describe("TerminalCell", () => {
     expect((w.find('[data-testid="cell-dir-input"]').element as HTMLInputElement).value).toBe("/picked/dir");
   });
 
+  // Grid live-sync reassigns cells in place (v-for is keyed by uid), so a reused instance
+  // must follow its initialSessionId prop — or it keeps showing (and, via the session emit,
+  // writing back) the OLD session, and two cells converge on one id with identical roster meta.
+  it("adopts a reassigned initialSessionId: retargets the terminal and drops the old session's meta", async () => {
+    mockFetch([]);
+    const w = mountCell("22222222-2222-2222-2222-222222222222", { initialCwd: "/home/me/proj" });
+    await flushPromises();
+    const term = w.findComponent({ name: "TerminalView" });
+    expect(term.props("sessionId")).toBe("22222222-2222-2222-2222-222222222222");
+    const keyBefore = term.props("connectKey") as number;
+
+    await w.setProps({ initialSessionId: "33333333-3333-3333-3333-333333333333" });
+    await flushPromises();
+    expect(term.props("sessionId")).toBe("33333333-3333-3333-3333-333333333333");
+    expect(term.props("connectKey")).toBe(keyBefore + 1); // slot retargets to the new session
+  });
+
+  it("ignores the echo of its own launch (prop set to the id the cell already runs)", async () => {
+    mockFetch([]);
+    const w = mountCell("22222222-2222-2222-2222-222222222222", { initialCwd: "/home/me/proj" });
+    await flushPromises();
+    const term = w.findComponent({ name: "TerminalView" });
+    const keyBefore = term.props("connectKey") as number;
+    await w.setProps({ initialSessionId: "22222222-2222-2222-2222-222222222222" });
+    await flushPromises();
+    expect(term.props("connectKey")).toBe(keyBefore); // no pointless reconnect
+  });
+
   it("shows a cancel ✕ on a cancellable launcher that emits close, but not otherwise", async () => {
     const plain = mountCell(null, { defaultCwd: "/home/me/default" });
     await flushPromises();
