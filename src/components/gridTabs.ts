@@ -102,8 +102,15 @@ export function cancelableLaunchUid(state: GridState): number | null {
   return state.cells.length > 1 && isLaunchCell(last) ? last.uid : null;
 }
 
+// A session id lives in AT MOST one cell: the server binds a session to one connection (a
+// second claimer supersedes the first into a ping-pong), so when this uid claims `id`, any
+// OTHER cell still holding it is stale and loses it (becoming a session-less cell that the
+// next parseGridState round drops).
 export function setSession(state: GridState, uid: number, id: string | null): GridState {
-  const cells = state.cells.map((c) => (c.uid === uid ? { ...c, session: id } : c));
+  const cells = state.cells.map((c) => {
+    if (c.uid === uid) return { ...c, session: id };
+    return id !== null && c.session === id ? { ...c, session: null } : c;
+  });
   const expanded = id === null && state.expanded === uid ? null : state.expanded;
   return { ...state, cells, expanded };
 }
@@ -460,9 +467,19 @@ export function parseGridState(raw: string | null): GridState | null {
     // v-for keys, and a near-MAX_SAFE_INTEGER value would overflow the nextUid
     // counter. uid is internal identity only, so a clean 0..n-1 space (nextUid =
     // count) is always safe and in range.
+    // Duplicate SESSION ids are dropped too (first occurrence wins): the server binds a
+    // session to one connection, so two cells on one id evict each other in a supersede
+    // loop. A duplicate can only come from a corrupted/raced persisted state — every
+    // load/adopt funnels through here, so this is the choke point that heals it.
+    const seenSessions = new Set<string>();
     const running = parsed.cells
       .filter(isCell)
-      .filter((c: Cell) => c.session !== null)
+      .filter((c: Cell) => {
+        if (c.session === null) return false;
+        if (seenSessions.has(c.session)) return false;
+        seenSessions.add(c.session);
+        return true;
+      })
       .slice(0, MAX_TERMINALS);
     const cells: Cell[] = running.map((c: Cell, i: number) => ({
       uid: i,
