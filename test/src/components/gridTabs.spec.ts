@@ -158,6 +158,13 @@ describe("setSession / setCwd / toggleExpand", () => {
     const s = setSession(make([cell(0)]), 0, U(5));
     expect(s.cells[0].session).toBe(U(5));
   });
+  // The server binds a session to ONE connection — two cells claiming the same id evict each
+  // other in a supersede loop — so the latest claimer takes the id and the stale holder loses it.
+  it("steals the id from any other cell holding it (a session lives in at most one cell)", () => {
+    const s = setSession(make([cell(0, U(5)), cell(1, U(1))]), 1, U(5));
+    expect(s.cells[1].session).toBe(U(5));
+    expect(s.cells[0].session).toBeNull();
+  });
   it("setCwd updates the matching cell", () => {
     expect(setCwd(make([cell(0)]), 0, "/x").cells[0].cwd).toBe("/x");
   });
@@ -452,6 +459,16 @@ describe("parseGridState / migrateLegacy / initialState", () => {
   it("returns null for missing/corrupt input", () => {
     expect(parseGridState(null)).toBeNull();
     expect(parseGridState("not json{")).toBeNull();
+  });
+  // A corrupted/raced persisted state can carry the same session in two cells; both would
+  // connect and evict each other (supersede loop). Every load/adopt funnels through this
+  // parser, so healing here fixes localStorage AND server grids alike. First occurrence wins.
+  it("drops duplicate session ids (first occurrence wins)", () => {
+    const raw = JSON.stringify({ cells: [cell(0, U(0), "/a"), cell(1, U(0), "/b"), cell(2, U(2))], page: 0 });
+    const s = parseGridState(raw);
+    if (!s) throw new Error("expected parsed state");
+    expect(s.cells.map((c) => c.session)).toEqual([U(0), U(2)]);
+    expect(s.cells[0].cwd).toBe("/a"); // the first claimer's cell survives
   });
   it("round-trips a persisted sortMode and defaults to manual", () => {
     const cells = [cell(0, U(0))];
