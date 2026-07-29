@@ -63,14 +63,45 @@ describe("shouldFreshenViewedTitle", () => {
 
 describe("buildTitlePrompt", () => {
   it("asks for a short title in the user's language, title-only", () => {
-    const p = buildTitlePrompt();
+    const p = buildTitlePrompt("User: fix the build");
     expect(p).toContain("concise title");
     expect(p).toContain("Match the User's language");
     expect(p).toContain("ONLY the title");
   });
+
+  // The transcript used to ride stdin and sometimes did not arrive, and the model then answered
+  // the only thing it could: "I don't see a transcript to summarize". An argument cannot go
+  // missing the way a stream can.
+  it("carries the transcript itself, so there is nothing to arrive separately", () => {
+    expect(buildTitlePrompt("User: fix the build\nAssistant: on it")).toContain("User: fix the build");
+  });
 });
 
 describe("parseTitleOutput", () => {
+  // What a model says when it did not produce a title: an apology, a question, a refusal. The old
+  // parser clipped it to 80 characters and it became the session's name.
+  it("rejects a sentence — that is not a title", () => {
+    expect(parseTitleOutput("I don't see a transcript to summarize. Could you paste the recent coding session you want me to name?")).toBe("");
+  });
+
+  it("keeps a title that merely runs long, clipped — length is not the tell", () => {
+    const long = "セッションの命名とタイトル生成の失敗をめぐる調査と修正の記録".repeat(2);
+    const out = parseTitleOutput(long);
+    expect(out).not.toBe("");
+    expect([...out].length).toBeLessThanOrEqual(80);
+  });
+
+  // The refusal as it was actually stored: clipped mid-word, so it ends in no punctuation at all.
+  // What still gives it away is the sentence break inside it.
+  it("rejects a clipped refusal, which ends in nothing", () => {
+    expect(parseTitleOutput("I don't see a transcript to summarize. Could you paste the")).toBe("");
+  });
+
+  it("keeps a phrase carrying a version or a file name", () => {
+    expect(parseTitleOutput("v1.2.3 への更新")).toBe("v1.2.3 への更新");
+    expect(parseTitleOutput("header-title.ts の修正")).toBe("header-title.ts の修正");
+  });
+
   it("takes the first non-empty line and strips surrounding quotes", () => {
     expect(parseTitleOutput('  "Fix the parser"  \n')).toBe("Fix the parser");
     expect(parseTitleOutput("\n\n「パーサー修正」")).toBe("パーサー修正");
