@@ -24,6 +24,7 @@ import type { LaunchChoice } from "./wsUrl";
 import type { RunCommand } from "./runCommand";
 import { useHeaderButtons } from "../composables/useHeaderButtons";
 import TimelineOverlay from "./TimelineOverlay.vue";
+import DirPickerModal from "./DirPickerModal.vue";
 import CopyCodeBlock from "./CopyCodeBlock.vue";
 import CockpitHeader from "./CockpitHeader.vue";
 import CellChromeButtons from "./CellChromeButtons.vue";
@@ -413,18 +414,21 @@ function fillDir(path: string) {
   loadCanvasEnabled();
 }
 
-// The folder button: the browser can't open a native folder chooser, so the local server does
-// (POST /api/pick-file { directory: true }). Fill the Working-directory field with the pick.
-async function pickDir() {
-  try {
-    const res = await fetch("/api/pick-file", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ directory: true }) });
-    if (!res.ok) return;
-    const data = await res.json();
-    const dir = Array.isArray(data?.paths) ? data.paths.find((p: unknown): p is string => typeof p === "string") : undefined;
-    if (dir) fillDir(dir);
-  } catch {
-    // best-effort — the native dialog is unavailable or the user canceled
-  }
+// The 📁 button always opens the in-browser folder picker (DirPickerModal). The native OS
+// chooser (POST /api/pick-file) pops up on the SERVER's display, which is unreachable from a
+// remote browser — and "remote" cannot be told apart from "local" client-side (an SSH
+// port-forward makes a phone look like localhost too), so the native path is never safe to
+// prefer. The in-browser picker works the same everywhere. The chosen path fills the
+// Working-directory field WITHOUT launching.
+const showDirPicker = ref(false);
+function pickDir() {
+  showDirPicker.value = true;
+}
+
+// The in-browser picker returned a path: fill the field (no launch) and close the modal.
+function onDirPicked(dir: string) {
+  fillDir(dir);
+  showDirPicker.value = false;
 }
 
 // Existing sessions for the dir in the form, so an empty cell can resume one
@@ -1910,5 +1914,9 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
         </div>
       </div>
     </div>
+
+    <!-- The in-browser folder picker for the Working-directory field. Rendered here rather than
+         behind the native dialog, which opens on the server's display (see pickDir). -->
+    <DirPickerModal v-if="showDirPicker" :start="dirInput.trim() || defaultCwd" @select="onDirPicked" @close="showDirPicker = false" />
   </div>
 </template>

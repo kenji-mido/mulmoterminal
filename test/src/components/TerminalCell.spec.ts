@@ -173,22 +173,30 @@ describe("TerminalCell", () => {
     expect((w.find('[data-testid="cell-dir-go"]').element as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it("the folder button opens the OS folder picker and fills the working directory", async () => {
+  // Was the OS chooser (POST /api/pick-file), which opens on the SERVER's display — from a phone
+  // that is a button that does nothing, with nothing on screen to say why.
+  it("the folder button opens the IN-BROWSER picker, and the pick fills the working directory", async () => {
     const w = mountCell(null, { defaultCwd: "/home/me/default" });
     await flushPromises();
-    let body: string | undefined;
-    globalThis.fetch = vi.fn((url: string, init?: { body?: string }) => {
-      const u = String(url);
-      if (u.includes("/api/pick-file")) {
-        body = init?.body;
-        return Promise.resolve({ ok: true, json: async () => ({ paths: ["/picked/dir"] }) });
-      }
-      return Promise.resolve({ ok: true, json: async () => ({ working: false, waiting: false, lastPrompt: null }) });
+    const calls: string[] = [];
+    globalThis.fetch = vi.fn((url: string) => {
+      calls.push(String(url));
+      return Promise.resolve({
+        ok: true,
+        json: async () => ({ path: "/w", parent: null, home: "/w", entries: [], working: false, waiting: false, lastPrompt: null }),
+      });
     }) as unknown as typeof fetch;
+
     await w.find('[aria-label="Choose the working directory"]').trigger("click");
     await flushPromises();
-    expect(body).toContain('"directory":true');
+    const picker = w.findComponent({ name: "DirPickerModal" });
+    expect(picker.exists()).toBe(true);
+    expect(calls.some((u) => u.includes("/api/pick-file"))).toBe(false); // never the host's dialog
+
+    picker.vm.$emit("select", "/picked/dir");
+    await flushPromises();
     expect((w.find('[data-testid="cell-dir-input"]').element as HTMLInputElement).value).toBe("/picked/dir");
+    expect(w.findComponent({ name: "DirPickerModal" }).exists()).toBe(false); // and it closes
   });
 
   // Grid live-sync reassigns cells in place (v-for is keyed by uid), so a reused instance
