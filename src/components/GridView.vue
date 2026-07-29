@@ -43,7 +43,7 @@ import {
   MAX_TERMINALS,
 } from "./gridTabs";
 import { gridShortcutFor, isEditableTarget, type GridShortcut } from "../composables/gridShortcut";
-import { fetchServerGridState, saveServerGridState, parseServerGridState, normalizedGridJson, normalizeRawGridJson } from "./gridStateServer";
+import { adoptedGridState, fetchServerGridState, saveServerGridState, parseServerGridState, normalizedGridJson, normalizeRawGridJson } from "./gridStateServer";
 import { useCaptureKeydown } from "../composables/useCaptureKeydown";
 import { getActiveKeymap } from "../composables/activeKeymap";
 import { preferredLaunchDir } from "./launchDir";
@@ -99,8 +99,8 @@ watch(state, persist, { deep: true });
 // lastSyncedNorm is set either way (before the deferred watch flush runs persist), so what we
 // just adopted is never re-broadcast.
 function adoptGrid(server: GridState) {
-  const json = JSON.stringify(server);
-  if (json !== normalizedGridJson(state.value)) state.value = server;
+  const json = JSON.stringify(server.cells);
+  if (json !== normalizedGridJson(state.value)) state.value = adoptedGridState(state.value, server);
   lastSyncedNorm = json;
 }
 
