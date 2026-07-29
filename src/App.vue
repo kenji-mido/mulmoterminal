@@ -15,6 +15,7 @@ import GridView from "./components/GridView.vue";
 import { useRoute } from "vue-router";
 import AppSettingsModal from "./components/AppSettingsModal.vue";
 import AppToolbar from "./components/AppToolbar.vue";
+import ConfirmDialog from "./components/ConfirmDialog.vue";
 import { useSessions, type Filter } from "./composables/useSessions";
 import { browseClose } from "./composables/useCollectionBrowse";
 import { registerChatOpener, startCollectionChat } from "./composables/useChatLauncher";
@@ -235,6 +236,41 @@ function selectSession(id: string, agent: "claude" | "codex" = "claude") {
   connectKey.value++;
 }
 
+// Remove a session from the sidebar list: the server persists the hide and reaps it (the
+// transcript stays, so `claude --resume` keeps it). Drop the open view if it was the active
+// one, then refresh so the row disappears.
+async function hideSession(id: string) {
+  if (id === activeId.value) {
+    activeId.value = null;
+    clearDraftHint();
+  }
+  try {
+    await fetch(`/api/session/${encodeURIComponent(id)}/hide`, { method: "POST" });
+  } catch {
+    // best-effort — a failed hide just leaves the row; the refresh below reflects reality
+  }
+  await refresh();
+}
+
+// Permanent delete goes through a confirmation (it removes the transcript — irreversible).
+// The 🗑 parks the id; the ConfirmDialog's confirm runs the delete.
+const pendingDeleteId = ref<string | null>(null);
+async function confirmDelete() {
+  const id = pendingDeleteId.value;
+  pendingDeleteId.value = null;
+  if (!id) return;
+  if (id === activeId.value) {
+    activeId.value = null;
+    clearDraftHint();
+  }
+  try {
+    await fetch(`/api/session/${encodeURIComponent(id)}/delete`, { method: "POST" });
+  } catch {
+    // best-effort — the refresh below reflects whatever actually got removed
+  }
+  await refresh();
+}
+
 // A transient "preparing your draft…" hint, shown over the terminal while a draft
 // chat boots and its text is typed into claude's input box (a few seconds), so the
 // brief delay doesn't look like nothing happened. Auto-dismisses.
@@ -326,6 +362,8 @@ function onSession(id: string) {
         @new-codex="newCodexSession"
         @toggle-layout="toggleLayout"
         @refresh="refresh"
+        @hide="hideSession"
+        @delete="pendingDeleteId = $event"
       />
       <SessionTabBar
         v-else
@@ -337,6 +375,8 @@ function onSession(id: string) {
         @new-codex="newCodexSession"
         @toggle-layout="toggleLayout"
         @refresh="refresh"
+        @hide="hideSession"
+        @delete="pendingDeleteId = $event"
       />
       <div class="relative flex min-h-0 min-w-0 flex-1">
         <Transition
@@ -409,4 +449,14 @@ function onSession(id: string) {
       @close="closeSettings"
     />
   </div>
+  <!-- Outside the !isGrid block: the confirmation belongs to the app, not to one view. -->
+  <ConfirmDialog
+    v-if="pendingDeleteId"
+    title="Delete session permanently?"
+    message="This removes the conversation transcript from disk. It can't be undone, and the session will no longer be resumable."
+    confirm-label="Delete"
+    danger
+    @confirm="confirmDelete"
+    @cancel="pendingDeleteId = null"
+  />
 </template>

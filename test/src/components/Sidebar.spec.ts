@@ -101,4 +101,21 @@ describe("Sidebar", () => {
     await wrapper.find('[data-testid="session-item"]').trigger("click");
     expect(wrapper.emitted("select")?.[0]).toEqual(["c", "codex"]);
   });
+
+  // The row actions the phone needs (there is no hover on a touch screen, so they are always
+  // shown there). Both must act on the row WITHOUT selecting it — @click.stop — or dismissing a
+  // session would first open it.
+  it("emits 'hide' with the session id when the ✕ is clicked, without selecting it", async () => {
+    const wrapper = mountSidebar({ sessions: [row({ id: "a", title: "Alpha" })] });
+    await wrapper.find('[data-testid="session-hide"]').trigger("click");
+    expect(wrapper.emitted("hide")).toEqual([["a"]]);
+    expect(wrapper.emitted("select")).toBeUndefined(); // @click.stop — hiding isn't selecting
+  });
+
+  it("emits 'delete' with the session id when the 🗑 is clicked, without selecting it", async () => {
+    const wrapper = mountSidebar({ sessions: [row({ id: "a", title: "Alpha" })] });
+    await wrapper.find('[data-testid="session-delete"]').trigger("click");
+    expect(wrapper.emitted("delete")).toEqual([["a"]]);
+    expect(wrapper.emitted("select")).toBeUndefined();
+  });
 });

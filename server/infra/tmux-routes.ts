@@ -18,7 +18,19 @@ export interface TmuxRouteDeps {
   // Build the resumability predicate for a cleanup pass (awaits any hydration, snapshots
   // the live / grid / on-disk sets). A tmux id is reaped only when it returns false.
   resumablePredicate: () => Promise<(id: string) => boolean>;
+  // Persist a user hide (hidden-store) / remove the session's transcripts (transcript-delete).
+  // Injected like the rest so the hide/delete routes are unit-testable.
+  hideSession: (id: string) => void;
+  deleteTranscripts: (id: string) => boolean;
 }
+
+const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// How long a delete waits for a killed session's tmux to actually be gone, and how long after
+// that it sweeps once more. Both exist because the agent dies asynchronously — see the route.
+const DELETE_TMUX_WAIT_TRIES = 20;
+const DELETE_TMUX_WAIT_STEP_MS = 100;
+const DELETE_STRAGGLER_SWEEP_MS = 2000;
 
 // Whether an orphan tmux session is safe to reap. Not resumable is necessary but not
 // sufficient: a second mulmoterminal process may have just created it (no transcript yet)
@@ -41,6 +53,38 @@ export function mountTmuxRoutes(app: Express, deps: TmuxRouteDeps): void {
     deps.reapSession(id); // live entry → kills pty + tmux + cleanup
     if (deps.hasTmux(id)) deps.killTmux(id); // orphan (e.g. post-restart) → kill directly
     return res.json({ ok: true });
+  });
+
+  // Hide a session from the chat sidebar: persist the hide (so /api/sessions drops it), then
+  // reap it like terminate — the user is done with it. The transcript is kept, so it stays
+  // resumable via `claude --resume`; only the list entry goes away.
+  app.post("/api/session/:id/hide", (req, res) => {
+    if (!deps.isAllowedOrigin(req.headers.origin, req.socket?.remoteAddress)) return res.status(403).json({ error: "forbidden origin" });
+    const id = req.params.id;
+    if (!deps.isValidSessionId(id)) return res.status(400).json({ error: "invalid session id" });
+    deps.hideSession(id);
+    deps.reapSession(id);
+    if (deps.hasTmux(id)) deps.killTmux(id);
+    return res.json({ ok: true });
+  });
+
+  // Permanently delete a session: reap it, then remove its transcript so it's gone from the
+  // list AND from `claude --resume`. Destructive and irreversible — the client gates this
+  // behind a confirmation. (Hiding is the non-destructive path above.)
+  app.post("/api/session/:id/delete", async (req, res) => {
+    if (!deps.isAllowedOrigin(req.headers.origin, req.socket?.remoteAddress)) return res.status(403).json({ error: "forbidden origin" });
+    const id = req.params.id;
+    if (!deps.isValidSessionId(id)) return res.status(400).json({ error: "invalid session id" });
+    deps.reapSession(id);
+    if (deps.hasTmux(id)) deps.killTmux(id);
+    // A LIVE session's agent dies asynchronously and can flush one last transcript write
+    // AFTER an immediate unlink — recreating the file and resurrecting the row, so the delete
+    // "didn't work", sometimes. Wait (bounded) for the tmux session to actually be gone before
+    // deleting, and sweep once more shortly after for a straggler flush that still slipped past.
+    for (let waited = 0; deps.hasTmux(id) && waited < DELETE_TMUX_WAIT_TRIES; waited++) await delay(DELETE_TMUX_WAIT_STEP_MS);
+    const removed = deps.deleteTranscripts(id);
+    setTimeout(() => deps.deleteTranscripts(id), DELETE_STRAGGLER_SWEEP_MS);
+    return res.json({ ok: true, removed });
   });
 
   // One-shot cleanup of orphaned tmux sessions: reap any that is neither live nor

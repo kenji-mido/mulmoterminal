@@ -31,6 +31,7 @@ import {
 } from "../session/session-reads.js";
 import { formatHandoff, type HandoffShape } from "../session/handoff-text.js";
 import { projectSessionsDir } from "../session/project-dir.js";
+import { isUserHidden } from "../session/hidden-store.js";
 import { codexSessionsRoot } from "../agents/codex-session.js";
 import { listCodexSessions } from "../agents/codex-sessions.js";
 import type { SessionMeta } from "../session/types.js";
@@ -159,6 +160,7 @@ async function sessionList(req: Request, res: Response) {
       )
     )
       .filter((s): s is SessionMeta => s !== null)
+      .filter((s) => !isUserHidden(s.id)) // user hid it from the sidebar (transcript kept)
       .sort((a, b) => b.mtime - a.mtime);
 
     res.json({ cwd, sessions });
@@ -174,7 +176,7 @@ async function codexSessionList(req: Request, res: Response) {
   try {
     const cwdParam = typeof req.query.cwd === "string" ? req.query.cwd : null;
     const cwd = cwdParam ? resolveWorkspace(cwdParam) : CLAUDE_CWD;
-    const sessions = await listCodexSessions(codexSessionsRoot(), cwd, SESSION_LIST_LIMIT);
+    const sessions = (await listCodexSessions(codexSessionsRoot(), cwd, SESSION_LIST_LIMIT)).filter((s) => !isUserHidden(s.id));
     res.json({ cwd, sessions });
   } catch (err) {
     console.error("[api] /api/codex/sessions failed:", err);

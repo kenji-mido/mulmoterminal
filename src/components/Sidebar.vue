@@ -70,12 +70,37 @@ const { unreadCount, filteredSessions, isUnread } = useSessionFilter(props);
         v-for="s in filteredSessions"
         :key="s.id"
         data-testid="session-item"
-        class="flex cursor-pointer flex-col gap-0.5 border-l-[3px] px-3.5 py-2.5"
+        class="group relative flex cursor-pointer flex-col gap-0.5 border-l-[3px] px-3.5 py-2.5"
         :class="[{ waiting: isUnread(s) }, s.id === props.activeId ? 'border-l-accent bg-subtle' : 'border-l-transparent hover:bg-subtle']"
         :title="s.title"
         @click="emit('select', s.id, s.agent ?? 'claude')"
       >
-        <span class="truncate text-[13px]" :class="{ 'font-bold text-fg': isUnread(s) }">
+        <!-- Row actions, shown on hover and always on a touch device (no hover). ✕ removes from
+             the list (keeps the transcript — resumable); 🗑 deletes it permanently (the parent
+             confirms first). -->
+        <div class="absolute right-1 top-1.5 hidden items-center gap-0.5 group-hover:flex [@media(pointer:coarse)]:flex">
+          <button
+            type="button"
+            data-testid="session-delete"
+            class="flex h-6 w-6 items-center justify-center rounded border-none bg-transparent text-[14px] leading-none text-dim hover:bg-hover hover:text-err-text"
+            title="Delete permanently"
+            aria-label="Delete session permanently"
+            @click.stop="emit('delete', s.id)"
+          >
+            🗑
+          </button>
+          <button
+            type="button"
+            data-testid="session-hide"
+            class="flex h-6 w-6 items-center justify-center rounded border-none bg-transparent text-[16px] leading-none text-dim hover:bg-hover hover:text-err-text"
+            title="Remove from list"
+            aria-label="Remove session from list"
+            @click.stop="emit('hide', s.id)"
+          >
+            ✕
+          </button>
+        </div>
+        <span class="truncate pr-12 text-[13px]" :class="{ 'font-bold text-fg': isUnread(s) }">
           <span
             v-if="s.working && !s.waiting && s.id !== props.activeId"
             data-testid="session-spinner"
