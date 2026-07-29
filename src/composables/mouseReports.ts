@@ -159,3 +159,36 @@ export function cellFromPoint(rect: DOMRect, cols: number, rows: number, pointer
 export function isClickGesture(from: PointerPosition, to: PointerPosition): boolean {
   return Math.abs(to.clientX - from.clientX) <= CLICK_SLOP_PX && Math.abs(to.clientY - from.clientY) <= CLICK_SLOP_PX;
 }
+
+// The touch counterpart of the wheel path above. A phone has no wheel, so a one-finger vertical
+// drag is converted into the same SGR wheel reports — one per line of movement, the remainder
+// carried so a slow drag still scrolls smoothly instead of quantising away.
+//
+// Only the accumulation lives here: the DOM listeners belong to whoever owns the element (see
+// useTerminalConnections), and keeping the arithmetic separate is what makes "a drag shorter
+// than one line emits nothing" testable without a touchscreen.
+export class TouchScrollTracker {
+  private lastY: number | null = null;
+  private carry = 0;
+
+  start(y: number): void {
+    this.lastY = y;
+    this.carry = 0;
+  }
+
+  /** Feed the next Y position; returns the wheel steps to emit for this move (0 while the
+   *  accumulated drag is still shorter than one line of `linePx` pixels). */
+  move(y: number, linePx: number): number {
+    if (this.lastY === null || linePx <= 0) return 0;
+    this.carry += this.lastY - y;
+    this.lastY = y;
+    const steps = Math.trunc(this.carry / linePx);
+    this.carry -= steps * linePx;
+    return steps;
+  }
+
+  end(): void {
+    this.lastY = null;
+    this.carry = 0;
+  }
+}

@@ -3,7 +3,16 @@
 // (what the app wants, where the pointer is, click vs drag, the byte sequences) are pure and
 // live in ./mouseReports; what is here is the wiring onto a live Terminal.
 import type { Terminal } from "@xterm/xterm";
-import { cellFromPoint, clickReportSequences, createWheelTicker, isClickGesture, wantsMouseReports, wheelNotches, wheelReportSequence } from "./mouseReports";
+import {
+  cellFromPoint,
+  clickReportSequences,
+  createWheelTicker,
+  isClickGesture,
+  TouchScrollTracker,
+  wantsMouseReports,
+  wheelNotches,
+  wheelReportSequence,
+} from "./mouseReports";
 import type { GridCell, PointerPosition } from "./mouseReports";
 
 // xterm's Linkifier marks the screen element while a link is under the pointer. That click
@@ -105,4 +114,43 @@ export function guardMouseClicks(term: Terminal, swallowedMouseModes: ReadonlySe
     const cell = cellUnderPointer(term, ev);
     clickReportSequences(cell.col, cell.row).forEach((seq) => term.input(seq, false));
   });
+}
+
+/** One-finger drag -> the same SGR wheel reports the wheel path sends. A phone has no wheel, so
+ *  without this the swallowed app (Claude's transcript) cannot be scrolled at all from a touch
+ *  device: the drag lands on the alternate buffer, which has no scrollback for xterm's own
+ *  gesture to move.
+ *
+ *  Only while the app is actually being reported to. Outside that case the touch is left alone,
+ *  so the normal buffer keeps xterm's gesture scrolling — and preventDefault is called ONLY when
+ *  reports are being synthesized, so a plain tap still focuses the terminal and raises the soft
+ *  keyboard. A second finger (a pinch) hands the gesture back to the browser. */
+export function guardTouchScroll(term: Terminal, swallowedMouseModes: ReadonlySet<number>): void {
+  const host = term.element;
+  if (!host) return;
+  const tracker = new TouchScrollTracker();
+  const converting = () => reportsMouseToApp(term, swallowedMouseModes);
+
+  host.addEventListener(
+    "touchstart",
+    (ev) => {
+      if (converting() && ev.touches.length === 1) tracker.start(ev.touches[0].clientY);
+      else tracker.end();
+    },
+    { passive: true },
+  );
+  host.addEventListener(
+    "touchmove",
+    (ev) => {
+      if (!converting() || ev.touches.length !== 1) return tracker.end();
+      const steps = tracker.move(ev.touches[0].clientY, cellHeightOf(term));
+      const seq = wheelReportSequence(steps, TOP_LEFT_CELL.col, TOP_LEFT_CELL.row);
+      if (seq) for (let i = Math.abs(steps); i > 0; i--) term.input(seq, false);
+      ev.preventDefault(); // the app consumes the drag — don't also rubber-band the page
+    },
+    { passive: false },
+  );
+  const stop = () => tracker.end();
+  host.addEventListener("touchend", stop);
+  host.addEventListener("touchcancel", stop);
 }

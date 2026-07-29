@@ -5,7 +5,7 @@
 // alone would pass just as happily with the listeners on the wrong element or the wrong gate.
 import { describe, it, expect, beforeAll, afterEach } from "vitest";
 import { Terminal } from "@xterm/xterm";
-import { guardMouseClicks, guardMouseWheel } from "../../../src/composables/terminalMouseInput";
+import { guardMouseClicks, guardMouseWheel, guardTouchScroll } from "../../../src/composables/terminalMouseInput";
 import { recordSwallowedModes } from "../../../src/composables/mouseReports";
 import { swallowsMouseTracking } from "../../../src/composables/mouseTrackingModes";
 
@@ -72,6 +72,7 @@ async function openWiredTerminal(options: { tracked?: boolean; scrollSpeed?: num
   screen.getBoundingClientRect = () => new DOMRect(0, 0, COLS * CELL_WIDTH_PX, ROWS * CELL_HEIGHT_PX);
   guardMouseWheel(term, swallowedMouseModes, () => options.scrollSpeed ?? 1);
   guardMouseClicks(term, swallowedMouseModes);
+  guardTouchScroll(term, swallowedMouseModes);
   const sent: string[] = [];
   term.onData((data) => sent.push(data));
   await write(term, ALT_BUFFER_ON);
@@ -85,6 +86,15 @@ const mouse = (screen: HTMLElement, type: "mousedown" | "mouseup", clientX: numb
 const click = (screen: HTMLElement, clientX: number, clientY: number) => {
   mouse(screen, "mousedown", clientX, clientY);
   mouse(screen, "mouseup", clientX, clientY);
+};
+
+// A one-finger drag, as a phone delivers it. `element` (not the screen) is what the touch guard
+// binds to, so these go through the same element a real finger would land on.
+const touch = (term: Terminal, type: "touchstart" | "touchmove" | "touchend", ys: number[]): boolean => {
+  const touches = ys.map((clientY) => ({ clientY, clientX: 0 }) as Touch);
+  const ev = new Event(type, { bubbles: true, cancelable: true }) as TouchEvent & { touches: Touch[] };
+  Object.defineProperty(ev, "touches", { value: touches });
+  return term.element!.dispatchEvent(ev);
 };
 
 afterEach(() => {
@@ -262,5 +272,59 @@ describe("guardMouseWheel on a real terminal", () => {
     const { screen, sent } = await openWiredTerminal({ tracked: false });
     wheel(screen, 120, 115, 250);
     expect(sent).toEqual(["\x1b[B"]);
+  });
+});
+
+// The wheel path's counterpart for a device that has no wheel. Without it the alternate buffer —
+// which has no scrollback for xterm's own gesture to move — simply cannot be scrolled by hand.
+describe("guardTouchScroll on a real terminal", () => {
+  it("converts a one-finger drag into the SGR wheel reports the app asked for", async () => {
+    const { term, sent } = await openWiredTerminal();
+    touch(term, "touchstart", [300]);
+    touch(term, "touchmove", [300 - CELL_HEIGHT_PX * 2]); // two lines up = two wheel-down reports
+    expect(sent).toEqual(["\x1b[<65;1;1M", "\x1b[<65;1;1M"]);
+  });
+
+  it("drags the other way to scroll back up", async () => {
+    const { term, sent } = await openWiredTerminal();
+    touch(term, "touchstart", [300]);
+    touch(term, "touchmove", [300 + CELL_HEIGHT_PX]);
+    expect(sent).toEqual(["\x1b[<64;1;1M"]);
+  });
+
+  it("says nothing until the drag has covered a whole line", async () => {
+    const { term, sent } = await openWiredTerminal();
+    touch(term, "touchstart", [300]);
+    touch(term, "touchmove", [300 - 3]);
+    expect(sent).toEqual([]);
+  });
+
+  // The gate: an app that never asked for tracking keeps xterm's own gesture scrolling, and a
+  // tap that reports nothing must stay a tap — preventDefault there would cost the soft keyboard.
+  it("stays out of the way when the app did not ask for mouse reports", async () => {
+    const { term, sent } = await openWiredTerminal({ tracked: false });
+    touch(term, "touchstart", [300]);
+    const notPrevented = touch(term, "touchmove", [300 - CELL_HEIGHT_PX * 2]);
+    expect(sent).toEqual([]);
+    expect(notPrevented).toBe(true);
+  });
+
+  it("hands a two-finger gesture (a pinch) back to the browser", async () => {
+    const { term, sent } = await openWiredTerminal();
+    touch(term, "touchstart", [300]);
+    touch(term, "touchmove", [300 - CELL_HEIGHT_PX * 2, 400]);
+    expect(sent).toEqual([]);
+  });
+
+  // A move that arrives after the finger left — no touchstart of its own — belongs to no drag.
+  // Without touchend clearing the tracker it would keep scrolling from the stale position.
+  it("stops converting once the drag has ended", async () => {
+    const { term, sent } = await openWiredTerminal();
+    touch(term, "touchstart", [300]);
+    touch(term, "touchmove", [300 - CELL_HEIGHT_PX]);
+    expect(sent).toHaveLength(1);
+    touch(term, "touchend", []);
+    touch(term, "touchmove", [300 - CELL_HEIGHT_PX * 5]);
+    expect(sent).toHaveLength(1); // still just the one from the real drag
   });
 });
