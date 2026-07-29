@@ -94,7 +94,9 @@ const touch = (term: Terminal, type: "touchstart" | "touchmove" | "touchend", ys
   const touches = ys.map((clientY) => ({ clientY, clientX: 0 }) as Touch);
   const ev = new Event(type, { bubbles: true, cancelable: true }) as TouchEvent & { touches: Touch[] };
   Object.defineProperty(ev, "touches", { value: touches });
-  return term.element!.dispatchEvent(ev);
+  const host = term.element;
+  if (!host) throw new Error("the terminal has no element — the touch guard has nothing to bind to");
+  return host.dispatchEvent(ev);
 };
 
 afterEach(() => {
