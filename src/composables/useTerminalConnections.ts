@@ -166,6 +166,8 @@ interface Conn {
   target: ConnTarget;
   handlers: ConnHandlers;
   sawExit: boolean; // an intentional end (exit/superseded/error) — suppress reconnect
+  // A connect asked for while this document was hidden, held until it is looked at again.
+  deferredConnect: boolean;
   released: boolean; // torn down — suppress reconnect and stray socket events
   reconnectAttempts: number;
   reconnectTimer: ReturnType<typeof setTimeout> | null;
@@ -503,6 +505,7 @@ function ensure(key: string, target: ConnTarget, font: TerminalFont): Conn {
     sawExit: false,
     released: false,
     reconnectAttempts: 0,
+    deferredConnect: false,
     reconnectTimer: null,
     attachedEl: null,
     swallowedMouseModes,
@@ -564,8 +567,25 @@ function scheduleReconnect(c: Conn) {
   }, delay);
 }
 
+// A hidden document must not TAKE a session. The server binds a session to one socket, so a
+// client that opens one supersedes whoever held it — and a phone in a pocket, or a tab behind
+// another window, would do that to the screen the user is actually working on. It happens
+// without any action: the grid is shared, so a cell opened on the desktop appears here too and
+// this client connects it out from under them.
+//
+// Only NEW connects wait. A socket already open stays open — switching tabs must not drop a
+// running session, which is the whole point of the persistent connections.
+function shouldDeferConnect(): boolean {
+  return typeof document !== "undefined" && document.hidden;
+}
+
 function connect(c: Conn) {
   if (c.released) return;
+  if (shouldDeferConnect()) {
+    c.deferredConnect = true;
+    return;
+  }
+  c.deferredConnect = false;
   if (c.reconnectTimer) {
     clearTimeout(c.reconnectTimer);
     c.reconnectTimer = null;
@@ -880,6 +900,19 @@ export function insertText(key: string, text: string) {
   if (!c) return;
   if (c.ws?.readyState === WebSocket.OPEN) c.ws.send(JSON.stringify({ type: "input", data: text }));
   c.term.focus();
+}
+
+// Connect everything that waited for this document to be looked at. Registered once for the
+// module, since the deferral is a property of the DOCUMENT rather than of any one slot.
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) return;
+    for (const c of conns.values()) {
+      if (!c.deferredConnect) continue;
+      c.deferredConnect = false;
+      connect(c);
+    }
+  });
 }
 
 export function focus(key: string) {
