@@ -507,10 +507,12 @@ onUnmounted(() => {
   <div class="relative flex h-full min-h-0 min-w-0 flex-1 flex-col bg-base">
     <div
       v-if="!hideHeader"
-      class="flex items-center gap-3 bg-[var(--cell-header-bg,var(--bg-panel))] px-4 py-2 font-sans text-[14px] text-[var(--cell-header-fg,var(--text))]"
+      class="flex min-w-0 items-center gap-3 bg-[var(--cell-header-bg,var(--bg-panel))] px-4 py-2 font-sans text-[14px] text-[var(--cell-header-fg,var(--text))]"
       :style="headerStyle"
     >
-      <span class="font-semibold">Terminal</span>
+      <!-- Dropped below 640px: on a phone this word is the least informative thing on the row,
+           and the space it takes is what pushes the action buttons off the right edge. -->
+      <span class="hidden shrink-0 font-semibold sm:inline">Terminal</span>
       <span
         v-if="dirName"
         class="max-w-[16ch] truncate rounded-[10px] px-2 py-px text-[11px] font-semibold leading-[1.6]"
@@ -522,7 +524,9 @@ onUnmounted(() => {
       <span class="rounded-[4px] px-2 py-0.5 text-[12px]" :class="statusClass">{{ status }}</span>
       <RunMenu v-if="runMenu" :cwd="serverCwd" @run="(c) => emit('run', c)" />
       <SkillMenu v-if="runMenu" :cwd="serverCwd" @skill="onSkill" />
-      <div class="ml-auto inline-flex items-center gap-1">
+      <!-- shrink-0: the actions are the only part of this row that is not just information, so
+           they are the last thing a narrow screen is allowed to take away. -->
+      <div class="ml-auto inline-flex shrink-0 items-center gap-1">
         <button
           v-for="b in headerButtons"
           :key="b.id"
