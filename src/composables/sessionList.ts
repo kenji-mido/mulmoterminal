@@ -6,6 +6,7 @@ import { isUnread, type Session, type Filter } from "./useSessions";
 export type SessionListEmits = {
   (e: "select", id: string, agent: "claude" | "codex"): void;
   (e: "new" | "new-codex" | "toggle-layout" | "refresh"): void;
+  (e: "hide" | "delete", id: string): void;
   (e: "update:filter", f: Filter): void;
 };
 
