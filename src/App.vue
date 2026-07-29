@@ -23,6 +23,8 @@ import { useDirConfig } from "./composables/useDirConfig";
 import { useFaviconState } from "./composables/useFaviconState";
 import { usePendingScript, type PendingCommand } from "./composables/usePendingScript";
 import { useSoundEnabled } from "./composables/useSoundEnabled";
+import { isTouchDevice } from "./composables/touchDevice";
+import { fillTerminal as shouldFillTerminal, effectiveSessionLayout } from "./composables/responsiveLayout";
 import { useAttentionSound, type SoundConfig } from "./composables/useAttentionSound";
 import { useUnloadGuard, reportActiveTerminals } from "./composables/useUnloadGuard";
 import { browserLocale } from "./utils/browserLocale";
@@ -199,6 +201,12 @@ onUnmounted(() => {
 // reloads like the tools pane.
 type Layout = "vertical" | "horizontal";
 const layout = ref<Layout>(localStorage.getItem("session_layout") === "horizontal" ? "horizontal" : "vertical");
+
+const touchDevice = isTouchDevice();
+// Two SEPARATE responsive decisions — see composables/responsiveLayout.ts for why they are not
+// one flag (an unfolded foldable keeps the sidebar AND fills the terminal).
+const fillTerminal = computed(() => shouldFillTerminal(viewportWidth.value, touchDevice));
+const effectiveLayout = computed<Layout>(() => effectiveSessionLayout<Layout>(viewportWidth.value, layout.value, "horizontal"));
 watch(layout, (v) => localStorage.setItem("session_layout", v));
 function toggleLayout() {
   layout.value = layout.value === "vertical" ? "horizontal" : "vertical";
@@ -311,11 +319,13 @@ function onSession(id: string) {
   <KeepAlive>
     <GridView v-if="isGrid" />
   </KeepAlive>
-  <div v-if="!isGrid" class="flex h-screen w-screen flex-col overflow-hidden">
+  <!-- 100dvh, not h-screen (100vh): on mobile the address bar makes the visual viewport shorter
+       than 100vh, so a 100vh column runs its bottom — the terminal's key bar — below the fold. -->
+  <div v-if="!isGrid" class="flex h-[100dvh] w-screen flex-col overflow-hidden">
     <AppToolbar @settings="showSettings = true" />
     <div :class="['flex min-h-0 w-full flex-1 overflow-hidden', layout === 'horizontal' ? 'flex-col' : 'flex-row']">
       <Sidebar
-        v-if="layout === 'vertical'"
+        v-if="effectiveLayout === 'vertical'"
         v-model:filter="filter"
         :sessions="sessions"
         :loading="loading"
@@ -357,7 +367,7 @@ function onSession(id: string) {
         <TerminalView
           ref="terminalRef"
           class="min-w-0"
-          :style="{ flex: `0 0 ${terminalWidth}px` }"
+          :style="fillTerminal ? { flex: '1 1 0%' } : { flex: `0 0 ${terminalWidth}px` }"
           persist-key="single"
           :session-id="activeId"
           :codex="singleAgent === 'codex'"
@@ -371,6 +381,7 @@ function onSession(id: string) {
           @run="onRunScript"
         />
         <div
+          v-if="!fillTerminal"
           class="shrink-0 grow-0 basis-[5px] cursor-col-resize border-l border-r border-border bg-panel hover:bg-hover focus-visible:bg-accent focus-visible:outline-none"
           role="separator"
           tabindex="0"
@@ -383,8 +394,8 @@ function onSession(id: string) {
           @mousedown="startDrag"
           @keydown="onSplitterKey"
         />
-        <GuiPanel :session-id="activeId" :send-text-message="sendTextMessage" :tools-open="showTools" @toggle-tools="toggleTools" />
-        <ToolsPane v-if="showTools" :session-id="activeId" @close="toggleTools" />
+        <GuiPanel v-if="!fillTerminal" :session-id="activeId" :send-text-message="sendTextMessage" :tools-open="showTools" @toggle-tools="toggleTools" />
+        <ToolsPane v-if="showTools && !fillTerminal" :session-id="activeId" @close="toggleTools" />
       </div>
     </div>
     <!-- Full-screen collection browser; shown when the launcher / an index card / a
