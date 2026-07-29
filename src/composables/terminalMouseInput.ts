@@ -124,10 +124,13 @@ export function guardMouseClicks(term: Terminal, swallowedMouseModes: ReadonlySe
  *  Only while the app is actually being reported to. Outside that case the touch is left alone,
  *  so the normal buffer keeps xterm's gesture scrolling — and preventDefault is called ONLY when
  *  reports are being synthesized, so a plain tap still focuses the terminal and raises the soft
- *  keyboard. A second finger (a pinch) hands the gesture back to the browser. */
-export function guardTouchScroll(term: Terminal, swallowedMouseModes: ReadonlySet<number>): void {
-  const host = term.element;
-  if (!host) return;
+ *  keyboard. A second finger (a pinch) hands the gesture back to the browser.
+ *
+ *  `host` is the element the terminal was opened INTO, not term.element: that one is null until
+ *  open(), so binding to it made the call order load-bearing — and getting it wrong attached no
+ *  listeners at all, silently, which is exactly how this shipped broken the first time. The host
+ *  exists before open() and the touches bubble to it, so no call order can break this. */
+export function guardTouchScroll(term: Terminal, host: HTMLElement, swallowedMouseModes: ReadonlySet<number>): void {
   const tracker = new TouchScrollTracker();
   const converting = () => reportsMouseToApp(term, swallowedMouseModes);
 

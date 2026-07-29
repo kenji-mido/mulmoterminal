@@ -354,7 +354,6 @@ function guardMouseTracking(term: Terminal, swallowedMouseModes: Set<number>): v
     return false;
   });
   guardMouseWheel(term, swallowedMouseModes, getTerminalScrollSpeed);
-  guardTouchScroll(term, swallowedMouseModes); // the wheel path's touch counterpart, for a phone
 }
 
 // Terminal input -> the slot's CURRENT socket (survives reconnects: `c.ws` is re-read
@@ -448,6 +447,7 @@ function buildTerminal(swallowedMouseModes: Set<number>, font: TerminalFont): Te
   host.style.height = "100%";
   term.open(host);
   guardMouseClicks(term, swallowedMouseModes);
+  guardTouchScroll(term, host, swallowedMouseModes); // the wheel path's touch counterpart, for a phone
   // After open(), so the helper textarea the clipboard fallback looks for exists in `host`.
   wireCopyOnSelect(term, host);
   // Render each glyph in its own cell (canvas) instead of the default DOM renderer, which flows text
