@@ -507,7 +507,7 @@ onUnmounted(() => {
   <div class="relative flex h-full min-h-0 min-w-0 flex-1 flex-col bg-base">
     <div
       v-if="!hideHeader"
-      class="flex min-w-0 items-center gap-3 bg-[var(--cell-header-bg,var(--bg-panel))] px-4 py-2 font-sans text-[14px] text-[var(--cell-header-fg,var(--text))]"
+      class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 bg-[var(--cell-header-bg,var(--bg-panel))] px-4 py-2 font-sans text-[14px] text-[var(--cell-header-fg,var(--text))]"
       :style="headerStyle"
     >
       <!-- Dropped below 640px: on a phone this word is the least informative thing on the row,
@@ -524,8 +524,11 @@ onUnmounted(() => {
       <span class="rounded-[4px] px-2 py-0.5 text-[12px]" :class="statusClass">{{ status }}</span>
       <RunMenu v-if="runMenu" :cwd="serverCwd" @run="(c) => emit('run', c)" />
       <SkillMenu v-if="runMenu" :cwd="serverCwd" @skill="onSkill" />
-      <!-- shrink-0: the actions are the only part of this row that is not just information, so
-           they are the last thing a narrow screen is allowed to take away. -->
+      <!-- The row WRAPS rather than overflowing, and this group is shrink-0, so on a narrow
+           screen the actions drop to a second line instead of off the right edge. Nothing here
+           shrinks — the badge and the branch chip are already capped at 16ch and the left side
+           alone fills a phone — so without wrapping these buttons are simply unreachable, which
+           is how the ⌨ toggle came to exist only in landscape. -->
       <div class="ml-auto inline-flex shrink-0 items-center gap-1">
         <button
           v-for="b in headerButtons"
