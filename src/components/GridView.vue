@@ -545,7 +545,9 @@ function configureAppearance() {
 </script>
 
 <template>
-  <div class="flex flex-col h-screen w-screen overflow-hidden">
+  <!-- 100dvh, not h-screen (100vh): on mobile the address bar makes the visual viewport shorter
+       than 100vh, so this column's bottom — an expanded cell's key bar — sits below the fold. -->
+  <div class="flex h-[100dvh] w-screen flex-col overflow-hidden">
     <AppToolbar
       :add-terminal-active="launchOpen"
       :sort-mode="state.sortMode"
