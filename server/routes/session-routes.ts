@@ -16,6 +16,7 @@ import {
   aiTitles,
   devTerminalSessions,
   devTerminalSessionsHydrated,
+  headlessSessions,
   lastPrompts,
   lastResponses,
   translationWorkerIds,
@@ -141,10 +142,11 @@ async function sessionList(req: Request, res: Response) {
     const pending = collectPendingSessions(onDisk, includePending);
 
     // Keep only the most-recent N, then read & parse contents for just those
-    // on-disk files (a deleted/corrupt file is dropped, not fatal). Hidden translation
-    // workers are dropped first — they're transient internal helpers, not user chats.
+    // on-disk files (a deleted/corrupt file is dropped, not fatal). Internal helpers —
+    // hidden translation workers and in-flight headless `claude -p` runs — are dropped
+    // first: they're transient machinery of ours, not user chats.
     const top = selectSessionRows([...onDiskStats, ...pending], {
-      isTranslationWorker: (id) => translationWorkerIds.has(id),
+      isInternalHelper: (id) => translationWorkerIds.has(id) || headlessSessions.has(id),
       isDevTerminal: (id) => devTerminalSessions.has(id),
       includePending,
       limit: SESSION_LIST_LIMIT,

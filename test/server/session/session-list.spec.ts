@@ -15,7 +15,7 @@ const pending = (id: string, mtime: number): SessionRow => ({
 });
 const ids = (rows: SessionRow[]) => rows.map((r) => r.id);
 const filter = (over: Partial<Parameters<typeof selectSessionRows>[1]> = {}) => ({
-  isTranslationWorker: never,
+  isInternalHelper: never,
   isDevTerminal: never,
   includePending: true,
   limit: 50,
@@ -31,9 +31,17 @@ describe("selectSessionRows", () => {
     expect(ids(selectSessionRows([disk("a", 1), pending("b", 3), disk("c", 2)], filter()))).toEqual(["b", "c", "a"]);
   });
 
-  it("drops translation workers — they are internal helpers, not chats", () => {
+  it("drops internal helpers (translation workers, headless runs) — not chats", () => {
     const rows = [disk("keep", 2), disk("worker", 3)];
-    expect(ids(selectSessionRows(rows, filter({ isTranslationWorker: (id) => id === "worker" })))).toEqual(["keep"]);
+    expect(ids(selectSessionRows(rows, filter({ isInternalHelper: (id) => id === "worker" })))).toEqual(["keep"]);
+  });
+
+  // Unlike the grid exclusion below, this one is NOT scoped to the chat query: an internal
+  // helper has no business in the grid's resume picker either — it is not a conversation
+  // anyone can usefully resume.
+  it("drops internal helpers from a cwd-scoped listing too", () => {
+    const rows = [disk("keep", 2), disk("worker", 3)];
+    expect(ids(selectSessionRows(rows, filter({ isInternalHelper: (id) => id === "worker", includePending: false })))).toEqual(["keep"]);
   });
 
   // The rule with history: hiding grid sessions from the CHAT sidebar must not hide them
@@ -68,7 +76,7 @@ describe("selectSessionRows", () => {
 
   it("filters before capping, so a hidden row cannot consume a slot", () => {
     const rows = [disk("worker", 9), disk("a", 2), disk("b", 1)];
-    expect(ids(selectSessionRows(rows, filter({ isTranslationWorker: (id) => id === "worker", limit: 2 })))).toEqual(["a", "b"]);
+    expect(ids(selectSessionRows(rows, filter({ isInternalHelper: (id) => id === "worker", limit: 2 })))).toEqual(["a", "b"]);
   });
 
   it("does not mutate the caller's array", () => {

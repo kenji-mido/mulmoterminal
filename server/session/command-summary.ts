@@ -5,7 +5,12 @@
 // without an HTTP server or the `claude` CLI.
 import type { Express, Request } from "express";
 import { spawn } from "node:child_process";
+import { promises as fs } from "node:fs";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { claudeAdapter } from "../agents/claude.js";
+import { projectSessionsDir } from "./project-dir.js";
+import { headlessSessions } from "./registry.js";
 
 const BYTES_PER_KB = 1024;
 // Cap the log we send to claude. The tail is what matters (errors + the exit line
@@ -79,29 +84,68 @@ export interface ClaudeRunResult {
 
 export type RunClaude = (params: { bin: string; prompt: string; input: string; timeoutMs: number; model?: string }) => Promise<ClaudeRunResult>;
 
+// The argv for one headless run. `--session-id` is not cosmetic: claude records a `-p` run
+// as an ordinary session under the spawn cwd's project dir either way, and minting the id
+// ourselves is what lets us hide that transcript while the run is in flight and delete it
+// afterwards. Without it the id is claude's alone and every title generation left a session
+// behind — the chat sidebar filled up with "Below (on stdin)…" rows while the user worked in
+// the grid. Pure so the flag can be pinned by a test without spawning the CLI.
+export function headlessArgs(prompt: string, sessionId: string, model?: string): string[] {
+  return ["-p", prompt, "--session-id", sessionId, ...(model ? ["--model", model] : [])];
+}
+
+/** Where claude writes an internal run's transcript, so it can be removed once the run ends. */
+export function headlessTranscriptPath(cwd: string, sessionId: string): string {
+  return path.join(projectSessionsDir(cwd), `${sessionId}.jsonl`);
+}
+
+// Remove an internal run's transcript and stop tracking its id. On a failed removal the id
+// STAYS registered: the file is still on disk, and the listing filter is the only thing
+// keeping it out of the sidebar for the rest of this process's life.
+async function discardHeadlessTranscript(cwd: string, sessionId: string): Promise<void> {
+  try {
+    await fs.rm(headlessTranscriptPath(cwd, sessionId), { force: true });
+    headlessSessions.delete(sessionId);
+  } catch {
+    // leave it registered — see above
+  }
+}
+
 // Default spawn: run `claude -p <prompt>`, feed the log on stdin, collect stdout.
 // Argv (no shell), so nothing in the log or prompt is re-interpreted by a shell. A
 // timeout kills a hung CLI so the request can't wait forever. Injected into
 // summarizeLog so tests mock it — no `claude` binary needed. `model` (when given) picks
 // a cheaper/faster model via `--model` — used by the header-title generator.
+//
+// The run is an INTERNAL helper, never a chat: its session id is registered (and its
+// transcript deleted on exit) so it cannot surface as a sidebar row. The cwd is captured
+// rather than inherited implicitly, because it decides WHICH project dir that transcript
+// lands in — the cleanup has to look in the same place claude wrote.
 export const runClaudeHeadless: RunClaude = ({ bin, prompt, input, timeoutMs, model }) =>
   new Promise((resolve, reject) => {
-    const args = model ? ["-p", prompt, "--model", model] : ["-p", prompt];
-    const child = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"] });
+    const cwd = process.cwd();
+    const sessionId = randomUUID();
+    headlessSessions.add(sessionId);
+    const child = spawn(bin, headlessArgs(prompt, sessionId, model), { stdio: ["pipe", "pipe", "pipe"], cwd });
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     const timer = setTimeout(() => {
-      child.kill("SIGKILL");
+      child.kill("SIGKILL"); // the transcript is cleaned up by the 'close' that follows
       reject(new Error(`claude summary timed out after ${timeoutMs}ms`));
     }, timeoutMs);
     child.on("error", (e) => {
       clearTimeout(timer);
+      // A failed spawn wrote nothing, but the id is registered — release it either way.
+      void discardHeadlessTranscript(cwd, sessionId);
       reject(new Error(`failed to spawn claude: ${messageOf(e)}`));
     });
     child.stdout.on("data", (c: Buffer) => out.push(c));
     child.stderr.on("data", (c: Buffer) => err.push(c));
     child.on("close", (code) => {
       clearTimeout(timer);
+      // Fire-and-forget: the caller waits on the summary, not on our housekeeping. The id
+      // stays filtered until the delete lands, so no listing can catch the file in between.
+      void discardHeadlessTranscript(cwd, sessionId);
       resolve({ stdout: Buffer.concat(out).toString("utf8"), stderr: Buffer.concat(err).toString("utf8"), code });
     });
     child.stdin.end(input);

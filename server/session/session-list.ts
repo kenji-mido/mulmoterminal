@@ -9,8 +9,10 @@ import type { DiskStat, PendingSession } from "./types.js";
 export type SessionRow = DiskStat | PendingSession;
 
 export interface SessionRowFilter {
-  /** Transient internal helpers, never user-visible chats. */
-  isTranslationWorker: (id: string) => boolean;
+  /** Transient internal helpers, never user-visible chats: a hidden translation worker, or
+   *  a headless `claude -p` run (the AI header title / the Run menu's Explain). Both write a
+   *  perfectly ordinary transcript, so nothing about the row itself gives them away. */
+  isInternalHelper: (id: string) => boolean;
   /** Multi-terminal GRID sessions. */
   isDevTerminal: (id: string) => boolean;
   /** True for the unscoped (chat sidebar) query, false for a cwd-scoped one. */
@@ -25,7 +27,7 @@ export interface SessionRowFilter {
  *  hiding the grid's own sessions from itself. */
 export function selectSessionRows(rows: readonly SessionRow[], filter: SessionRowFilter): SessionRow[] {
   return rows
-    .filter((row) => !filter.isTranslationWorker(row.id))
+    .filter((row) => !filter.isInternalHelper(row.id))
     .filter((row) => !filter.includePending || !filter.isDevTerminal(row.id))
     .sort((a, b) => b.mtime - a.mtime)
     .slice(0, filter.limit);
