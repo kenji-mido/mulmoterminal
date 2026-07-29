@@ -55,7 +55,9 @@ import { createFilePathLinkProvider } from "./terminalFilePathLinkProvider";
 import { tryOpenInPane } from "./filesPaneOpener";
 import { filesGotoFile } from "./useFilesView";
 
-export type ConnStatus = "connecting" | "connected" | "disconnected";
+// "superseded" is a distinct state, not a flavour of disconnected: the session is ALIVE, just
+// held by another window, so the view can offer to take it back instead of a dead pill.
+export type ConnStatus = "connecting" | "connected" | "disconnected" | "superseded";
 
 // Enter submits and Shift/Option+Enter make a newline — but which BYTES carry each meaning
 // depends on the host's Claude binding, so the choice lives in `enterKeyOverride` (keyed by
@@ -199,11 +201,22 @@ function fitAndSyncSize(c: Conn): void {
 
 // The reactive projection the view binds to (status pill, RunMenu cwd). Keyed by
 // the same slot key; a slot that hasn't connected yet (or was released) is absent.
-export const connView = reactive(new Map<string, { status: ConnStatus; serverCwd: string | null }>());
+export const connView = reactive(new Map<string, { status: ConnStatus; serverCwd: string | null; needsPrompt: boolean }>());
 
 function setStatus(c: Conn, s: ConnStatus) {
   const v = connView.get(c.key);
   if (v) v.status = s;
+}
+
+// Claude prints this when a RESUMED session is paused on a deferred tool: it cannot go on by
+// itself, and the fix is literally to send it any prompt. Nothing about the screen says so —
+// the terminal just sits there — so the view offers a one-tap "continue" instead. Matched on the
+// raw frame, since the marker survives there whatever xterm does with it on screen.
+const RESUME_NEEDS_PROMPT = "Provide a prompt to continue the conversation";
+
+function setNeedsPrompt(c: Conn, value: boolean) {
+  const v = connView.get(c.key);
+  if (v) v.needsPrompt = value;
 }
 
 // Claude Code emits OSC 52 with an EMPTY selection (`ESC ] 52 ; ; <base64>`), which
@@ -498,7 +511,7 @@ function ensure(key: string, target: ConnTarget, font: TerminalFont): Conn {
     lastRebuildMs: 0,
   };
   conns.set(key, c);
-  connView.set(key, { status: "connecting", serverCwd: target.cwd });
+  connView.set(key, { status: "connecting", serverCwd: target.cwd, needsPrompt: false });
   wireTerminalToConn(term, c);
   return c;
 }
@@ -600,13 +613,21 @@ function connect(c: Conn) {
   };
 }
 
+// An output frame: to the screen, and past the one marker that changes what the view offers.
+// Separate from handleMessage so that branch stays a dispatch rather than a place things
+// accumulate — the marker check is the second thing to want a look at every chunk.
+function handleOutput(c: Conn, data: unknown) {
+  // Checked here as well as on fit() because a slot that is only receiving output would
+  // otherwise sit frozen until something happened to resize it (#846).
+  guardBufferHealth(c);
+  c.term.write(data as string);
+  if (typeof data === "string" && data.includes(RESUME_NEEDS_PROMPT)) setNeedsPrompt(c, true);
+}
+
 function handleMessage(c: Conn, event: MessageEvent) {
   const msg = JSON.parse(event.data);
   if (msg.type === "output") {
-    // Checked here as well as on fit() because a slot that is only receiving output would
-    // otherwise sit frozen until something happened to resize it (#846).
-    guardBufferHealth(c);
-    c.term.write(msg.data);
+    handleOutput(c, msg.data);
   } else if (msg.type === "session") {
     // Server reports the live session id — remember it so a later reconnect resumes
     // THIS session (esp. brand-new sessions that had no id yet) and the effective cwd.
@@ -619,16 +640,35 @@ function handleMessage(c: Conn, event: MessageEvent) {
       c.handlers.onCwd?.(msg.cwd);
     }
   } else {
-    // exit / superseded / error — a terminal message. messageEffect decides which retries,
-    // which fires onExit (NOT superseded — the session is alive in another tab), and the
-    // wording; this applies it.
-    const effect = messageEffect(msg.type, !!c.target.command, msg.message);
-    if (!effect.terminal) return;
-    c.sawExit = true;
-    if (effect.banner) c.term.write(effect.banner);
-    setStatus(c, "disconnected");
-    if (effect.callsOnExit) c.handlers.onExit?.(exitCodeOf(msg));
+    handleTerminalEnd(c, msg);
   }
+}
+
+// exit / superseded / error — a terminal message. messageEffect decides which retries, which
+// fires onExit (NOT superseded — the session is alive in another tab), and the wording; this
+// applies it. `superseded` keeps its own status because the session did not end: it moved, and
+// the view offers to take it back.
+function handleTerminalEnd(c: Conn, msg: { type: string; message?: unknown; exitCode?: unknown }) {
+  const effect = messageEffect(msg.type, !!c.target.command, msg.message);
+  if (!effect.terminal) return;
+  c.sawExit = true;
+  if (effect.banner) c.term.write(effect.banner);
+  setStatus(c, msg.type === "superseded" ? "superseded" : "disconnected");
+  if (effect.callsOnExit) c.handlers.onExit?.(exitCodeOf(msg));
+}
+
+// Take a stopped slot back: re-open its socket at the SAME target, which reattaches the live
+// session — and in turn supersedes whichever window is holding it now. Only acts on a slot that
+// stopped on a terminal message (sawExit); a live or auto-retrying one is left alone. connect()
+// clears sawExit and closes the old (already-closed) socket itself.
+//
+// Without this, "open in another window" is a dead end short of reloading the page — and on a
+// phone, where the other window is a desktop the user cannot reach, that is the whole session.
+export function reconnect(key: string) {
+  const c = conns.get(key);
+  if (!c || !c.sawExit) return;
+  c.reconnectAttempts = 0;
+  connect(c);
 }
 
 // Mount a view onto a slot: create the runtime on first acquire (and connect),
@@ -745,6 +785,7 @@ export function submitText(key: string, text: string): boolean {
   if (!c) return false;
   const sock = c.ws;
   if (!sock || sock.readyState !== WebSocket.OPEN) return false;
+  setNeedsPrompt(c, false); // a prompt is on its way — the session is no longer stuck
   const submit = submitBytesFor(c);
   sock.send(JSON.stringify({ type: "input", data: text }));
   setTimeout(() => {

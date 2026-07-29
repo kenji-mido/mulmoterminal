@@ -272,6 +272,19 @@ watch(
   },
 );
 
+// Take the session back after another window (a phone / another tab) superseded this one:
+// re-attaches this slot, which in turn supersedes the window that holds it now.
+function reconnectHere() {
+  conn.reconnect(slotKey);
+}
+
+// A resumed session can pause on a deferred tool and wait for a prompt (Claude prints "Provide
+// a prompt to continue…"). Nothing on screen explains the stall, so surface a one-tap Continue.
+const needsPrompt = computed(() => conn.connView.get(slotKey)?.needsPrompt ?? false);
+function sendContinue() {
+  conn.submitText(slotKey, "continue");
+}
+
 // On-screen input aids (key bar + text field) for a device with no physical keyboard, where
 // xterm's own hidden textarea can't reliably raise the soft keyboard or send Esc/Ctrl/arrows.
 // Only meaningful for the PRIMARY terminal — the chat single view, or an expanded grid cell —
@@ -562,6 +575,39 @@ onUnmounted(() => {
       @dragleave="dragOver = false"
       @drop="onDrop"
     />
+    <!-- Superseded: this session is live in another window (a phone / another tab). Offer to
+         take it back here rather than making a page reload the only way. -->
+    <div
+      v-if="status === 'superseded'"
+      class="absolute inset-0 z-30 flex flex-col items-center justify-center gap-3 bg-[rgba(0,0,0,0.55)] p-4 text-center"
+      data-testid="term-superseded"
+    >
+      <p class="m-0 max-w-[320px] font-sans text-[13px] text-fg">This session is open in another window.</p>
+      <button
+        class="cursor-pointer rounded-md border border-accent bg-accent px-4 py-2 text-[13px] font-semibold text-[var(--accent-fg,#fff)] hover:opacity-90"
+        data-testid="term-reconnect"
+        @click="reconnectHere"
+      >
+        Reconnect here
+      </button>
+    </div>
+    <!-- A resumed session stuck on a deferred tool: the screen shows nothing to act on, so the
+         way out is offered directly. -->
+    <div
+      v-if="needsPrompt"
+      data-testid="term-needs-prompt"
+      class="flex flex-none items-center gap-2 border-t border-t-border bg-[var(--warn-bg,#3a2f00)] px-3 py-2 font-sans text-[13px] text-[var(--warn-text,#e0a030)]"
+    >
+      <span class="material-symbols-outlined shrink-0 text-[18px]" aria-hidden="true">pause_circle</span>
+      <span class="min-w-0 flex-auto">This resumed session is paused and needs a prompt to continue.</span>
+      <button
+        class="flex-none cursor-pointer rounded-md border border-accent bg-accent px-3 py-1 text-[13px] font-semibold text-[var(--accent-fg,#fff)] hover:opacity-90"
+        data-testid="term-continue"
+        @click="sendContinue"
+      >
+        Continue
+      </button>
+    </div>
     <!-- The key row + text field. Below the terminal so the soft keyboard pushes them up
          together, and padded past the home indicator on a phone. -->
     <div

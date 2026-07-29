@@ -141,4 +141,45 @@ describe("Terminal.vue — mobile input aids", () => {
       expect(lastSent()).toBe("\x1bOA"); // application mode
     });
   });
+
+  it("shows a Continue banner when a resumed session prints the deferred-tool prompt, and one tap sends 'continue'", async () => {
+    setKeys(false);
+    const w = mount(TerminalView, { props: props({ sessionId: "sess-stuck" }) });
+    await flushPromises();
+    const sock = FakeWS.instances.at(-1);
+    expect(w.find('[data-testid="term-needs-prompt"]').exists()).toBe(false);
+    // Claude resumes onto a deferred tool and asks for a prompt (marker survives ANSI framing).
+    sock?.onmessage?.({
+      data: JSON.stringify({ type: "output", data: "\x1b[31mError: No deferred tool marker found. Provide a prompt to continue the conversation.\x1b[0m" }),
+    });
+    await flushPromises();
+    expect(w.find('[data-testid="term-needs-prompt"]').exists()).toBe(true);
+
+    const before = sock?.sent.length ?? 0;
+    await w.find('[data-testid="term-continue"]').trigger("click");
+    await flushPromises();
+    expect(sock?.sent.slice(before)).toContainEqual(JSON.stringify({ type: "input", data: "continue" }));
+    expect(w.find('[data-testid="term-needs-prompt"]').exists()).toBe(false); // cleared on send
+  });
+
+  // The other window may be a desktop the user cannot reach — from a phone, "open in another
+  // window" without a way back is the session gone. Taking it back re-attaches HERE, which
+  // supersedes the holder in turn.
+  it("offers to take a superseded session back, and reconnects when tapped", async () => {
+    setKeys(false);
+    const w = mount(TerminalView, { props: props({ sessionId: "sess-elsewhere" }) });
+    await flushPromises();
+    expect(w.find('[data-testid="term-superseded"]').exists()).toBe(false);
+
+    const socketCount = FakeWS.instances.length;
+    FakeWS.instances.at(-1)?.onmessage?.({ data: JSON.stringify({ type: "superseded" }) });
+    await flushPromises();
+    expect(w.find('[data-testid="term-superseded"]').exists()).toBe(true);
+
+    await w.find('[data-testid="term-reconnect"]').trigger("click");
+    await flushPromises();
+    expect(FakeWS.instances).toHaveLength(socketCount + 1); // a new socket, at the same target
+    expect(FakeWS.instances.at(-1)?.url).toContain("sess-elsewhere");
+    expect(w.find('[data-testid="term-superseded"]').exists()).toBe(false);
+  });
 });
