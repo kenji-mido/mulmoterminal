@@ -25,8 +25,17 @@ const hidden = load();
 
 // Atomic (temp + rename) and best-effort — a failed persist just means the hide doesn't
 // survive a restart; the in-memory set already reflects it for this process.
+//
+// Chained rather than fired off independently: two hides in quick succession put two writes in
+// flight, each carrying the set as of its own call, and the renames can land in either order.
+// The older snapshot landing last silently drops the newer hide — the row the user dismissed
+// comes back on the next boot, with nothing on screen to say so. Serializing makes the LAST
+// hide the last write, which is the only ordering that matches what the user did. Same pattern
+// as the registry's persist chains.
+let persist: Promise<void> = Promise.resolve();
 function save(): void {
-  writeFileAtomic(FILE, JSON.stringify([...hidden])).catch(() => {});
+  const snapshot = JSON.stringify([...hidden]);
+  persist = persist.then(() => writeFileAtomic(FILE, snapshot)).catch(() => {});
 }
 
 export function isUserHidden(id: string): boolean {
