@@ -934,4 +934,28 @@ describe("useTerminalConnections — a hidden document does not take sessions", 
     expect(opened?.readyState).not.toBe(FakeWebSocket.CLOSED);
     expect(FakeWebSocket.instances).toHaveLength(1);
   });
+
+  // The other half of the same rule. Without it, coming back to the desktop leaves a screenful
+  // of terminals that each need a tap on "Reconnect here" — and if the user is holding the phone
+  // that took them, there is no way to give them back.
+  it("takes back a session another window superseded, once this document is looked at again", () => {
+    conn.attach("cell-hidden", target("dddddddd-dddd-4ddd-8ddd-dddddddddddd"), { onSession: vi.fn(), onCwd: vi.fn() }, document.createElement("div"));
+    const first = FakeWebSocket.instances.at(-1);
+    first?.onmessage?.({ data: JSON.stringify({ type: "superseded" }) } as MessageEvent);
+    expect(conn.connView.get("cell-hidden")?.status).toBe("superseded");
+
+    hide(true);
+    hide(false);
+    expect(FakeWebSocket.instances).toHaveLength(2); // a new socket, at the same target
+    expect(FakeWebSocket.instances.at(-1)?.url).toContain("dddddddd-dddd-4ddd-8ddd-dddddddddddd");
+  });
+
+  // A session that ENDED is not one to take back — reconnecting would spawn a new one.
+  it("does not resurrect a session that exited", () => {
+    conn.attach("cell-hidden", target("eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"), { onSession: vi.fn(), onCwd: vi.fn() }, document.createElement("div"));
+    FakeWebSocket.instances.at(-1)?.onmessage?.({ data: JSON.stringify({ type: "exit", exitCode: 0 }) } as MessageEvent);
+    hide(true);
+    hide(false);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+  });
 });
