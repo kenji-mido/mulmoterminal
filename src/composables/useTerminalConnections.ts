@@ -624,12 +624,18 @@ function connect(c: Conn) {
   };
   sock.onclose = () => {
     if (sock !== c.ws) return;
-    setStatus(c, "disconnected");
+    // Only when nothing has already SAID what this is. A terminal message (exit / superseded /
+    // error) arrives and the server then closes the socket, so this fires a moment later — and
+    // overwriting the status there erases the one distinction the view acts on: `superseded` is a
+    // session that is ALIVE in another window, offering to be taken back, where `disconnected` is
+    // a dead socket to retry. The overlay and the reclaim-on-focus both read that status, so the
+    // overwrite made both of them dead code for the case they exist to handle.
+    if (!c.sawExit) setStatus(c, "disconnected");
     scheduleReconnect(c);
   };
   sock.onerror = () => {
     if (sock !== c.ws) return;
-    setStatus(c, "disconnected");
+    if (!c.sawExit) setStatus(c, "disconnected");
   };
 }
 
