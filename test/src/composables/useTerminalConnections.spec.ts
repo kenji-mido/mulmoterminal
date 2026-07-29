@@ -958,4 +958,17 @@ describe("useTerminalConnections — a hidden document does not take sessions", 
     hide(false);
     expect(FakeWebSocket.instances).toHaveLength(1);
   });
+
+  // The regression that shipped: a slot outlives the view that mounted it, so the map holds
+  // slots nothing is rendering. One of those reclaiming "its" session takes it from the cell the
+  // user is actually looking at — on the SAME device, with no second browser involved.
+  it("does not let a slot nothing is rendering take a session back", () => {
+    const el = document.createElement("div");
+    conn.attach("cell-hidden", target("ffffffff-ffff-4fff-8fff-ffffffffffff"), { onSession: vi.fn(), onCwd: vi.fn() }, el);
+    FakeWebSocket.instances.at(-1)?.onmessage?.({ data: JSON.stringify({ type: "superseded" }) } as MessageEvent);
+    conn.detach("cell-hidden", el); // the cell was unmounted; the slot stays alive
+    hide(true);
+    hide(false);
+    expect(FakeWebSocket.instances).toHaveLength(1); // nothing reconnected
+  });
 });
