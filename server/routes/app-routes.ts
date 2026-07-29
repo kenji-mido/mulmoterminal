@@ -31,6 +31,7 @@ import { mountGitRemoteRoute } from "../git/gitRemote.js";
 import { mountWorktreeRoutes } from "../git/worktree-routes.js";
 import { mountPickFileRoute } from "../files/pick-file.js";
 import { mountDirListRoute } from "../files/dir-list.js";
+import { mountGridStateRoutes } from "../config/grid-state-routes.js";
 import { mountCommandSummaryRoute } from "../session/command-summary.js";
 import { mountCostRoute } from "../session/cost.js";
 import { mountCollectionRoutes } from "../backends/collections.js";
@@ -277,6 +278,9 @@ function mountSessionFacingRoutes(app: Express, deps: AppRouteDeps): void {
   // GET /api/dir-list backs the IN-BROWSER picker, which is what a remote browser uses instead
   // of the native dialog above (that one opens on the server's display).
   mountDirListRoute(app);
+  // GET/POST /api/grid-state mirrors the grid layout server-side, so a second browser (a
+  // phone) hydrates the same cells instead of an empty grid.
+  mountGridStateRoutes(app, { isAllowedOrigin: deps.isAllowedOrigin, publish: deps.publish });
 
   // POST /api/command/summarize runs `claude -p` headless over a Run cell's captured
   // terminal output and returns a short Errors/Warnings/cause/fix summary (issue #246).
