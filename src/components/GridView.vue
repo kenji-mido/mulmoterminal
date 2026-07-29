@@ -43,6 +43,7 @@ import {
   MAX_TERMINALS,
 } from "./gridTabs";
 import { gridShortcutFor, isEditableTarget, type GridShortcut } from "../composables/gridShortcut";
+import { fetchServerGridState, saveServerGridState, parseServerGridState, normalizedGridJson, normalizeRawGridJson } from "./gridStateServer";
 import { useCaptureKeydown } from "../composables/useCaptureKeydown";
 import { getActiveKeymap } from "../composables/activeKeymap";
 import { preferredLaunchDir } from "./launchDir";
@@ -71,7 +72,19 @@ import type { LaunchAgent } from "../../common/launchAgent";
 // reconnect when their page is shown again.
 const init = initialState(localStorage.getItem(STATE_KEY), localStorage.getItem(LEGACY_KEY));
 const state = ref<GridState>(init.state);
-const persist = () => localStorage.setItem(STATE_KEY, JSON.stringify(state.value));
+// The NORMALIZED (session-cell only) grid last synced with the server. Keying sync off the
+// normalized form — not the raw state — means a transient launch/command cell (session=null,
+// e.g. the half-filled "+" launcher) is neither broadcast nor clobbered by our own echo.
+let lastSyncedNorm = "";
+const persist = () => {
+  const raw = JSON.stringify(state.value);
+  localStorage.setItem(STATE_KEY, raw);
+  const norm = normalizeRawGridJson(raw); // reuse the serialization localStorage needed anyway
+  if (norm !== lastSyncedNorm) {
+    lastSyncedNorm = norm;
+    saveServerGridState(state.value); // mirror so every open browser applies it live
+  }
+};
 // Write the migrated state before dropping the legacy key, so a reload between
 // migration and the first change can't lose the sessions.
 if (init.migrated) {
@@ -79,6 +92,57 @@ if (init.migrated) {
   localStorage.removeItem(LEGACY_KEY);
 }
 watch(state, persist, { deep: true });
+
+// Adopt a server grid when its SESSION cells differ from ours. Comparing normalized forms makes
+// our own echo — and a peer update that leaves the session set unchanged — a no-op, so a launch
+// cell we're mid-edit is never disturbed. `server` is already normalized (parseServerGridState).
+// lastSyncedNorm is set either way (before the deferred watch flush runs persist), so what we
+// just adopted is never re-broadcast.
+function adoptGrid(server: GridState) {
+  const json = JSON.stringify(server);
+  if (json !== normalizedGridJson(state.value)) state.value = server;
+  lastSyncedNorm = json;
+}
+
+// Every browser shows the SAME grid: on load take the server's grid if it has one, else seed
+// the server from this browser's local grid. Then live updates (below) keep them identical.
+// Seeding is gated on a SUCCESSFUL "nothing saved" answer — after a mere fetch failure this
+// browser can't know the shared grid is empty, and seeding blind would broadcast an empty
+// grid over everyone's cells. A failed load retries instead (a phone's first GET over a
+// flaky link often fails once, and the pubsub refetch below only covers RE-connects).
+let loadRetryTimer: ReturnType<typeof setTimeout> | null = null;
+function loadSharedGrid() {
+  loadRetryTimer = null;
+  void fetchServerGridState().then((r) => {
+    if (!r.ok) {
+      loadRetryTimer = setTimeout(loadSharedGrid, 3000);
+      return;
+    }
+    if (r.state) adoptGrid(r.state);
+    else {
+      lastSyncedNorm = normalizedGridJson(state.value);
+      saveServerGridState(state.value);
+    }
+  });
+}
+loadSharedGrid();
+
+// Live sync: apply a grid another browser/tab published. The echo of our own change matches
+// what we already show and is skipped inside adoptGrid. A socket reconnect can miss events, so
+// re-fetch the authoritative grid then.
+const gridPubsub = usePubSub();
+const unsubscribeGridState = gridPubsub.subscribe("grid-state", (data) => {
+  const remote = parseServerGridState(data);
+  if (remote) adoptGrid(remote);
+});
+const offGridReconnect = gridPubsub.onReconnect(() => {
+  void fetchServerGridState().then((r) => r.ok && r.state && adoptGrid(r.state));
+});
+onBeforeUnmount(() => {
+  unsubscribeGridState();
+  offGridReconnect();
+  if (loadRetryTimer) clearTimeout(loadRetryTimer);
+});
 
 // Feed the tab-close guard: warn on close/reload while any cell runs a session or
 // command (counts every page, not just the mounted one).

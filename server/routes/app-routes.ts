@@ -28,6 +28,7 @@ import { mountOpenDirRoute } from "../files/open-dir.js";
 import { mountGitRemoteRoute } from "../git/gitRemote.js";
 import { mountWorktreeRoutes } from "../git/worktree-routes.js";
 import { mountPickFileRoute } from "../files/pick-file.js";
+import { mountGridStateRoutes } from "../config/grid-state-routes.js";
 import { mountCommandSummaryRoute } from "../session/command-summary.js";
 import { mountCostRoute } from "../session/cost.js";
 import { mountCollectionRoutes } from "../backends/collections.js";
@@ -271,6 +272,9 @@ function mountSessionFacingRoutes(app: Express, deps: AppRouteDeps): void {
   // path(s) — how a browser tab inserts a real filesystem path into the terminal
   // (the browser hides paths from drag/drop and <input type=file>).
   mountPickFileRoute(app, { isAllowedOrigin: deps.isAllowedOrigin });
+  // GET/POST /api/grid-state mirrors the grid layout server-side, so a second browser (a
+  // phone) hydrates the same cells instead of an empty grid.
+  mountGridStateRoutes(app, { isAllowedOrigin: deps.isAllowedOrigin, publish: deps.publish });
 
   // POST /api/command/summarize runs `claude -p` headless over a Run cell's captured
   // terminal output and returns a short Errors/Warnings/cause/fix summary (issue #246).
