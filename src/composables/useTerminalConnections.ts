@@ -914,6 +914,11 @@ if (typeof document !== "undefined") {
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) return;
     for (const [key, c] of conns.entries()) {
+      // Only a slot that is actually ON SCREEN. A slot outlives the view that mounted it (that
+      // is what makes a page switch cheap), so the map holds ones nothing is rendering — and a
+      // detached slot taking "its" session back would take it from the cell the user is looking
+      // at, on this very device. Being looked at is the rule; an element is how a slot is.
+      if (!c.attachedEl) continue;
       if (c.deferredConnect) {
         c.deferredConnect = false;
         connect(c);
