@@ -971,4 +971,24 @@ describe("useTerminalConnections — a hidden document does not take sessions", 
     hide(false);
     expect(FakeWebSocket.instances).toHaveLength(1); // nothing reconnected
   });
+
+  // The bug this shipped with: the server sends `superseded` and then CLOSES the socket, and the
+  // close handler overwrote the status a moment later. The overlay offering "Reconnect here" and
+  // the reclaim-on-focus both read that status, so both were dead code for the case they exist
+  // for — the user saw the banner in the terminal and nothing to act on.
+  it("keeps the superseded status when the server then closes the socket", async () => {
+    conn.attach("cell-hidden", target("99999999-9999-4999-8999-999999999999"), { onSession: vi.fn(), onCwd: vi.fn() }, document.createElement("div"));
+    const sock = FakeWebSocket.instances.at(-1);
+    sock?.onmessage?.({ data: JSON.stringify({ type: "superseded" }) } as MessageEvent);
+    expect(conn.connView.get("cell-hidden")?.status).toBe("superseded");
+
+    sock?.onclose?.(new CloseEvent("close"));
+    expect(conn.connView.get("cell-hidden")?.status).toBe("superseded"); // not overwritten
+  });
+
+  it("still reports a plain drop as disconnected", async () => {
+    conn.attach("cell-hidden", target("88888888-8888-4888-8888-888888888888"), { onSession: vi.fn(), onCwd: vi.fn() }, document.createElement("div"));
+    FakeWebSocket.instances.at(-1)?.onclose?.(new CloseEvent("close"));
+    expect(conn.connView.get("cell-hidden")?.status).toBe("disconnected");
+  });
 });
