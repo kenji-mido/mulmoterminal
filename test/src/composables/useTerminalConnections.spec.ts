@@ -890,3 +890,48 @@ describe("makeSendHandler", () => {
     expect(send).toHaveBeenCalledWith(CTRL_E);
   });
 });
+
+// A hidden document must not TAKE a session. The grid is shared, so a cell opened on the desktop
+// appears in the phone's grid too — and if that phone connects it, the server hands the session
+// over and the desktop the user is working on says "detached". Nobody did anything on the phone;
+// it was in a pocket.
+describe("useTerminalConnections — a hidden document does not take sessions", () => {
+  const hide = (hidden: boolean) => {
+    Object.defineProperty(document, "hidden", { configurable: true, value: hidden });
+    document.dispatchEvent(new Event("visibilitychange"));
+  };
+
+  beforeEach(() => {
+    FakeWebSocket.instances.length = 0;
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+  });
+  afterEach(() => {
+    conn.release("cell-hidden");
+    hide(false);
+  });
+
+  it("opens no socket while hidden, and opens it when the document is looked at", () => {
+    hide(true);
+    conn.attach("cell-hidden", target("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"), { onSession: vi.fn(), onCwd: vi.fn() }, document.createElement("div"));
+    expect(FakeWebSocket.instances).toHaveLength(0);
+
+    hide(false);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(FakeWebSocket.instances[0].url).toContain("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa");
+  });
+
+  it("connects immediately when the document is visible", () => {
+    hide(false);
+    conn.attach("cell-hidden", target("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"), { onSession: vi.fn(), onCwd: vi.fn() }, document.createElement("div"));
+    expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+
+  // Hiding must not DROP a live session — that is what the persistent connections are for.
+  it("leaves an already-open socket alone when the document is hidden", () => {
+    conn.attach("cell-hidden", target("cccccccc-cccc-4ccc-8ccc-cccccccccccc"), { onSession: vi.fn(), onCwd: vi.fn() }, document.createElement("div"));
+    const opened = FakeWebSocket.instances.at(-1);
+    hide(true);
+    expect(opened?.readyState).not.toBe(FakeWebSocket.CLOSED);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+});
