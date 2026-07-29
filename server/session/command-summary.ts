@@ -7,6 +7,8 @@ import type { Express, Request } from "express";
 import { spawn } from "node:child_process";
 import { claudeAdapter } from "../agents/claude.js";
 import { isRecord } from "../../common/isRecord.js";
+import { CLAUDE_CWD } from "../config/env.js";
+import { newHeadlessSessionId, removeHeadlessTranscript } from "./headless-session.js";
 
 const BYTES_PER_KB = 1024;
 // Cap the log we send to claude. The tail is what matters (errors + the exit line
@@ -78,19 +80,33 @@ export interface ClaudeRunResult {
 
 export type RunClaude = (params: { bin: string; prompt: string; input: string; timeoutMs: number; model?: string }) => Promise<ClaudeRunResult>;
 
+// The argv for one headless run. `--session-id` is not cosmetic: claude records a `-p` run as an
+// ordinary session under the spawn cwd's project dir either way, and an id WE chose is what lets
+// the transcript be recognised in a listing and deleted when the run ends. Without it every AI
+// header title left a chat in the sidebar. Pure, so the flag is pinned by a test rather than by
+// spawning the CLI.
+export function headlessArgs(prompt: string, sessionId: string, model?: string): string[] {
+  return ["-p", prompt, "--session-id", sessionId, ...(model ? ["--model", model] : [])];
+}
+
 // Default spawn: run `claude -p <prompt>`, feed the log on stdin, collect stdout.
 // Argv (no shell), so nothing in the log or prompt is re-interpreted by a shell. A
 // timeout kills a hung CLI so the request can't wait forever. Injected into
 // summarizeLog so tests mock it — no `claude` binary needed. `model` (when given) picks
 // a cheaper/faster model via `--model` — used by the header-title generator.
+//
+// The run is INTERNAL machinery, never a chat: it carries an id shaped so /api/sessions can drop
+// it, and its transcript is deleted once the run ends. It spawns in CLAUDE_CWD — the workspace
+// every other session already runs in, so claude is not asked to trust a new directory — and that
+// is also the one place the cleanup (here, and the boot sweep) has to look.
 export const runClaudeHeadless: RunClaude = ({ bin, prompt, input, timeoutMs, model }) =>
   new Promise((resolve, reject) => {
-    const args = model ? ["-p", prompt, "--model", model] : ["-p", prompt];
-    const child = spawn(bin, args, { stdio: ["pipe", "pipe", "pipe"] });
+    const sessionId = newHeadlessSessionId();
+    const child = spawn(bin, headlessArgs(prompt, sessionId, model), { stdio: ["pipe", "pipe", "pipe"], cwd: CLAUDE_CWD });
     const out: Buffer[] = [];
     const err: Buffer[] = [];
     const timer = setTimeout(() => {
-      child.kill("SIGKILL");
+      child.kill("SIGKILL"); // the transcript is cleaned up by the 'close' that follows
       reject(new Error(`claude summary timed out after ${timeoutMs}ms`));
     }, timeoutMs);
     child.on("error", (e) => {
@@ -101,6 +117,10 @@ export const runClaudeHeadless: RunClaude = ({ bin, prompt, input, timeoutMs, mo
     child.stderr.on("data", (c: Buffer) => err.push(c));
     child.on("close", (code) => {
       clearTimeout(timer);
+      // Fire-and-forget: the caller waits on the summary, not on our housekeeping. A delete that
+      // fails (or never runs, because the server died first) leaves a file the boot sweep takes —
+      // the id is recognisable by shape, so nothing has to remember it.
+      void removeHeadlessTranscript(CLAUDE_CWD, sessionId);
       resolve({ stdout: Buffer.concat(out).toString("utf8"), stderr: Buffer.concat(err).toString("utf8"), code });
     });
     child.stdin.end(input);

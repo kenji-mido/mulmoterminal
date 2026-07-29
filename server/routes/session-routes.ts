@@ -11,6 +11,7 @@ import { normalizeAgent } from "./routeParams.js";
 import { resolveWorkspace } from "../config/workspace.js";
 import { hasErrnoCode } from "../errors.js";
 import { isProbeSessionId } from "../agents/probe-session.js";
+import { isHeadlessSessionId } from "../session/headless-session.js";
 import {
   activity,
   activityStateHydrated,
@@ -142,10 +143,11 @@ async function sessionList(req: Request, res: Response) {
     const pending = collectPendingSessions(onDisk, includePending);
 
     // Keep only the most-recent N, then read & parse contents for just those
-    // on-disk files (a deleted/corrupt file is dropped, not fatal). Hidden translation
-    // workers are dropped first — they're transient internal helpers, not user chats.
+    // on-disk files (a deleted/corrupt file is dropped, not fatal). Our own machinery is dropped
+    // first — translation workers, rate-limit probes, headless `claude -p` runs. Each writes a
+    // perfectly ordinary transcript, so nothing about the row itself gives them away.
     const top = selectSessionRows([...onDiskStats, ...pending], {
-      isInternalHelper: (id) => translationWorkerIds.has(id) || isProbeSessionId(id),
+      isInternalHelper: (id) => translationWorkerIds.has(id) || isProbeSessionId(id) || isHeadlessSessionId(id),
       isDevTerminal: (id) => devTerminalSessions.has(id),
       includePending,
       limit: SESSION_LIST_LIMIT,
