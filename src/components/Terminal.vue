@@ -15,6 +15,7 @@ import { terminalHeaderStyleFor } from "./cellHeaderStyle";
 import { useVoiceInput } from "../composables/useVoiceInput";
 import { useGitStatus } from "../composables/useGitStatus";
 import * as conn from "../composables/useTerminalConnections";
+import { useMobileKeys } from "../composables/useMobileKeys";
 import RunMenu from "./RunMenu.vue";
 import SkillMenu from "./SkillMenu.vue";
 import { skillSeed } from "./skillSeed";
@@ -271,6 +272,45 @@ watch(
   },
 );
 
+// On-screen input aids (key bar + text field) for a device with no physical keyboard, where
+// xterm's own hidden textarea can't reliably raise the soft keyboard or send Esc/Ctrl/arrows.
+// Only meaningful for the PRIMARY terminal — the chat single view, or an expanded grid cell —
+// never a grid thumbnail or a one-off command cell; the ⌨ toggle lives there too. `mobileKeys`
+// (persisted, default = touch-detected) decides whether they are actually shown, so a device
+// whose touch auto-detect misreads can still summon them by hand.
+const mobileKeys = useMobileKeys();
+const primaryTerminal = computed(() => !props.command && (!props.devTerminal || props.expanded));
+const showMobileAids = computed(() => primaryTerminal.value && mobileKeys.value);
+
+// Special keys → the PTY. Fixed-sequence keys (Esc/Tab/Ctrl-C) carry `seq`; arrows carry a
+// direction so the sequence tracks the terminal's cursor-keys mode (see conn.sendArrow). Arrows
+// drive history/menu nav (↑ recalls prior input), Tab completes, Esc cancels, Ctrl-C interrupts.
+type TermKey = { label: string; seq: string } | { label: string; arrow: conn.ArrowDir };
+const TERM_KEYS: TermKey[] = [
+  { label: "Esc", seq: "\x1b" },
+  { label: "Tab", seq: "\t" },
+  { label: "Ctrl-C", seq: "\x03" },
+  { label: "↑", arrow: "up" },
+  { label: "↓", arrow: "down" },
+  { label: "←", arrow: "left" },
+  { label: "→", arrow: "right" },
+];
+function tapTermKey(k: TermKey): void {
+  if ("arrow" in k) conn.sendArrow(slotKey, k.arrow);
+  else conn.sendKey(slotKey, k.seq);
+}
+
+// The text field's content → the PTY, committed like a keyboard turn (multi-line as a bracketed
+// paste so the agent takes it as one edit). A native field is what makes the soft keyboard and
+// the IME work at all — xterm's hidden textarea does not, on a phone.
+const mobileInput = ref("");
+function sendMobileInput() {
+  const text = mobileInput.value;
+  if (!text.trim()) return;
+  const ok = text.includes("\n") ? conn.pasteAndSubmit(slotKey, text) : conn.submitText(slotKey, text);
+  if (ok) mobileInput.value = "";
+}
+
 // Report to the server whether this terminal is the user's actively-viewed pane, so
 // an unfocused grid cell can surface blocked/done and a viewed one stays suppressed.
 const managesAttention = computed(() => terminalManagesAttention(!!props.command, !!props.launcher));
@@ -493,6 +533,20 @@ onUnmounted(() => {
         >
           <span class="material-symbols-outlined text-[18px]" aria-hidden="true">{{ voiceIcon() }}</span>
         </button>
+        <!-- On-screen keys toggle. Present on the primary terminal whatever the device, because
+             touch auto-detect misreads on some mobile browsers and this is the way back. -->
+        <button
+          v-if="primaryTerminal"
+          type="button"
+          data-testid="term-keys-toggle"
+          class="inline-flex cursor-pointer items-center rounded-[4px] border-0 bg-transparent p-0.5 hover:bg-selected hover:text-fg"
+          :class="mobileKeys ? 'text-accent' : 'text-[var(--cell-btn,var(--text-muted))]'"
+          :title="mobileKeys ? 'Hide on-screen keys' : 'Show on-screen keys'"
+          :aria-label="mobileKeys ? 'Hide on-screen keys' : 'Show on-screen keys'"
+          @click="mobileKeys = !mobileKeys"
+        >
+          <span class="material-symbols-outlined text-[18px]" aria-hidden="true">keyboard</span>
+        </button>
         <!-- The file-path picker and file explorer are now DEFAULT_BUTTONS (server-resolved into
              headerButtons above), so the user can drop/reorder/replace them via config. -->
         <!-- A grid cell injects its own actions (GitHub / timeline / reorder / zoom /
@@ -508,6 +562,46 @@ onUnmounted(() => {
       @dragleave="dragOver = false"
       @drop="onDrop"
     />
+    <!-- The key row + text field. Below the terminal so the soft keyboard pushes them up
+         together, and padded past the home indicator on a phone. -->
+    <div
+      v-if="showMobileAids"
+      class="flex flex-none flex-col gap-1 border-t border-t-border bg-panel px-2 pb-[calc(env(safe-area-inset-bottom,0px)+1rem)] pt-1.5"
+    >
+      <div class="flex gap-1 overflow-x-auto" data-testid="term-key-row">
+        <button
+          v-for="k in TERM_KEYS"
+          :key="k.label"
+          type="button"
+          class="flex-none cursor-pointer rounded-md border border-border bg-elevated px-2.5 py-1 font-mono text-[13px] text-fg hover:bg-hover"
+          @click="tapTermKey(k)"
+        >
+          {{ k.label }}
+        </button>
+      </div>
+      <div class="flex items-end gap-1.5" data-testid="cell-mobile-input">
+        <textarea
+          v-model="mobileInput"
+          rows="1"
+          inputmode="text"
+          autocapitalize="off"
+          autocorrect="off"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="Type here, then Send…"
+          class="max-h-24 min-h-[34px] flex-auto resize-none rounded-md border border-border bg-elevated px-2 py-1.5 font-mono text-[13px] text-fg outline-none focus:border-accent"
+          @keydown.enter.exact.prevent="sendMobileInput"
+        />
+        <button
+          type="button"
+          data-testid="cell-mobile-send"
+          class="flex-none cursor-pointer rounded-md border border-accent bg-accent px-3 py-1.5 text-[13px] font-semibold text-[var(--accent-fg,#fff)] hover:opacity-90"
+          @click="sendMobileInput"
+        >
+          Send
+        </button>
+      </div>
+    </div>
     <Transition
       enter-active-class="transition-opacity duration-200 ease-[ease]"
       leave-active-class="transition-opacity duration-200 ease-[ease]"

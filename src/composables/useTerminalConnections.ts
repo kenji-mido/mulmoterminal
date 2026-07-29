@@ -805,6 +805,32 @@ export function listSlots(): SlotInfo[] {
   return [...conns.values()].map(slotCandidate).flatMap((candidate) => readableSlot(candidate) ?? []);
 }
 
+// Send a raw key sequence (Tab, Esc, Ctrl-C…) straight to the PTY — for the on-screen key bar,
+// which has no physical keyboard for these. No submit; and deliberately no focus change, so
+// tapping a key doesn't dismiss and re-raise the soft keyboard on every press.
+export function sendKey(key: string, data: string): void {
+  const c = conns.get(key);
+  if (c?.ws?.readyState === WebSocket.OPEN) c.ws.send(JSON.stringify({ type: "input", data }));
+}
+
+// Arrow keys are mode-sensitive: a TUI in application-cursor-keys mode (DECCKM — Claude Code's
+// own TUI, vim, less…) expects ESC O A, while a normal shell expects ESC [ A. xterm tracks the
+// mode for us, so the on-screen arrows can ask it rather than guessing and sending the wrong
+// bytes to whichever of the two is running.
+export type ArrowDir = "up" | "down" | "right" | "left";
+const ARROW_FINAL: Record<ArrowDir, string> = { up: "A", down: "B", right: "C", left: "D" };
+
+/** Pure, so the mode split is tested without standing up a terminal. */
+export function arrowSequence(dir: ArrowDir, appMode: boolean): string {
+  return (appMode ? "\x1bO" : "\x1b[") + ARROW_FINAL[dir];
+}
+
+export function sendArrow(key: string, dir: ArrowDir): void {
+  const c = conns.get(key);
+  if (c?.ws?.readyState !== WebSocket.OPEN) return;
+  c.ws.send(JSON.stringify({ type: "input", data: arrowSequence(dir, c.term.modes.applicationCursorKeysMode) }));
+}
+
 // Insert text (a path, or space-joined paths) at the cursor via the normal input
 // channel — no trailing CR, so the user reviews and submits.
 export function insertText(key: string, text: string) {
