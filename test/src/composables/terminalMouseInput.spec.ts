@@ -72,7 +72,7 @@ async function openWiredTerminal(options: { tracked?: boolean; scrollSpeed?: num
   screen.getBoundingClientRect = () => new DOMRect(0, 0, COLS * CELL_WIDTH_PX, ROWS * CELL_HEIGHT_PX);
   guardMouseWheel(term, swallowedMouseModes, () => options.scrollSpeed ?? 1);
   guardMouseClicks(term, swallowedMouseModes);
-  guardTouchScroll(term, swallowedMouseModes);
+  guardTouchScroll(term, host, swallowedMouseModes);
   const sent: string[] = [];
   term.onData((data) => sent.push(data));
   await write(term, ALT_BUFFER_ON);
@@ -328,5 +328,33 @@ describe("guardTouchScroll on a real terminal", () => {
     touch(term, "touchend", []);
     touch(term, "touchmove", [300 - CELL_HEIGHT_PX * 5]);
     expect(sent).toHaveLength(1); // still just the one from the real drag
+  });
+
+  // The bug this shipped with: bound to term.element, the guard attached NOTHING when wired
+  // before open() — silently, because there was no element yet to complain about. Taking the
+  // host removes the ordering trap, and this is the assertion that says so.
+  it("works even when wired before the terminal is opened", async () => {
+    const term = new Terminal({ cols: COLS, rows: ROWS, allowProposedApi: true });
+    openTerminals.push(term);
+    const swallowedMouseModes = new Set<number>();
+    term.parser.registerCsiHandler({ prefix: "?", final: "h" }, (params) => {
+      const swallowed = swallowsMouseTracking(params);
+      if (swallowed) recordSwallowedModes(swallowedMouseModes, params);
+      return swallowed;
+    });
+    const host = document.createElement("div");
+    document.body.appendChild(host);
+    guardTouchScroll(term, host, swallowedMouseModes); // BEFORE open, as the real wiring did
+    term.open(host);
+    const screen = term.element?.querySelector<HTMLElement>(".xterm-screen");
+    if (screen) screen.getBoundingClientRect = () => new DOMRect(0, 0, COLS * CELL_WIDTH_PX, ROWS * CELL_HEIGHT_PX);
+    const sent: string[] = [];
+    term.onData((data) => sent.push(data));
+    await write(term, ALT_BUFFER_ON);
+    await write(term, CLAUDE_TRACKING_REQUEST);
+
+    touch(term, "touchstart", [300]);
+    touch(term, "touchmove", [300 - CELL_HEIGHT_PX]);
+    expect(sent).toEqual(["\x1b[<65;1;1M"]);
   });
 });
