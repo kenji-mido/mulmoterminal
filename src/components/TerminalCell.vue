@@ -1269,7 +1269,7 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
             <button
               v-if="headerDir && !filmstrip"
               type="button"
-              class="cell-dir flex-initial min-w-[16ch] max-w-[60%] cursor-pointer truncate border-none bg-transparent p-0 text-left font-mono text-[11px] text-[var(--cell-header-fg,var(--text-dim))] [direction:rtl] hover:text-muted hover:underline"
+              class="cell-dir min-w-0 max-w-[60%] flex-initial cursor-pointer truncate border-none bg-transparent p-0 text-left font-mono text-[11px] text-[var(--cell-header-fg,var(--text-dim))] [direction:rtl] hover:text-muted hover:underline sm:min-w-[16ch]"
               :title="cwd ? `Open ${cwd}` : ''"
               @click="openDir"
             >
@@ -1277,7 +1277,7 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
             </button>
             <span
               v-else-if="headerDir"
-              class="cell-dir flex-initial min-w-[16ch] max-w-[60%] cursor-pointer truncate border-none bg-transparent p-0 text-left font-mono text-[11px] text-[var(--cell-header-fg,var(--text-dim))] [direction:rtl] hover:text-muted hover:underline"
+              class="cell-dir min-w-0 max-w-[60%] flex-initial cursor-pointer truncate border-none bg-transparent p-0 text-left font-mono text-[11px] text-[var(--cell-header-fg,var(--text-dim))] [direction:rtl] hover:text-muted hover:underline sm:min-w-[16ch]"
               :title="cwd ?? ''"
             >
               <span class="cell-dir-path [unicode-bidi:plaintext]">{{ headerDir }}</span>
