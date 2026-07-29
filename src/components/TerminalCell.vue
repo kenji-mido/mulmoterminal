@@ -1219,7 +1219,7 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
            Every icon BUTTON lives on row 2 (the embedded terminal's header, via its slot). -->
         <div
           v-else
-          class="cell-header flex h-[34px] flex-none items-center gap-2 border-b px-2"
+          class="cell-header flex min-h-[34px] flex-none flex-wrap items-center gap-x-2 gap-y-1 border-b px-2 py-0.5"
           :class="[statusClass, headerStatusClass, expanded ? '' : `is-zoomable ${CELL_HEADER_ZOOMABLE}`]"
           :style="headerStyle"
           @click="onHeaderClick"

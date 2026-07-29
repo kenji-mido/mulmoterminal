@@ -23,7 +23,13 @@ export const CELL_FRAME =
 export const CELL_INNER =
   "flex min-h-0 min-w-0 flex-1 flex-col transition-transform duration-[140ms] ease-[ease] group-[.focused]/cell:scale-[calc(1/var(--focus-zoom))] motion-reduce:transition-none";
 
-export const CELL_HEADER = "flex h-[34px] flex-none items-center gap-2 border-b border-b-border bg-[var(--cell-header-bg,var(--bg-panel))] px-2";
+// WRAPS, and is min-height rather than height. A single non-wrapping row puts the actions at the
+// end and lets them run past the edge when the width does not add up — which on a phone it does
+// not, and the thing that goes over is the close button. Wrapping makes that impossible to get
+// wrong for ANY content: what does not fit moves down instead of away. The row is unchanged
+// wherever it already fitted.
+export const CELL_HEADER =
+  "flex min-h-[34px] flex-none flex-wrap items-center gap-x-2 gap-y-1 border-b border-b-border bg-[var(--cell-header-bg,var(--bg-panel))] px-2 py-0.5";
 
 // Added only while a click on the header background zooms the cell.
 export const CELL_HEADER_ZOOMABLE = "cursor-pointer hover:bg-hover";
