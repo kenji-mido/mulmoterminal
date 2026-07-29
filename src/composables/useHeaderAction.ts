@@ -10,24 +10,20 @@ import { accountingViewOpen } from "./useAccountingView";
 import { submitText, insertText } from "./useTerminalConnections";
 import { openTerminalAt } from "./useNewTerminal";
 import { toInsertText } from "../components/dropPaths";
+import { openFilePicker } from "./useFilePicker";
+import { isTouchDevice } from "./touchDevice";
 import type { HeaderButton, OpenTarget } from "./useHeaderButtons";
-import { isRecord } from "../../common/isRecord";
 
 const OPEN_URL_SCHEMES: ReadonlySet<string> = new Set(["http:", "https:"]);
 
-// Open the OS file dialog (server-side, since the browser can't read a real path) and insert the chosen
-// path(s) at the session's cursor. slotKey identifies which terminal receives the text.
-async function pickFileInto(slotKey: string | null): Promise<void> {
+// Pick a file and insert its path at the session's cursor. Uses the in-browser picker rather
+// than the native OS dialog (/api/pick-file): that dialog opens on the SERVER's display, which
+// is unreachable from a remote browser (a phone), and "remote" can't be told from "local"
+// client-side (an SSH forward makes a phone look like localhost). slotKey is the target
+// terminal; `cwd` seeds where the picker opens (the session's working dir).
+function pickFileInto(slotKey: string | null, cwd: string | null): void {
   if (!slotKey) return;
-  try {
-    const res = await fetch("/api/pick-file", { method: "POST", headers: { "content-type": "application/json" } });
-    if (!res.ok) return;
-    const data: unknown = await res.json();
-    const paths = isRecord(data) && Array.isArray(data.paths) ? data.paths.filter((p): p is string => typeof p === "string") : [];
-    insertText(slotKey, toInsertText(paths));
-  } catch {
-    // best-effort — the native dialog is unavailable or the user canceled
-  }
+  openFilePicker({ start: cwd, onSelect: (paths) => insertText(slotKey, toInsertText(paths)) });
 }
 
 function openUrl(url: string): void {
@@ -50,13 +46,21 @@ function openView(view: string, cwd: string | null): void {
   else filesGotoIndex(cwd); // "files" and (until a dedicated route) "diff"
 }
 
+// "Reveal in the file manager" reveals `dirPath` in the OS file manager on a desktop. On a
+// touch device that dialog would open on the SERVER's screen, unreachable, so fall back to the
+// in-app file browser at the same dir — the mobile equivalent of a file manager.
+function revealOrBrowse(dirPath: string): void {
+  if (isTouchDevice()) filesGotoIndex(dirPath);
+  else revealDir(dirPath);
+}
+
 function dispatchOpen(open: OpenTarget, cwd: string | null, slotKey: string | null): void {
   if (open.url) openUrl(open.url);
-  else if (open.reveal) revealDir(open.reveal);
+  else if (open.reveal) revealOrBrowse(open.reveal);
   else if (open.files) filesGotoIndex(open.files);
   else if (open.view) openView(open.view, cwd);
   else if (open.terminal) openTerminalAt(open.terminal, slotKey);
-  else if (open.pickFile) void pickFileInto(slotKey);
+  else if (open.pickFile) pickFileInto(slotKey, cwd);
 }
 
 export function runHeaderButton(button: HeaderButton, slotKey: string | null, cwd: string | null): void {
