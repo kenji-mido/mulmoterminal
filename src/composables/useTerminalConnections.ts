@@ -902,15 +902,24 @@ export function insertText(key: string, text: string) {
   c.term.focus();
 }
 
-// Connect everything that waited for this document to be looked at. Registered once for the
-// module, since the deferral is a property of the DOCUMENT rather than of any one slot.
+// Being looked at is what makes a device the one holding its sessions — so this is both halves
+// of that rule. What waited while hidden connects now, and what another window took while we
+// were away comes back, instead of leaving a screenful of terminals that each need a tap.
+//
+// Only on the TRANSITION to visible, so two screens that are both open do not fight: whichever
+// the user turned to last holds the sessions, and nothing re-triggers until someone looks
+// somewhere else. Registered once for the module — the deferral is a property of the DOCUMENT,
+// not of any one slot.
 if (typeof document !== "undefined") {
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) return;
-    for (const c of conns.values()) {
-      if (!c.deferredConnect) continue;
-      c.deferredConnect = false;
-      connect(c);
+    for (const [key, c] of conns.entries()) {
+      if (c.deferredConnect) {
+        c.deferredConnect = false;
+        connect(c);
+      } else if (connView.get(key)?.status === "superseded") {
+        reconnect(key); // taken by another window while we were away — take it back
+      }
     }
   });
 }
