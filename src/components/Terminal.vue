@@ -528,8 +528,10 @@ onUnmounted(() => {
            screen the actions drop to a second line instead of off the right edge. Nothing here
            shrinks — the badge and the branch chip are already capped at 16ch and the left side
            alone fills a phone — so without wrapping these buttons are simply unreachable, which
-           is how the ⌨ toggle came to exist only in landscape. -->
-      <div class="ml-auto inline-flex shrink-0 items-center gap-1">
+           is how the ⌨ toggle came to exist only in landscape.
+           The right-push is dropped below 640px: on the line the group wraps onto there is
+           nothing to push away from, so ml-auto would only leave a gap to its left. -->
+      <div class="ml-0 inline-flex shrink-0 items-center gap-1 sm:ml-auto">
         <button
           v-for="b in headerButtons"
           :key="b.id"
