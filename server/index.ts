@@ -38,6 +38,7 @@ import { startRateLimitProbe } from "./agents/rate-limit-probe.js";
 import { hasBinary } from "./infra/has-binary.js";
 import { newProbeSessionId } from "./agents/probe-session.js";
 import { removeProbeTranscript, sweepLegacyProbeTranscriptsOnce } from "./agents/probe-transcript.js";
+import { sweepOrphanHeadlessTranscripts } from "./session/headless-session.js";
 import { newestRolloutFile, codexSessionsDir, readRolloutTail } from "./agents/codex-rollout.js";
 import { latestRateLimitsInRollout } from "./agents/codex-rate-limits.js";
 import { rateLimitCacheFile, readRateLimitCache, createRateLimitCacheWriter } from "./agents/rate-limit-persist.js";
@@ -369,6 +370,12 @@ const startClaudeRateLimitProbe = (): void => {
 // window in which that matters is closed rather than reopened on every boot (Codex review on
 // #1030). It also means a 500MB transcript directory is read once, not once per `yarn dev` save.
 void sweepLegacyProbeTranscriptsOnce(CLAUDE_CWD, MULMOTERMINAL_HOME).catch(() => {});
+
+// A headless run deletes its own transcript when it ends, so whatever is left belongs to one that
+// never got to: the server was killed mid-title, or the delete failed. Every boot, not once ever —
+// the files are addressed by a NAME only this server can mint, so there is no content guess to
+// regret and no user conversation it could reach. It reads the directory listing and nothing else.
+void sweepOrphanHeadlessTranscripts(CLAUDE_CWD).catch(() => {});
 
 // Codex costs nothing to read, so it is current before the first browser arrives.
 refreshCodexRateLimits();

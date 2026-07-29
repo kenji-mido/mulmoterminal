@@ -2,6 +2,7 @@ import { describe, it, expect, vi, type Mock } from "vitest";
 import {
   truncateLog,
   buildSummaryPrompt,
+  headlessArgs,
   normalizeLocale,
   parseSummaryOutput,
   summarizeLog,
@@ -63,6 +64,21 @@ describe("buildSummaryPrompt", () => {
   });
   it("instructs the reply language from the given locale", () => {
     expect(buildSummaryPrompt("ja")).toContain('"ja"');
+  });
+});
+
+// The regression this guards: a headless run without --session-id gets an id only claude knows,
+// so its transcript can be neither dropped from a listing nor deleted — and every AI header title
+// shows up as a chat the user never started.
+describe("headlessArgs", () => {
+  const SESSION = "f0f0f0f0-4ead-4000-8000-000000000000";
+
+  it("passes the minted session id so the run's transcript stays ours to address", () => {
+    expect(headlessArgs("summarize this", SESSION)).toEqual(["-p", "summarize this", "--session-id", SESSION]);
+  });
+
+  it("appends --model when one is chosen (the cheap title model)", () => {
+    expect(headlessArgs("title this", SESSION, "haiku")).toEqual(["-p", "title this", "--session-id", SESSION, "--model", "haiku"]);
   });
 });
 
