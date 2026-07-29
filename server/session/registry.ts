@@ -89,18 +89,6 @@ export const claimedCodexRollouts = new Set<string>();
 // a transient internal helper, not a chat the user should see in the sidebar.
 export const translationWorkerIds = new Set<string>();
 
-// Session ids minted for an INTERNAL headless `claude -p` run — the AI header title and the
-// Run menu's Explain. claude records such a run as an ordinary session under the spawn cwd's
-// project dir, so without this every title generation left a new row in the chat sidebar: the
-// roster re-titles a viewed cell every few turns, so an afternoon in the grid buried the
-// sidebar under "Below (on stdin) is the recent transcript…" rows.
-//
-// Tracked here to filter the transcript out of BOTH listings while the run is in flight; the
-// file itself is deleted when the run ends (see command-summary), which is what makes an
-// in-memory-only set correct across a restart — there is nothing left on disk to hide. An id
-// whose delete failed stays in the set rather than being dropped optimistically.
-export const headlessSessions = new Set<string>(); // id
-
 // Session ids that belong to the multi-terminal GRID — dev terminals, spawned with
 // gui=0 (no GUI MCP; see the ?gui handling in the WS connection handler). They're
 // FILTERED OUT of the chat sidebar's /api/sessions so a grid terminal never surfaces

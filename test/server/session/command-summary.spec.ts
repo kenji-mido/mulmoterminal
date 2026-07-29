@@ -3,7 +3,6 @@ import {
   truncateLog,
   buildSummaryPrompt,
   headlessArgs,
-  headlessTranscriptPath,
   normalizeLocale,
   parseSummaryOutput,
   summarizeLog,
@@ -68,25 +67,18 @@ describe("buildSummaryPrompt", () => {
   });
 });
 
-// The regression this guards: a headless run without --session-id gets an id only claude
-// knows, so its transcript can be neither hidden while it runs nor deleted afterwards — and
-// every AI title generation shows up as a chat session in the sidebar.
+// The regression this guards: a headless run without --session-id gets an id only claude knows,
+// so its transcript can be neither dropped from a listing nor deleted — and every AI header title
+// shows up as a chat the user never started.
 describe("headlessArgs", () => {
-  const SESSION = "11111111-2222-3333-4444-555555555555";
+  const SESSION = "f0f0f0f0-4ead-4000-8000-000000000000";
 
-  it("passes the minted session id so the run's transcript stays ours to clean up", () => {
-    const args = headlessArgs("summarize this", SESSION);
-    expect(args).toEqual(["-p", "summarize this", "--session-id", SESSION]);
+  it("passes the minted session id so the run's transcript stays ours to address", () => {
+    expect(headlessArgs("summarize this", SESSION)).toEqual(["-p", "summarize this", "--session-id", SESSION]);
   });
 
   it("appends --model when one is chosen (the cheap title model)", () => {
     expect(headlessArgs("title this", SESSION, "haiku")).toEqual(["-p", "title this", "--session-id", SESSION, "--model", "haiku"]);
-  });
-
-  it("puts the transcript under the SPAWN cwd's project dir, where cleanup looks", () => {
-    const target = headlessTranscriptPath("/home/u/proj", SESSION);
-    expect(target).toContain(`${SESSION}.jsonl`);
-    expect(target).toContain("home-u-proj");
   });
 });
 

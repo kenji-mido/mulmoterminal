@@ -16,7 +16,6 @@ import {
   aiTitles,
   devTerminalSessions,
   devTerminalSessionsHydrated,
-  headlessSessions,
   lastPrompts,
   lastResponses,
   translationWorkerIds,
@@ -37,6 +36,7 @@ import { listCodexSessions } from "../agents/codex-sessions.js";
 import type { SessionMeta } from "../session/types.js";
 import { parseActivityIds, selectSessionRows } from "../session/session-list.js";
 import { sessionDetailView } from "../session/session-detail-view.js";
+import { isHeadlessSessionId } from "../session/headless-session.js";
 
 // Only the most-recent N sessions are listed in the sidebar; older ones aren't
 // read or parsed, keeping /api/sessions cheap for projects with many sessions.
@@ -142,11 +142,11 @@ async function sessionList(req: Request, res: Response) {
     const pending = collectPendingSessions(onDisk, includePending);
 
     // Keep only the most-recent N, then read & parse contents for just those
-    // on-disk files (a deleted/corrupt file is dropped, not fatal). Internal helpers —
-    // hidden translation workers and in-flight headless `claude -p` runs — are dropped
-    // first: they're transient machinery of ours, not user chats.
+    // on-disk files (a deleted/corrupt file is dropped, not fatal). Our own machinery is dropped
+    // first — hidden translation workers and headless `claude -p` runs. Each writes a perfectly
+    // ordinary transcript, so nothing about the row itself gives them away.
     const top = selectSessionRows([...onDiskStats, ...pending], {
-      isInternalHelper: (id) => translationWorkerIds.has(id) || headlessSessions.has(id),
+      isInternalHelper: (id) => translationWorkerIds.has(id) || isHeadlessSessionId(id),
       isDevTerminal: (id) => devTerminalSessions.has(id),
       includePending,
       limit: SESSION_LIST_LIMIT,

@@ -57,6 +57,7 @@ import { createWorkPhaseTracker } from "./session/work-phase-tracker.js";
 import { currentFirestore, currentUid } from "./backends/remoteHost/session.js";
 import { feedRefreshTaskDef, type AgentWorkerRunner } from "@mulmoclaude/core/feeds/server";
 import { initWorkspaceSetup } from "./backends/workspaceSetup.js";
+import { sweepOrphanHeadlessTranscripts } from "./session/headless-session.js";
 import { installBundledSkills } from "./infra/install-bundled-skills.js";
 import { initFileChangePublisher } from "./backends/fileChange.js";
 import { initNotifier } from "./backends/notifier.js";
@@ -93,6 +94,12 @@ const CLAUDE_PERMISSION_MODE = process.env.CLAUDE_PERMISSION_MODE || "auto";
 // CLAUDE_CWD is the workspace used as the PTY cwd and as the root for persisted
 // session state, so it must exist before we spawn anything into it.
 await fs.mkdir(CLAUDE_CWD, { recursive: true });
+
+// A headless run (the AI header title, the Run menu's Explain) deletes its own transcript when it
+// ends, so whatever is left belongs to one that never got to: the server was killed mid-title, or
+// the delete failed. Every boot, not once ever — the files are addressed by a NAME only this
+// server can mint, so there is no content guess to regret and no user conversation it could reach.
+void sweepOrphanHeadlessTranscripts(CLAUDE_CWD).catch(() => {});
 
 // Seed help docs + preset skills so a MulmoTerminal-alone run gets the full
 // workspace experience. Gated to the managed mulmoclaude workspace and
