@@ -76,7 +76,11 @@ export const DIR_TRUNCATE_FRONT = "truncate text-left [direction:rtl]";
 export const CELL_DIR_PATH = "[unicode-bidi:plaintext]";
 
 // Floored at ~15 characters of path so it stays readable in a narrow cell.
-export const CELL_DIR = `min-w-[16ch] max-w-[45%] flex-initial ${DIR_TRUNCATE_FRONT} font-mono text-[11px] text-[var(--cell-header-fg,var(--text-dim))]`;
+// The 16ch floor keeps a path readable in a narrow cell — but only where there IS room for it.
+// A phone pane is ~390px: the dot, the floor, the dir badge and seven action buttons do not fit,
+// and what goes over the edge is the LAST thing on the row, which is the close button. Below
+// 640px the path shrinks instead; the controls are the part that has to survive.
+export const CELL_DIR = `min-w-0 sm:min-w-[16ch] max-w-[45%] flex-initial ${DIR_TRUNCATE_FRONT} font-mono text-[11px] text-[var(--cell-header-fg,var(--text-dim))]`;
 
 export const CELL_CMD = "min-w-0 flex-auto truncate font-mono text-[12px] text-secondary";
 
