@@ -16,6 +16,7 @@ import { useRoute } from "vue-router";
 import AppSettingsModal from "./components/AppSettingsModal.vue";
 import AppToolbar from "./components/AppToolbar.vue";
 import ConfirmDialog from "./components/ConfirmDialog.vue";
+import FilePickerHost from "./components/FilePickerHost.vue";
 import { useSessions, type Filter } from "./composables/useSessions";
 import { browseClose } from "./composables/useCollectionBrowse";
 import { registerChatOpener, startCollectionChat } from "./composables/useChatLauncher";
@@ -459,4 +460,8 @@ function onSession(id: string) {
     @confirm="confirmDelete"
     @cancel="pendingDeleteId = null"
   />
+  <!-- App-wide in-browser file picker (the 📎 attach-file button). OUTSIDE the !isGrid block so
+       it is mounted in grid mode too — a grid cell's 📎 opens it as a modal over the grid. It
+       replaces the native OS dialog, which would otherwise open on the server's screen. -->
+  <FilePickerHost />
 </template>
