@@ -1,3 +1,4 @@
+import type { PrivateModeTracker } from "./terminal-replay.js";
 // Shapes shared by the session layer: the live-PTY table, the sidebar rows those resolve
 // into, and the per-session GUI records. Extracted from index.ts so the registry and the
 // modules that read it can name them without importing the boot module (#548).
@@ -17,6 +18,9 @@ export interface PtyEntry {
   term: IPty;
   ws: WebSocket | null;
   buffer: string;
+  // The private modes (DECSET) currently ON in this PTY — re-asserted on reattach, because
+  // the app set them once at startup and the bounded `buffer` tail long since dropped them.
+  modes: PrivateModeTracker;
   cwd: string; // the dir the PTY actually runs in (reported on reattach)
   // True when this session is the user's actively-viewed pane: the single-view open
   // session, or a focused/zoomed grid cell. Gates the attention flag — a socket being

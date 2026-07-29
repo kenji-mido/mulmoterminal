@@ -20,6 +20,7 @@ import {
   writeSandboxCredentials,
   cleanupSandbox,
 } from "../infra/sandbox.js";
+import { PrivateModeTracker } from "./terminal-replay.js";
 import type { PtyEntry } from "./types.js";
 
 const PTY_COLS = 120;
@@ -103,5 +104,5 @@ export function spawnSandboxEntry(sessionId: string, claudeArgs: string[], cwd: 
     console.warn("[sandbox] no Claude credential found in the macOS Keychain — the container may be unauthenticated. Run `claude` on the host to log in.");
   const term = spawnPty("docker", buildDockerRunArgs(sessionId, claudeArgs, cwd, claudeConfig, credentials, addDirs), cwd);
   console.log(`[pty] spawned claude (pid=${term.pid} via docker sandbox) in ${cwd}`);
-  return { term, ws, buffer: "", cwd, sandbox: true, active: false, agent: "claude" };
+  return { term, ws, buffer: "", modes: new PrivateModeTracker(), cwd, sandbox: true, active: false, agent: "claude" };
 }
