@@ -13,6 +13,7 @@ import { sameOriginGuard } from "./same-origin-guard.js";
 import express, { type Express } from "express";
 import { mountAllRoutes } from "../infra/plugins-registry.js";
 import { mountConfigRoutes } from "../config/config-routes.js";
+import { readBuildId } from "../config/build-id.js";
 import { mountFilesBrowseRoutes } from "../files/files-browse.js";
 import { mountTmuxRoutes } from "../infra/tmux-routes.js";
 import { hideSessionId } from "../session/hidden-store.js";
@@ -246,7 +247,7 @@ function mountSessionFacingRoutes(app: Express, deps: AppRouteDeps): void {
   // GET/POST /api/config (workspace dir + directory presets) — in its own module.
   // GRID-ONLY (dev_tool): backs the grid launcher's default dir + the settings
   // modal's directory presets. The single view never calls it.
-  mountConfigRoutes(app, CLAUDE_CWD);
+  mountConfigRoutes(app, CLAUDE_CWD, readBuildId(path.join(deps.clientDir, "../dist")));
 
   // Project-scoped file browsing + editing for the full-screen Files view
   // (GET /api/files/browse/{list,text,md}, PUT .../write — all ?cwd=&path=). Each

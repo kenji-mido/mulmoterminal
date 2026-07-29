@@ -17,6 +17,7 @@ import AppSettingsModal from "./components/AppSettingsModal.vue";
 import AppToolbar from "./components/AppToolbar.vue";
 import ConfirmDialog from "./components/ConfirmDialog.vue";
 import FilePickerHost from "./components/FilePickerHost.vue";
+import ReloadPrompt from "./components/ReloadPrompt.vue";
 import { useSessions, type Filter } from "./composables/useSessions";
 import { browseClose } from "./composables/useCollectionBrowse";
 import { registerChatOpener, startCollectionChat } from "./composables/useChatLauncher";
@@ -475,4 +476,7 @@ function onSession(id: string) {
        it is mounted in grid mode too — a grid cell's 📎 opens it as a modal over the grid. It
        replaces the native OS dialog, which would otherwise open on the server's screen. -->
   <FilePickerHost />
+  <!-- OUTSIDE the !isGrid block: a tab running an old client is wrong in whichever view it is
+       showing, and the grid is where it is most likely to be left open. -->
+  <ReloadPrompt />
 </template>
