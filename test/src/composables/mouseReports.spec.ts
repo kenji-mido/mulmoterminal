@@ -10,6 +10,7 @@ import {
   wantsMouseReports,
   wheelNotches,
   wheelReportSequence,
+  TouchScrollTracker,
 } from "../../../src/composables/mouseReports";
 
 // Claude Code's actual request: drag tracking + SGR encoding in one SET.
@@ -210,5 +211,43 @@ describe("wheelNotches", () => {
     const ticker = createWheelTicker();
     expect(wheelNotches(ticker, { deltaY: 120, deltaMode: PIXEL }, 0, ROWS, 1)).toBe(1);
     expect(wheelNotches(ticker, { deltaY: -120, deltaMode: PIXEL }, 0, ROWS, 1)).toBe(-1);
+  });
+});
+
+describe("TouchScrollTracker", () => {
+  it("a finger drag UP emits wheel-DOWN steps (natural touch scrolling), one per line height", () => {
+    const t = new TouchScrollTracker();
+    t.start(100);
+    expect(t.move(68, 16)).toBe(2); // 32px up = 2 lines down
+  });
+
+  it("a finger drag DOWN emits wheel-UP (negative) steps", () => {
+    const t = new TouchScrollTracker();
+    t.start(100);
+    expect(t.move(148, 16)).toBe(-3);
+  });
+
+  it("carries the sub-line remainder across moves so a slow drag still adds up", () => {
+    const t = new TouchScrollTracker();
+    t.start(100);
+    expect(t.move(90, 16)).toBe(0); // 10px — not a line yet
+    expect(t.move(80, 16)).toBe(1); // 20px total → one line, 4px carried
+    expect(t.move(68, 16)).toBe(1); // 4 + 12 = 16px → the next line
+  });
+
+  it("emits nothing before start() or after end()", () => {
+    const t = new TouchScrollTracker();
+    expect(t.move(50, 16)).toBe(0);
+    t.start(100);
+    t.end();
+    expect(t.move(50, 16)).toBe(0);
+  });
+
+  it("start() resets a stale carry from the previous drag", () => {
+    const t = new TouchScrollTracker();
+    t.start(100);
+    t.move(90, 16); // 10px carried
+    t.start(200);
+    expect(t.move(190, 16)).toBe(0); // the old 10px must not leak in
   });
 });

@@ -33,7 +33,7 @@ import { WebLinksAddon } from "@xterm/addon-web-links";
 import { ClipboardAddon, type IClipboardProvider } from "@xterm/addon-clipboard";
 import { swallowsMouseTracking } from "./mouseTrackingModes";
 import { clearResetModes, recordSwallowedModes } from "./mouseReports";
-import { guardMouseClicks, guardMouseWheel } from "./terminalMouseInput";
+import { guardMouseClicks, guardMouseWheel, guardTouchScroll } from "./terminalMouseInput";
 import { bufferIsShort, readBufferShape } from "./terminalBufferHealth";
 import { CanvasAddon } from "@xterm/addon-canvas";
 import "@xterm/xterm/css/xterm.css";
@@ -341,6 +341,7 @@ function guardMouseTracking(term: Terminal, swallowedMouseModes: Set<number>): v
     return false;
   });
   guardMouseWheel(term, swallowedMouseModes, getTerminalScrollSpeed);
+  guardTouchScroll(term, swallowedMouseModes); // the wheel path's touch counterpart, for a phone
 }
 
 // Terminal input -> the slot's CURRENT socket (survives reconnects: `c.ws` is re-read
