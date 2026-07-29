@@ -127,13 +127,16 @@ export function getPrWorkdirFooter(): boolean {
   return loadAppConfig(CONFIG_FILE).prWorkdirFooter;
 }
 
-export function mountConfigRoutes(app: Express, claudeCwd: string): void {
+export function mountConfigRoutes(app: Express, claudeCwd: string, buildId: string | null = null): void {
   // The live config as the API exposes it, so a client (e.g. a settings UI) can read back
   // everything it can write — buttons/chips included — and round-trip it.
   const configResponse = () => ({ cwd: claudeCwd, ...toPublicAppConfig(config) });
 
+  // `buildId` names the CLIENT bundle this server hands out (see config/build-id.ts). The
+  // browser records it on load and compares on every reconnect, so a tab left open through a
+  // rebuild can say so instead of quietly running yesterday's code.
   app.get("/api/config", (_req, res) => {
-    res.json({ ...configResponse(), home: os.homedir() });
+    res.json({ ...configResponse(), home: os.homedir(), buildId });
   });
 
   // The update notice for the header's "update available" badge, from the check the server

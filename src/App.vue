@@ -15,6 +15,7 @@ import GridView from "./components/GridView.vue";
 import { useRoute } from "vue-router";
 import AppSettingsModal from "./components/AppSettingsModal.vue";
 import AppToolbar from "./components/AppToolbar.vue";
+import ReloadPrompt from "./components/ReloadPrompt.vue";
 import { useSessions, type Filter } from "./composables/useSessions";
 import { browseClose } from "./composables/useCollectionBrowse";
 import { registerChatOpener, startCollectionChat } from "./composables/useChatLauncher";
@@ -409,4 +410,7 @@ function onSession(id: string) {
       @close="closeSettings"
     />
   </div>
+  <!-- OUTSIDE the !isGrid block: a tab running an old client is wrong in whichever view it is
+       showing, and the grid is where it is most likely to be left open. -->
+  <ReloadPrompt />
 </template>
