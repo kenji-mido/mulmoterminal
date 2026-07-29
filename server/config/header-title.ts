@@ -61,20 +61,30 @@ export function titleWindow(turns: ConversationTurn[]): ConversationTurn[] {
   return lastAssistant ? [...users, lastAssistant] : users;
 }
 
-// A labelled transcript the model reads on stdin, assistant turns clipped shorter.
+// A labelled transcript, assistant turns clipped shorter. Carried INSIDE the prompt (see
+// buildTitlePrompt) rather than on stdin.
 export function renderTurns(turns: ConversationTurn[]): string {
   return turns
     .map((t) => `${t.role === "user" ? "User" : "Assistant"}: ${clip(t.text, t.role === "user" ? USER_TURN_CHARS : ASSISTANT_TURN_CHARS)}`)
     .join("\n");
 }
 
-export function buildTitlePrompt(): string {
+// The transcript travels in the PROMPT, not on stdin. It used to ride stdin, and sometimes did
+// not arrive: the model then answered the only thing it could — "I don't see a transcript to
+// summarize. Could you paste the…" — which the parser clipped to 80 characters and stored as the
+// session's title. The window is capped at a few KB (five user turns, one assistant reply, both
+// clipped), so there is room for it in an argument, and an argument is not a stream that can go
+// missing.
+export function buildTitlePrompt(transcript: string): string {
   return [
-    "Below (on stdin) is the recent transcript of a coding session between a User and an AI Assistant.",
+    "Below is the recent transcript of a coding session between a User and an AI Assistant.",
     "Summarize what the USER is trying to accomplish as a short, concise title: a phrase, NOT a full",
     "sentence — no trailing punctuation. Base it on the User's intent, not the Assistant's wording.",
     "Match the User's language.",
     "Output ONLY the title: no quotes, no labels, no explanation.",
+    "",
+    "--- transcript ---",
+    transcript,
   ].join("\n");
 }
 
@@ -91,14 +101,28 @@ function stripQuotes(text: string): string {
   return chars.slice(start, end).join("").trim();
 }
 
-// Take the first non-empty line, strip surrounding quotes, and cap the length.
+// A model that did not produce a title wrote a SENTENCE — an apology, a question, a refusal ("I
+// don't see a transcript to summarize. Could you paste the…"). The old parser clipped whatever
+// came back to 80 characters and called it a title, which is how that named a session.
+//
+// The tell is the SHAPE, not the length: the prompt asks for a phrase and no trailing
+// punctuation, so a sentence break is something a title does not contain. Length cannot separate
+// the two — the refusal above is 103 characters and a legitimately wordy title can be longer.
+// A `.` needs a space after it, or version numbers and file names would be sentences.
+const SENTENCE_BREAK = /[.?!]\s|[。？！]/u;
+
+// Take the first non-empty line, strip surrounding quotes, and cap the length. Empty when the
+// answer is prose rather than a title — the caller reads that as "no title" and falls back to the
+// last prompt, which is better than a clipped apology standing in for the session's name.
 export function parseTitleOutput(stdout: string): string {
   const firstLine =
     stdout
       .split("\n")
       .map((l) => l.trim())
       .find(Boolean) ?? "";
-  return clip(stripQuotes(firstLine), MAX_TITLE_CHARS);
+  const title = stripQuotes(firstLine);
+  if (SENTENCE_BREAK.test(title)) return "";
+  return clip(title, MAX_TITLE_CHARS);
 }
 
 export interface GenerateTitleDeps {
@@ -123,8 +147,8 @@ export async function generateTitleFromTurns(allTurns: ConversationTurn[], deps:
   try {
     const { stdout } = await runClaude({
       bin: deps.claudeBin ?? claudeAdapter.bin(),
-      prompt: buildTitlePrompt(),
-      input: renderTurns(turns),
+      prompt: buildTitlePrompt(renderTurns(turns)),
+      input: "",
       timeoutMs: TITLE_TIMEOUT_MS,
       model: deps.model ?? titleModel(),
     });
