@@ -38,44 +38,58 @@ Settings live in three places: the **settings modal (Settings)**, the **global c
 
 {: .highlight }
 > **You don't have to hand-write any of this.** Run **`/mulmoterminal-config`** in any MulmoTerminal
-> session and the bundled skill walks you through it with checkboxes and colour presets, then writes
-> a valid file — for the current directory or several of your recent ones at once. (Settings →
-> **Configure appearance…** button starts the same skill.)
+> session: it asks what you want to change, hands off to the skill that owns it, and also answers
+> "how is this set up right now?" — including any key the app **dropped in validation**, which is
+> what a setting that silently never applied looks like from the outside.
 >
-> It is also how you find the settings that have **no UI at all** and exist only in
-> `~/.mulmoterminal/config.json`: [`providers`](#providers) (another model),
-> [`keymap`](#keymap) (keyboard shortcuts), [`terminalSubmit`](#terminal-submit) (the fix for
-> "Shift+Enter submits instead of adding a line"), [`fontFamily`](#font-family) (the terminal
-> font), and the periodic dev-work log. Hand-editing works
-> too — this page documents every field — but the skill validates as it writes, which matters for
-> `keymap`, where a malformed binding stops the server from starting.
+> Go straight to one if you already know the area:
+>
+> | Skill | Covers |
+> |---|---|
+> | **`/mulmoterminal-dirs`** | A project's colours, its position in the grid and launcher, name badge, terminal font size. Starts from the directories you actually open, reads what you already have, and follows the same pattern for the ones that have none. (Settings → **Configure appearance…** starts this one.) |
+> | **`/mulmoterminal-theme`** | Your own [colour scheme](#custom-themes), appearing in Settings' picker. (Settings → **Create a theme…**) |
+> | **`/mulmoterminal-header`** | [Header buttons and chips](#header), global or per project |
+> | **`/mulmoterminal-keys`** | [`keymap`](#keymap), [`copyOnSelect`](#copy-on-select), [`terminalSubmit`](#terminal-submit) — the fix for "Shift+Enter submits instead of adding a line". (Settings → **Set up shortcuts…**) |
+> | **`/mulmoterminal-model`** | [`providers`](#providers) and a per-project model |
+> | **`/mulmoterminal-notify`** | [Which moments beep or push](#sounds), and what each plays. (Settings → **Configure notifications…**) |
+>
+> This is how you reach the settings that have **no UI at all**. Hand-editing works too — this page
+> documents every field — but the skills validate as they write, which matters for `keymap`, where a
+> malformed binding stops the server from starting.
+>
+> You don't have to remember the names either: the Settings section for each of these ends in a
+> button that starts the skill that owns it, in a new session. The two without a Settings section of
+> their own — `-header` and `-model` — you run by name.
 
 ---
 
-## Settings modal (Settings) — what you can change where
+## Settings modal (Settings) — what you can change where {#settings-modal}
 
 Open it from **Settings** (the gear) in the toolbar.
 
-![The Settings modal — Theme, Terminal font size, Directory appearance, Directory settings (acme-web expanded), Notification sounds](../images/config-settings-modal.png)
+![The Settings modal — Theme with its Create a theme… button, Terminal font size, Terminal scroll speed, Waiting rows with the blink checkbox, Directory appearance, and Directory settings with acme-web expanded](../images/config-settings-modal.png)
 
-Fifteen sections, in this order.
+Up to seventeen sections, in this order — **Voice input** is there only on a machine that can transcribe, so most
+setups see sixteen.
 
 | Item | Description |
 |---|---|
-| **Theme** | Midnight / Nord / Daylight / Solarized Light, plus [any you defined yourself](#custom-themes) |
+| **Theme** | Midnight / Nord / Daylight / Solarized Light, plus [any you defined yourself](#custom-themes). Picks from what exists; "Create a theme…" starts the `mulmoterminal-theme` skill to write a new one |
 | **Terminal font size** | The xterm font size in px (8–32). Applies to every terminal **in this browser** — a phone and a desktop each keep their own. A directory can override it with `fontSize` ([below](#per-dir)) |
-| **Directory appearance** | "Configure appearance…" — set a directory's name badge, colors, terminal palette, and header interactively, through the `mulmoterminal-config` skill |
-| **Directory settings** | What each directory's `.mulmoterminal.json` is **actually doing**. Expand a row for the values in force (colors with a swatch), **which file each came from**, **keys dropped in validation**, and **keys this app never reads**. Read-only (→ [When a setting isn't working](#dir-settings-preview)) |
-| **Notification sounds** | Which moments beep and what each plays — one row per kind, with a preset picker and a play button (→ [Notification sounds](#sounds)) |
+| **Terminal scroll speed** | How far one wheel notch or trackpad swipe moves the terminal (1× is xterm's own). Per browser, like the font size, because it is a property of the pointing device |
+| **Waiting rows** | In the roster beside an enlarged cell, a row whose agent is **waiting on you** carries an amber ring and blinks; one that has merely **finished** is green and still. The checkbox turns off the movement, not the colour — and no row blinks when your system asks for reduced motion |
+| **Directory appearance** | "Configure appearance…" — set a directory's name badge, colors, terminal palette, and grid position interactively, through the `mulmoterminal-dirs` skill |
+| **Directory settings** | What each directory's `.mulmoterminal.json` is **actually doing**. Expand a row for the values in force (colors with a swatch), **which file each came from**, **keys dropped in validation**, and **keys this app never reads**. Read-only — "Explain my settings…" starts the `mulmoterminal-config` skill to say why and fix it (→ [When a setting isn't working](#dir-settings-preview)) |
+| **Notification sounds** | Which moments beep and what each plays — one row per kind, with a preset picker and a play button. "Configure notifications…" starts the `mulmoterminal-notify` skill for a per-project sound and which moments push (→ [Notification sounds](#sounds)) |
 | **Voice input** | The language you **dictate in** (your browser's, per-clip detection, or a fixed one). Shown only on a machine that can transcribe |
 | **Web Push notifications** | The "Notify my devices when a task finishes" toggle (off by default → [Mobile notifications](notifications.html)) |
 | **Google account** | Google sign-in for the Calendar link (not the RemoteHost Connect) |
 | **Pull request repos** | The repos aggregated by the cross-repo PR/Issue view (`owner/repo`) |
-| **Launch commands** | Commands you can launch besides Claude in a grid cell (`{ label, command }`) |
+| **Launch commands** | Commands you can launch besides the agents in a grid cell (`{ label, command }`). A plain shell needs no entry — the launcher's **Shell** toggle opens `$SHELL` unconfigured |
 | **Phone quick commands** | Phrases offered as chips on the **phone's** terminal view. Tapping one fills the input box; it is sent when you press send (`quickCommands`) |
 | **MCP servers** | Your own MCP servers to add to single-view sessions |
 | **Cost (estimated)** | Estimated cost readouts for Session / Today / Month |
-| **Keyboard shortcuts** | What is bound to what, read-only. **Everything starts as Not set** — you bind them in `keymap` (→ [Keyboard shortcuts](#keymap)) |
+| **Keyboard shortcuts** | What is bound to what, read-only. **Everything starts as Not set** — "Set up shortcuts…" starts the `mulmoterminal-keys` skill to bind them in `keymap` (→ [Keyboard shortcuts](#keymap)) |
 | **Help & user guide** | Links into this guide |
 
 ## When a setting isn't working — look here first {#dir-settings-preview}
@@ -141,8 +155,9 @@ All values are `#rrggbb`. The working / needs-you status colors take priority ov
 
 Both beat the global settings for terminals opened here, so one project can be told apart from
 another by ear. A file path is **relative to this directory** — an absolute path, or a `../`
-that escapes it, is rejected. `preset:<id>` works here too, so a project needs no audio file of
-its own. → [Notification sounds](#sounds)
+that escapes it, is rejected. `preset:<id>` works in **`sounds`** (per kind), so a project needs no
+audio file of its own — but **not in `sound`**, which takes a relative file path only and silently
+drops a preset reference. → [Notification sounds](#sounds)
 
 ### The terminal itself (xterm palette)
 
@@ -194,7 +209,7 @@ Japanese while the rest of your work is ASCII.
 
 Unlike the global key, this one needs **no server restart**. It is not filesystem-watched either,
 though: MulmoTerminal re-reads a `.mulmoterminal.json` when **Claude's own Write/Edit tools** report
-having written it — which is why `/mulmoterminal-config` recolours the cell as you watch. Edit the
+having written it — which is why `/mulmoterminal-dirs` recolours the cell as you watch. Edit the
 file **by hand, from outside**, and an already-open terminal keeps the old font until you reload the
 browser tab.
 ### Where this project sits in the grid (`orderPriority`) {#order-priority}
@@ -212,8 +227,13 @@ toolbar's ordering button, alongside auto (attention-first) and manual (the move
 - Equal ranks keep their current order, which is also what happens when several cells share one directory
   (the rank belongs to the *directory*, not the cell).
 
-Only the **priority** mode reads it. Leave the button on auto or manual and nothing changes, whatever
-your projects declare.
+In the **grid**, only the priority mode reads it — leave the button on auto or manual and nothing changes
+there, whatever your projects declare.
+
+The **launcher's directory chips always sort by it**, whichever mode the grid's button is on, so a project
+sits in the same place on both screens. The chips otherwise come in the order you last launched them, which
+changes under you; declaring ranks is how you pin them down. Directories that declare none stay behind the
+ranked ones, in that launch order.
 
 ### Customizing the header (buttons / chips) {#header}
 
@@ -281,6 +301,15 @@ show everything.**
 ```
 
 - Skill names (slugs) must start alphanumeric and contain only `a-z 0-9 - _`; a slug that doesn't resolve is ignored.
+
+### Closing summary for this directory (`appendSystemPrompt`)
+
+```json
+{ "appendSystemPrompt": false }
+```
+
+Whether this project's sessions are asked to end a reply with a summary. Omit it to follow the
+global setting, which is on. → [Turning off the closing summary](#append-system-prompt)
 
 ## Make your own colour scheme (`themes`) {#custom-themes}
 
@@ -588,6 +617,9 @@ An invalid value (a typo, or anything other than `"cr"` / `"esc-cr"`) is ignored
 - **Claude sessions only** — `terminalSubmit` describes *Claude Code's* binding, so it only affects
   Claude cells. A **shell**, **codex**, or command cell always submits with a plain Enter (`\r`),
   even in `esc-cr` mode — a reversed setting never rewrites a shell's Enter.
+- **Prompts MulmoTerminal sends for you** — a session that starts with a first prompt already in
+  it (a **Skill** launch button, a chat opened from a collection or custom view) has that prompt
+  typed into the box and submitted for you, and that submit follows the mapping too.
 - **Smartphones** — a soft keyboard can only send a bare **Enter** (there is no Shift+Enter, and on
   Android the Return key often isn't even a normal Enter). So on a phone Enter follows the table
   above and you can't insert a newline from the on-screen keyboard; compose multi-line prompts from
@@ -1058,6 +1090,46 @@ Notes:
 - If the line can't be added (no `gh`, a network error), the PR is still created and opened —
   you just don't get the line.
 
+## Turning off the closing summary (`appendSystemPrompt`) {#append-system-prompt}
+
+MulmoTerminal adds an instruction to every Claude session it starts (`--append-system-prompt`):
+**end a reply with a short summary** of **what was asked, what was achieved, and what was not**,
+under a `---` rule.
+
+The grid is the reason. Come back to a cell after a while and, without the summary, what you
+asked for and what came of it are only recoverable by scrolling back through the session.
+
+**On by default.** To turn it off, in `~/.mulmoterminal/config.json`:
+
+```json
+{
+  "appendSystemPrompt": false
+}
+```
+
+It applies to **sessions started from then on**. No server restart is needed, but **sessions
+already running keep it** — the instruction is handed over once, at spawn. To see the change,
+close a cell and open it again.
+
+To decide it per project, put it in that directory's `.mulmoterminal.json`. **The directory's
+answer wins** over the global one.
+
+```json
+{
+  "appendSystemPrompt": false
+}
+```
+
+Notes:
+
+- **Nothing in MulmoTerminal stops working without it.** No part of the app reads what the
+  summary says; the "last reply" shown in the roster and in push notifications is simply the raw
+  tail of the reply rather than a summary.
+- It is a **separate setting** from [Which clone made this PR](#pr-workdir-footer)
+  (`prWorkdirFooter`). Both ride on the same `--append-system-prompt`, and turning one off
+  leaves the other in place.
+- The value is `true` / `false` only — **there is no way to substitute your own wording yet**.
+
 ## Telling the issue you are on it (`issueWorkComments`) {#issue-work-comments}
 
 The `work` chip tells **you** which cell is on which issue. This tells **the issue** — so the
@@ -1142,8 +1214,8 @@ What you write here appears in an empty cell's launcher under **OR RUN A SCRIPT*
     { "label": "acme-api", "path": "/Users/you/projects/acme-api" }
   ],
   "launchers": [
-    { "label": "Shell", "command": "$SHELL" },
-    { "label": "Node REPL", "command": "node" }
+    { "label": "Node REPL", "command": "node" },
+    { "label": "htop", "command": "htop" }
   ],
   "quickCommands": [
     { "label": "PR", "text": "PR作って", "agents": ["claude"] },
@@ -1158,8 +1230,8 @@ What you write here appears in an empty cell's launcher under **OR RUN A SCRIPT*
 
 | Key | Role |
 |---|---|
-| `cwdPresets` | Working-directory chips in the launcher (`{ label, path }`; click to fill the field, the play icon to launch) |
-| `launchers` | The launch commands that appear under "OR LAUNCH" in a grid cell |
+| `cwdPresets` | Working-directory chips in the launcher (`{ label, path }`; click to fill the field, the play icon to launch). Ordered by each directory's [`orderPriority`](#order-priority); the ones that declare none follow, in the order you last launched them |
+| `launchers` | The launch commands that appear under "OR LAUNCH" in a grid cell. Only what you add — a plain shell is already the launcher's **Shell** toggle |
 | `quickCommands` | Phrases the **phone** offers as chips on a session (`{ label, text, agents? }`). Tapping one fills the input box — it is not sent until you press send. `agents` scopes a chip to `"claude"` / `"codex"` / `"shell"`; omit it to offer the chip everywhere. Editable in Settings → **Phone quick commands** |
 | `prRepos` | The repos targeted by the cross-repo PR/Issue view |
 | `buttons` / `chips` | Header buttons / chips (merged with project settings → [Customizing the header](#header)) |
@@ -1176,6 +1248,7 @@ What you write here appears in an empty cell's launcher under **OR RUN A SCRIPT*
 | `keymap` | User-defined keyboard shortcuts. **Empty by default — nothing is bound** (→ [Keyboard shortcuts](#keymap)) |
 | `copyOnSelect` | Put a mouse selection on the clipboard the moment it settles, with no key pressed. **Off by default** (→ [Copy on select](#copy-on-select)) |
 | `prWorkdirFooter` | End a created PR's body with `work in <clone>` (→ [Which clone made this PR](#pr-workdir-footer)). **On by default**; `false` opts out |
+| `appendSystemPrompt` | Have replies end with a summary of what was asked / achieved / not done (→ [Turning off the closing summary](#append-system-prompt)). **On by default**; `false` opts out, and a directory's `.mulmoterminal.json` wins |
 | `cockpitLines` | How many lines each cockpit-roster row shows before clamping (default `2 / 2 / 3` → [Cockpit roster line counts](#cockpit-lines)) |
 | `fontFamily` | The font every terminal renders in — a CSS font-family stack (→ [Terminal font](#font-family)) |
 
@@ -1199,6 +1272,10 @@ there to look at.
 | `MULMOTERMINAL_HOST` | `127.0.0.1` | The interface the server binds to (→ [below](#bind-host)) |
 | `MULMOTERMINAL_ALLOWED_ORIGINS` | *(none)* | Extra browser origins allowed to attach a terminal, comma-separated. Only needed alongside a wider `MULMOTERMINAL_HOST` (→ [below](#bind-host)) |
 | `MULMOTERMINAL_HOME` | `~/.mulmoterminal` | The root for managed git worktrees |
+| `CLAUDE_CONFIG_DIR` | `~` | Claude Code's own config directory. `.claude.json` lives **inside** it, so relocating your Claude Code config moves that file too. MulmoTerminal reads it to tell whether the per-project GUI MCP server is registered. Unset means `~/.claude.json` |
+| `MULMOCLAUDE_WORKSPACE_PATH` | `~/mulmoclaude` | Where the managed MulmoClaude workspace lives. Presets and helps are seeded **only** into this directory, so launching in an arbitrary project never writes them there. Set it to the same value MulmoClaude uses |
+| `MULMOTERMINAL_NO_SKILL_INSTALL` | *(none)* | Set to any value to skip installing the bundled skills (`mulmoterminal-config` and the `-dirs` / `-theme` / `-header` / `-keys` / `-model` / `-notify` / `-bug-report` / `-decisions` family) into `~/.claude/skills/` and the Codex skills root on startup |
+| `GEMINI_IMAGE_MODEL` | `gemini-3.1-flash-image-preview` | The model used for image generation (needs `GEMINI_API_KEY`). The default is a **preview** model Google schedules for retirement around mid-2026 — pin a stable one here (e.g. `gemini-2.5-flash-image`) rather than waiting for a code change |
 
 ### Who can reach the server (`MULMOTERMINAL_HOST`) {#bind-host}
 
@@ -1262,8 +1339,16 @@ connects to `localhost` and is allowed for that reason alone.
 
 {: .warning }
 > Naming an origin says **which pages may drive this server**. It does not add a login — there
-> still isn't one — and it does not make the server safe to expose. A request that sends *no*
-> `Origin` at all is still refused unless it comes from this machine, whatever you name here.
+> still isn't one — and it does not make the server safe to expose. A request that **changes**
+> something (and every terminal WebSocket) is still refused when it sends *no* `Origin` and does
+> not come from this machine, whatever you name here.
+
+Reads are not judged by origin at all. A browser sends no `Origin` on a same-origin `GET`, so the
+check cannot tell one from a cross-site `<img>` load and would only refuse the page you opened
+yourself — what protects a read is the bind, which is why the warning above says a widened bind
+trusts anything that can reach the port. Up to and including 2.7.0 two status routes judged a `GET`
+anyway, so a browser on a named origin loaded the page and then filled the console with `403` from
+`/api/remote-host/status` and `/api/google/status`; if you see that, upgrade.
 
 You do **not** need this to use MulmoTerminal from your phone: the phone companion talks to the
 host over Firestore, not over your local network (→ [from your phone](phone.html)).

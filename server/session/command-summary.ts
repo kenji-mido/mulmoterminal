@@ -6,6 +6,7 @@
 import type { Express, Request } from "express";
 import { spawn } from "node:child_process";
 import { claudeAdapter } from "../agents/claude.js";
+import { requestOriginAllowed } from "../routes/same-origin-guard.js";
 import { isRecord } from "../../common/isRecord.js";
 import { CLAUDE_CWD } from "../config/env.js";
 import { newHeadlessSessionId, removeHeadlessTranscript } from "./headless-session.js";
@@ -164,7 +165,7 @@ interface CommandSummaryDeps {
 // local `claude` binary. Mirrors mountPickFileRoute's shape.
 export function mountCommandSummaryRoute(app: Express, { isAllowedOrigin }: CommandSummaryDeps): void {
   app.post("/api/command/summarize", async (req: Request, res) => {
-    if (!isAllowedOrigin(req.headers.origin, req.socket?.remoteAddress)) return res.status(403).json({ error: "forbidden origin" });
+    if (!requestOriginAllowed(req, isAllowedOrigin)) return res.status(403).json({ error: "forbidden origin" });
     const body = isRecord(req.body) ? req.body : {};
     if (typeof body.log !== "string") return res.status(400).json({ error: "body.log (string) required" });
     try {

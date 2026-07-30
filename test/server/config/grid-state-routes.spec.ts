@@ -51,8 +51,11 @@ async function mount(over: { isAllowedOrigin?: () => boolean } = {}) {
   const { mountGridStateRoutes, GRID_STATE_CHANNEL } = await import("../../../server/config/grid-state-routes.js");
   const handlers = new Map<string, Handler>();
   const app = {
-    get: (p: string, h: Handler) => handlers.set(`GET ${p}`, h),
-    post: (p: string, h: Handler) => handlers.set(`POST ${p}`, h),
+    // Wrapped to carry the method and path Express would have set: the origin guard
+    // (requestOriginAllowed) reads both, since it is the same rule the central gate applies —
+    // a safe method is never judged by origin (#1094).
+    get: (p: string, h: Handler) => handlers.set(`GET ${p}`, (req, res) => h({ ...req, method: "GET", path: p }, res)),
+    post: (p: string, h: Handler) => handlers.set(`POST ${p}`, (req, res) => h({ ...req, method: "POST", path: p }, res)),
   } as unknown as Express;
   const publish = vi.fn();
   mountGridStateRoutes(app, { isAllowedOrigin: over.isAllowedOrigin ?? (() => true), publish });

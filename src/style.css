@@ -185,6 +185,53 @@
     height: 100%;
   }
 
+  /* Wiki page bodies are HTML that renderWikiHtml produces at runtime (marked -> DOMPurify), so
+     its tags carry no classes and no utility can reach them — the same situation as .cm-editor
+     above. Here rather than in the components because CLAUDE.md's styling rule sends the cases a
+     utility genuinely cannot express to one global stylesheet, with the reason.
+
+     One rule set, because there is one surface: WikiProse renders both the page body and the
+     lint report. They used to be two containers whose heading rhythm had drifted apart — same
+     commit, same column width, same text size, no comment claiming a reason, and MulmoClaude
+     renders both through one WikiPageBody (#1125). */
+  .wiki-body h1,
+  .wiki-body h2,
+  .wiki-body h3 {
+    margin: 1.4em 0 0.5em;
+    font-weight: 650;
+  }
+  .wiki-body a {
+    color: var(--accent);
+  }
+  .wiki-body code {
+    background: var(--bg-subtle);
+    padding: 0.1em 0.35em;
+    border-radius: 4px;
+    font-size: 0.9em;
+  }
+  .wiki-body pre {
+    background: var(--bg-subtle);
+    padding: 12px 14px;
+    border-radius: 8px;
+    overflow-x: auto;
+  }
+  .wiki-body img {
+    max-width: 100%;
+    height: auto;
+  }
+  .wiki-body blockquote {
+    margin: 1em 0;
+    padding-left: 12px;
+    border-left: 3px solid var(--border);
+    color: var(--text-secondary);
+  }
+  /* Clickable [[wiki links]] (spans from core's renderWikiLinks). */
+  .wiki-body .wiki-link {
+    color: var(--accent);
+    cursor: pointer;
+    border-bottom: 1px dotted var(--accent);
+  }
+
   /* Project-wide icon convention: Material Symbols (outlined). Icons inherit the
      surrounding text size by default; set font-size on the element to scale, and
      the optical-size axis (opsz) follows so weight stays balanced. */

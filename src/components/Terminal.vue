@@ -5,6 +5,7 @@ import { FLIP_MS, shouldRefocusOnZoomChange } from "./cellFlip";
 import { terminalManagesAttention, terminalViewActive } from "./terminalViewActive";
 import { dragCarriesFiles, dropTextFromUriList, toInsertText } from "./dropPaths";
 import { dropUploadErrorMessage, uploadDropBatch } from "./dropUpload";
+import { createImagePasteHandler } from "../composables/usePasteImage";
 import { translateUiSentence } from "../utils/translateUi";
 import { useTheme, currentTermTheme, termThemeFor } from "../composables/useTheme";
 import { useDirConfig } from "../composables/useDirConfig";
@@ -15,6 +16,7 @@ import { terminalHeaderStyleFor } from "./cellHeaderStyle";
 import { useVoiceInput } from "../composables/useVoiceInput";
 import { useGitStatus } from "../composables/useGitStatus";
 import * as conn from "../composables/useTerminalConnections";
+import type { TerminalAgent } from "../../common/sessionAgent";
 import { useMobileKeys } from "../composables/useMobileKeys";
 import RunMenu from "./RunMenu.vue";
 import SkillMenu from "./SkillMenu.vue";
@@ -54,8 +56,9 @@ const props = defineProps<{
   // (`{ shell: true }`) — persistent & reattachable, connects to /ws/launch instead of
   // resuming a Claude session.
   launcher?: { index: number } | { shell: true } | null;
-  // A first-class codex session — connects to /ws/codex instead of /ws (Claude).
-  codex?: boolean;
+  // Which agent this terminal runs. Anything but "claude" connects to that agent's own
+  // endpoint (/ws/codex, /ws/antigravity) instead of /ws. Absent means Claude.
+  agent?: TerminalAgent;
   // Provider/model picked in the launch form, for this session only (#584).
   launch?: LaunchChoice | null;
   runMenu?: boolean;
@@ -98,7 +101,7 @@ function currentTarget(): conn.ConnTarget {
     devTerminal: !!props.devTerminal,
     command: props.command ?? null,
     launcher: props.launcher ?? null,
-    codex: !!props.codex,
+    agent: props.agent ?? "claude",
     launch: props.launch ?? null,
   };
 }
@@ -142,7 +145,7 @@ const headerButtonsCwd = computed(() => (props.command || props.launcher ? null 
 const { buttons: headerButtons } = useHeaderButtons({
   cwd: headerButtonsCwd,
   session: computed(() => props.sessionId),
-  agent: computed<"claude" | "codex">(() => (props.codex ? "codex" : "claude")),
+  agent: computed(() => props.agent ?? "claude"),
   model: computed(() => sessionContext.value?.model ?? null),
 });
 
@@ -159,7 +162,7 @@ function onHeaderButton(button: HeaderButton): void {
     label: button.label,
     cwd: serverCwd.value,
     session: props.sessionId,
-    agent: props.codex ? "codex" : "claude",
+    agent: props.agent ?? "claude",
     model: sessionContext.value?.model ?? null,
   };
   emit("run", command);
@@ -167,7 +170,7 @@ function onHeaderButton(button: HeaderButton): void {
 // A skill picked from the header Skill menu runs IN this session (not a spare cell
 // like a script): type its invocation and submit, exactly like a `run:"input"` button.
 function onSkill(slug: string): void {
-  conn.submitText(slotKey, skillSeed(slug, props.codex ?? false));
+  conn.submitText(slotKey, skillSeed(slug, props.agent ?? "claude"));
 }
 
 // Git status chip — single view only. In the grid the embedding TerminalCell shows
@@ -456,12 +459,12 @@ function enqueueDrop(files: File[]) {
 
 async function uploadAndInsert(files: File[]) {
   const session = props.sessionId;
-  if (!session) return showDropMessage(DROP_NO_SESSION_EN);
+  if (!session) return void showHint(DROP_NO_SESSION_EN);
   // Shown in English first and swapped when the (server-cached) translation lands, like the hint.
   void translateUiSentence(DROP_UPLOADING_EN, "mulmoterminal-ui").then((translated) => (dropUploadingText.value = translated));
   const outcome = await uploadDropBatch(session, files, () => props.sessionId);
-  if (outcome.kind === "stale") return showDropMessage(DROP_SESSION_CHANGED_EN);
-  if (outcome.kind === "failed") return showDropMessage(dropUploadErrorMessage(outcome.status));
+  if (outcome.kind === "stale") return void showHint(DROP_SESSION_CHANGED_EN);
+  if (outcome.kind === "failed") return void showHint(dropUploadErrorMessage(outcome.status));
   insertText(toInsertText(outcome.paths));
 }
 
@@ -482,16 +485,30 @@ const dropHint = ref(false);
 const dropHintText = ref("");
 const DROP_HINT_MS = 6000;
 let dropHintTimer: ReturnType<typeof setTimeout> | undefined;
-async function showDropMessage(english: string) {
+// Two hints can now overlap (a failed drop, a failed paste), and a translation that resolves
+// after the next hint has replaced the text would otherwise put the OLD sentence back.
+let hintRequest = 0;
+async function showHint(english: string) {
+  const request = ++hintRequest;
   dropHintText.value = english; // show immediately; the translation (server-cached) swaps in
   dropHint.value = true;
   clearTimeout(dropHintTimer);
   dropHintTimer = setTimeout(() => (dropHint.value = false), DROP_HINT_MS);
   const translated = await translateUiSentence(english, "mulmoterminal-ui");
-  if (dropHint.value) dropHintText.value = translated; // ignore if it resolved after the hint hid
+  if (request === hintRequest && dropHint.value) dropHintText.value = translated;
 }
-const showDropHint = () => showDropMessage(hasPickFileButton(headerButtons.value) ? DROP_HINT_PICKER_EN : DROP_HINT_TYPE_EN);
+const showDropHint = () => void showHint(hasPickFileButton(headerButtons.value) ? DROP_HINT_PICKER_EN : DROP_HINT_TYPE_EN);
 onUnmounted(() => clearTimeout(dropHintTimer));
+
+// Paste a screenshot to insert the path of the file the server saves it as (#938). Same
+// destination as a dropped file, reached without the round trip through one: a screenshot on
+// the clipboard never has to be written somewhere first and picked back up. Text pastes never
+// reach this — the handler declines them and xterm's own paste handling runs as before.
+const onPaste = createImagePasteHandler({
+  sessionId: () => props.sessionId ?? null,
+  insertText,
+  onError: (message) => void showHint(message),
+});
 
 onUnmounted(() => {
   resizeObserver?.disconnect();
@@ -547,13 +564,18 @@ onUnmounted(() => {
         <button
           v-if="voice.capable.value"
           type="button"
-          class="inline-flex cursor-pointer items-center rounded-[4px] border-0 bg-transparent p-0.5 text-[var(--cell-btn,var(--text-muted))] hover:bg-selected hover:text-fg"
-          :class="['voice', { listening: voice.listening.value, busy: voice.downloading.value || voice.transcribing.value }]"
+          class="inline-flex cursor-pointer items-center rounded-[4px] border-0 bg-transparent p-0.5 hover:bg-selected"
+          :class="voice.listening.value ? 'animate-cell-pulse text-[#e5484d]' : 'text-[var(--cell-btn,var(--text-muted))] hover:text-fg'"
           :title="voiceTitle()"
           :aria-label="voiceTitle()"
           @click="voice.toggle()"
         >
-          <span class="material-symbols-outlined text-[18px]" aria-hidden="true">{{ voiceIcon() }}</span>
+          <span
+            class="material-symbols-outlined text-[18px]"
+            :class="{ 'animate-spin': voice.downloading.value || voice.transcribing.value }"
+            aria-hidden="true"
+            >{{ voiceIcon() }}</span
+          >
         </button>
         <!-- On-screen keys toggle. Present on the primary terminal whatever the device, because
              touch auto-detect misreads on some mobile browsers and this is the way back. -->
@@ -583,6 +605,7 @@ onUnmounted(() => {
       @dragover="onDragOver"
       @dragleave="dragOver = false"
       @drop="onDrop"
+      @paste.capture="onPaste"
     />
     <!-- Superseded: this session is live in another window (a phone / another tab). Offer to
          take it back here rather than making a page reload the only way. -->
@@ -684,33 +707,3 @@ onUnmounted(() => {
     </div>
   </div>
 </template>
-
-<!-- The voice button's recording pulse / busy spin need @keyframes, which have no
-     utility equivalent — the rest of the header is utilities. These target .voice
-     directly (the icon-btn base is now utilities). -->
-<style scoped>
-.voice.listening {
-  color: #e5484d;
-  animation: voice-pulse 1.2s ease-in-out infinite;
-}
-
-.voice.busy .material-symbols-outlined {
-  animation: voice-spin 1s linear infinite;
-}
-
-@keyframes voice-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.4;
-  }
-}
-
-@keyframes voice-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-</style>

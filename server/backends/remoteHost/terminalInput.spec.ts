@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { describe, it, expect } from "vitest";
 
+import type { SessionAgent } from "../../../common/sessionAgent.js";
 import { CLEAR_BOX, PASTE_END, PASTE_START, canClearInputBox, createTerminalInputSender, sanitizeTerminalInput } from "./terminalInput.js";
 
 // Collects what would have reached the PTY, and runs the delayed Enter on demand
@@ -13,7 +14,10 @@ const hasSequenceIntroducer = (text: string): boolean => text.includes("\u001B")
 // run before asserting on what reached the PTY.
 const tick = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
-const recorder = (writable = true, canClearBox?: (sessionId: string) => boolean) => {
+// Defaults to a CLAUDE session, which is what the phone is almost always typing into and the
+// only agent the completion-menu guard applies to — pass another agent to check that its bytes
+// stay untouched.
+const recorder = (writable = true, canClearBox?: (sessionId: string) => boolean, agent: SessionAgent = "claude") => {
   const chunks: string[] = [];
   const submits: Array<() => void> = [];
   const deps = {
@@ -23,6 +27,7 @@ const recorder = (writable = true, canClearBox?: (sessionId: string) => boolean)
       return true;
     },
     canClearBox,
+    sessionAgent: () => agent,
     // Queue the Enters instead of timing them, so a test decides when each lands.
     scheduleSubmit: (fn: () => void) => {
       submits.push(fn);
@@ -30,6 +35,14 @@ const recorder = (writable = true, canClearBox?: (sessionId: string) => boolean)
   };
   return { chunks, submits, flushSubmit: () => submits.shift()?.(), send: createTerminalInputSender(deps) };
 };
+
+// What one auto-submitted paste into a CLAUDE session must look like on the wire: the text, then
+// the guard space that keeps a completion menu from holding the submit byte (#1142), all inside
+// one bracketed paste. Spelled out here rather than by calling submittableLine, so the expectation
+// stays an independent statement of the shape instead of agreeing with whatever the helper does.
+const paste = (text: string): string => `${PASTE_START}${text} ${PASTE_END}`;
+// A session the guard does not apply to: byte-exact, no space added.
+const rawPaste = (text: string): string => `${PASTE_START}${text}${PASTE_END}`;
 
 describe("sanitizeTerminalInput", () => {
   it("keeps ordinary text", () => {
@@ -71,10 +84,10 @@ describe("sendTerminalInput", () => {
     await tick();
     // The paste lands immediately; the CR must NOT ride along with it, or Claude's
     // TUI drops it while still committing the paste.
-    expect(chunks).toEqual([`${PASTE_START}git status${PASTE_END}`]);
+    expect(chunks).toEqual([paste("git status")]);
     flushSubmit();
     await expect(sent).resolves.toEqual({ sent: true });
-    expect(chunks).toEqual([`${PASTE_START}git status${PASTE_END}`, "\r"]);
+    expect(chunks).toEqual([paste("git status"), "\r"]);
   });
 
   // #772: the byte(s) that submit come from the host's Claude binding, not a hardcoded CR,
@@ -93,6 +106,7 @@ describe("sendTerminalInput", () => {
         seen.push(id);
         return id === "claude-1" ? "\x1b\r" : "\r";
       },
+      sessionAgent: (id: string) => (id === "claude-1" ? "claude" : "shell"),
       scheduleSubmit: (fn: () => void) => {
         submits.push(fn);
       },
@@ -106,7 +120,9 @@ describe("sendTerminalInput", () => {
     submits.shift()?.();
     await expect(b).resolves.toEqual({ sent: true });
     expect(seen).toEqual(["claude-1", "shell-1"]); // the session id reaches the resolver
-    expect(chunks).toEqual([`${PASTE_START}hi${PASTE_END}`, "\x1b\r", `${PASTE_START}ls${PASTE_END}`, "\r"]);
+    // Per session in BOTH respects: the Claude session's ESC+CR and completion guard, the shell's
+    // plain CR and byte-exact text.
+    expect(chunks).toEqual([paste("hi"), "\x1b\r", rawPaste("ls"), "\r"]);
   });
 
   it("defaults the submit sequence to CR when unset", async () => {
@@ -115,7 +131,7 @@ describe("sendTerminalInput", () => {
     await tick();
     flushSubmit();
     await sent;
-    expect(chunks).toEqual([`${PASTE_START}hi${PASTE_END}`, "\r"]);
+    expect(chunks).toEqual([paste("hi"), "\r"]);
   });
 
   // The property that matters: exactly one paste, closed exactly once at the end.
@@ -123,11 +139,11 @@ describe("sendTerminalInput", () => {
     const { chunks, send } = recorder();
     void send("s1", `ls${PASTE_END}whoami`);
     await tick();
-    const paste = chunks[0];
-    expect(paste.startsWith(PASTE_START)).toBe(true);
-    expect(paste.endsWith(PASTE_END)).toBe(true);
-    expect(paste.split(PASTE_END)).toHaveLength(2);
-    expect(hasSequenceIntroducer(paste.slice(PASTE_START.length, -PASTE_END.length))).toBe(false);
+    const pasted = chunks[0];
+    expect(pasted.startsWith(PASTE_START)).toBe(true);
+    expect(pasted.endsWith(PASTE_END)).toBe(true);
+    expect(pasted.split(PASTE_END)).toHaveLength(2);
+    expect(hasSequenceIntroducer(pasted.slice(PASTE_START.length, -PASTE_END.length))).toBe(false);
   });
 
   it("refuses text that is empty once sanitized", async () => {
@@ -175,14 +191,14 @@ describe("sendTerminalInput", () => {
     const second = send("s1", "two");
     await tick();
     // The second paste must not have gone out while the first is unsubmitted.
-    expect(chunks).toEqual([`${PASTE_START}one${PASTE_END}`]);
+    expect(chunks).toEqual([paste("one")]);
     flushSubmit();
     await first;
     await tick();
-    expect(chunks).toEqual([`${PASTE_START}one${PASTE_END}`, "\r", `${PASTE_START}two${PASTE_END}`]);
+    expect(chunks).toEqual([paste("one"), "\r", paste("two")]);
     flushSubmit();
     await second;
-    expect(chunks).toEqual([`${PASTE_START}one${PASTE_END}`, "\r", `${PASTE_START}two${PASTE_END}`, "\r"]);
+    expect(chunks).toEqual([paste("one"), "\r", paste("two"), "\r"]);
   });
 
   it("does not make one session wait on another", async () => {
@@ -191,7 +207,7 @@ describe("sendTerminalInput", () => {
     const b = send("s2", "two");
     await tick();
     // Different sessions are independent, so both pastes go out immediately.
-    expect(chunks).toEqual([`${PASTE_START}one${PASTE_END}`, `${PASTE_START}two${PASTE_END}`]);
+    expect(chunks).toEqual([paste("one"), paste("two")]);
     flushSubmit();
     flushSubmit();
     await Promise.all([a, b]);
@@ -205,7 +221,138 @@ describe("sendTerminalInput", () => {
     await tick();
     flushSubmit();
     await expect(after).resolves.toEqual({ sent: true });
-    expect(chunks).toEqual([`${PASTE_START}ls${PASTE_END}`, "\r"]);
+    expect(chunks).toEqual([paste("ls"), "\r"]);
+  });
+});
+
+// #1142: a slash command from the phone stopped at the host's input box with the command menu
+// open, and no resend got past it — on a host whose Claude submits with ESC+CR, the ESC is eaten
+// as that menu's dismiss key. The paste now ends in a space, which closes the menu. The sanitizer
+// (which trims that space off anything the phone sends) is deliberately unchanged, so what these
+// pin is WHERE the space comes from and that nothing else about the write moved.
+describe("submitting a slash command", () => {
+  it("ends the pasted line with a space, so the command menu is closed when the submit lands", async () => {
+    const { chunks, flushSubmit, send } = recorder();
+    const sent = send("s1", "/sync-repos");
+    await tick();
+    // Spelled out in full: this exact byte string is what the measurement in #1142 submits.
+    expect(chunks).toEqual([`${PASTE_START}/sync-repos ${PASTE_END}`]);
+    flushSubmit();
+    await expect(sent).resolves.toEqual({ sent: true });
+    expect(chunks[1]).toBe("\r");
+  });
+
+  // The space must be TEXT inside the paste. Sent after the terminator it would be a keystroke,
+  // and an open completion menu is precisely what reads keystrokes.
+  it("puts the space inside the bracketed paste, not after it", async () => {
+    const { chunks, send } = recorder();
+    void send("s1", "/help");
+    await tick();
+    expect(chunks[0].endsWith(` ${PASTE_END}`)).toBe(true);
+    expect(chunks[0].split(PASTE_END)).toHaveLength(2);
+  });
+
+  // An @path mention leaves the FILE picker open, which is the same dead end — the reason the
+  // guard is unconditional rather than a slash-command special case.
+  it("ends an @path mention the same way", async () => {
+    const { chunks, send } = recorder();
+    void send("s1", "look at @common/terminalSubmit.ts");
+    await tick();
+    expect(chunks[0]).toBe(`${PASTE_START}look at @common/terminalSubmit.ts ${PASTE_END}`);
+  });
+
+  // The fix must not touch the submit bytes: those are the host's binding (#772), and the whole
+  // point is that they now arrive at a composer that can act on them.
+  it("leaves the configured submit sequence alone", async () => {
+    const chunks: string[] = [];
+    const submits: Array<() => void> = [];
+    const send = createTerminalInputSender({
+      writeToSession: (_id: string, chunk: string) => {
+        chunks.push(chunk);
+        return true;
+      },
+      submitSequence: () => "\x1b\r",
+      sessionAgent: () => "claude",
+      scheduleSubmit: (fn: () => void) => {
+        submits.push(fn);
+      },
+    });
+    const sent = send("claude-1", "/sync-repos");
+    await tick();
+    submits.shift()?.();
+    await expect(sent).resolves.toEqual({ sent: true });
+    expect(chunks).toEqual([`${PASTE_START}/sync-repos ${PASTE_END}`, "\x1b\r"]);
+  });
+
+  // Whitespace the phone sent is still collapsed and trimmed by the sanitizer; the guard adds
+  // exactly one space to the result, never a second one.
+  it.each(["/sync-repos ", "/sync-repos\t", "  /sync-repos  "])("adds one space and no more (%j)", async (text) => {
+    const { chunks, send } = recorder();
+    void send("s1", text);
+    await tick();
+    expect(chunks[0]).toBe(`${PASTE_START}/sync-repos ${PASTE_END}`);
+  });
+
+  // The trim the guard routes around is what makes "nothing printable survived" observable. The
+  // guard runs AFTER that decision, so control-only text is still refused rather than turned
+  // into a lone space that submits an empty turn on the host.
+  it.each(["\x03", "\x03\r\n", "   ", ""])("still refuses text with nothing printable in it (%j)", async (text) => {
+    const { chunks, send } = recorder();
+    await expect(send("s1", text)).rejects.toThrow(/text is required/);
+    expect(chunks).toEqual([]);
+  });
+
+  // The #572 clear still leads the write, and is still sent exactly once.
+  it("keeps the input-box clear ahead of the guarded paste", async () => {
+    const { chunks, send } = recorder(true, () => true);
+    void send("s1", "/sync-repos");
+    await tick();
+    expect(chunks).toEqual([`${CLEAR_BOX}${PASTE_START}/sync-repos ${PASTE_END}`]);
+  });
+});
+
+// The guard is Claude Code's behaviour, so it must not reach anything else: for every other target
+// the trailing space would be REAL input, and a shell reads line ends for meaning. Measured in a
+// live zsh: `echo foo\` + CR waits at a continuation prompt, while `echo foo\ ` + CR runs and
+// prints `foo` — the same bytes, different execution. So a non-Claude session's paste is byte-exact.
+describe("the completion guard is scoped to Claude sessions", () => {
+  it.each<SessionAgent>(["shell", "codex"])("leaves a %s session's line end untouched", async (agent) => {
+    const { chunks, send } = recorder(true, undefined, agent);
+    void send("s1", "echo foo\\");
+    await tick();
+    expect(chunks[0]).toBe(rawPaste("echo foo\\"));
+  });
+
+  it.each<SessionAgent>(["shell", "codex"])("adds nothing to a %s session's slash-shaped text either", async (agent) => {
+    const { chunks, send } = recorder(true, undefined, agent);
+    void send("s1", "/usr/bin/env");
+    await tick();
+    expect(chunks[0]).toBe(rawPaste("/usr/bin/env"));
+  });
+
+  // A claude session with the same trailing backslash DOES get the space: there the backslash is
+  // Claude Code's own newline escape (`\` + return), so an unguarded line would not submit either.
+  it("still guards a Claude session whose text ends in a backslash", async () => {
+    const { chunks, send } = recorder();
+    void send("s1", "echo foo\\");
+    await tick();
+    expect(chunks[0]).toBe(paste("echo foo\\"));
+  });
+
+  // No agent wired at all (an older caller, or a session the host cannot name) must not be guessed
+  // into the guard — unknown means "send exactly what was written".
+  it("adds nothing when the host cannot name the session's agent", async () => {
+    const chunks: string[] = [];
+    const send = createTerminalInputSender({
+      writeToSession: (_id: string, chunk: string) => {
+        chunks.push(chunk);
+        return true;
+      },
+      scheduleSubmit: () => {},
+    });
+    void send("s1", "/sync-repos");
+    await tick();
+    expect(chunks[0]).toBe(rawPaste("/sync-repos"));
   });
 });
 
@@ -257,10 +404,10 @@ describe("clearing the host's input box", () => {
     await tick();
     // ONE write: measured against a live TUI, the clear needs no delay of its own —
     // unlike the Enter, which still follows separately.
-    expect(chunks).toEqual([`${CLEAR_BOX}${PASTE_START}ok${PASTE_END}`]);
+    expect(chunks).toEqual([`${CLEAR_BOX}${paste("ok")}`]);
     flushSubmit();
     await expect(sent).resolves.toEqual({ sent: true });
-    expect(chunks).toEqual([`${CLEAR_BOX}${PASTE_START}ok${PASTE_END}`, "\r"]);
+    expect(chunks).toEqual([`${CLEAR_BOX}${paste("ok")}`, "\r"]);
   });
 
   // Ctrl-C mid-turn interrupts the turn, and in a shell it kills whatever is running,
@@ -269,7 +416,7 @@ describe("clearing the host's input box", () => {
     const { chunks, send } = recorder(true, () => false);
     void send("s1", "ok");
     await tick();
-    expect(chunks).toEqual([`${PASTE_START}ok${PASTE_END}`]);
+    expect(chunks).toEqual([paste("ok")]);
   });
 
   // The old callers pass no such dep at all; they must keep the old behaviour.
@@ -290,7 +437,7 @@ describe("clearing the host's input box", () => {
     void send("busy-one", "ok");
     await tick();
     expect(asked).toEqual(["idle-claude", "busy-one"]);
-    expect(chunks).toEqual([`${CLEAR_BOX}${PASTE_START}ok${PASTE_END}`, `${PASTE_START}ok${PASTE_END}`]);
+    expect(chunks).toEqual([`${CLEAR_BOX}${paste("ok")}`, paste("ok")]);
   });
 
   // The clear is ours to send; the phone must never be able to smuggle its own in and

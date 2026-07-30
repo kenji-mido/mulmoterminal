@@ -4,7 +4,7 @@
 // (see MODEL_PRICING); unknown models are left unpriced rather than guessed.
 import path from "node:path";
 import fs from "node:fs/promises";
-import type { Express } from "express";
+import type { Express, Response } from "express";
 import { forEachJsonlRecord } from "../infra/jsonl-file.js";
 import { parseJsonl } from "./transcript.js";
 import { isRecord } from "../../common/isRecord.js";
@@ -199,9 +199,12 @@ async function rollupProjectCost(cwd: string): Promise<CostRollup> {
 // (optional) is one transcript. The session's OWN unpriced-turn count is reported
 // separately, since that session may fall outside the month window / file cap and so
 // isn't reflected in `unpricedTurns` (which covers the roll-up only).
-export function mountCostRoute(app: Express, deps: { resolveCwd: (cwd: string | null) => string }): void {
+// `resolveCwd` answers null once it has refused the request itself (an unusable `?cwd=`), so the
+// roll-up is never computed for a directory other than the one asked about.
+export function mountCostRoute(app: Express, deps: { resolveCwd: (cwd: unknown, res: Response) => string | null }): void {
   app.get("/api/cost", async (req, res) => {
-    const cwd = deps.resolveCwd(typeof req.query.cwd === "string" ? req.query.cwd : null);
+    const cwd = deps.resolveCwd(req.query.cwd, res);
+    if (cwd === null) return;
     const sessionParam = typeof req.query.session === "string" ? req.query.session : null;
     try {
       const rollup = await rollupProjectCost(cwd);

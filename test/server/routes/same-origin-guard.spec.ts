@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import type { NextFunction, Request, Response } from "express";
-import { needsSameOrigin, sameOriginGuard } from "../../../server/routes/same-origin-guard.js";
+import { needsSameOrigin, requestOriginAllowed, sameOriginGuard } from "../../../server/routes/same-origin-guard.js";
 
 describe("needsSameOrigin", () => {
   it("gates every state-changing method", () => {
@@ -86,5 +86,41 @@ describe("sameOriginGuard", () => {
     } as unknown as Request;
     sameOriginGuard(predicate)(req, {} as Response, vi.fn() as unknown as NextFunction);
     expect(predicate).toHaveBeenCalledWith("http://localhost:1", "127.0.0.1");
+  });
+});
+
+// The per-route form. Its whole reason for existing is that the safe-method exemption must travel
+// with the rule: #1094 was two routes that guarded a GET by calling the predicate themselves, and
+// a browser sends no Origin on a same-origin GET — so they refused the page from the very origin
+// MULMOTERMINAL_ALLOWED_ORIGINS had just named.
+describe("requestOriginAllowed", () => {
+  // Assembled rather than written as a literal, as in loopback.spec.ts: the "no hardcoded IP"
+  // lint rule cannot tell an infrastructure address from a test input that has to be one.
+  const LAN_PEER = [10, 0, 0, 50].join(".");
+  const request = (method: string, path: string): Request =>
+    ({ method, path, headers: { origin: "http://evil.example" }, socket: { remoteAddress: LAN_PEER } }) as unknown as Request;
+  const refuseEverything = () => false;
+
+  it("allows a safe method without consulting the predicate", () => {
+    const predicate = vi.fn(refuseEverything);
+    for (const m of ["GET", "HEAD", "OPTIONS"]) {
+      expect(requestOriginAllowed(request(m, "/api/remote-host/status"), predicate), m).toBe(true);
+    }
+    expect(predicate).not.toHaveBeenCalled();
+  });
+
+  it("still asks the predicate for a state-changing method", () => {
+    expect(requestOriginAllowed(request("POST", "/api/remote-host/connect"), refuseEverything)).toBe(false);
+    expect(requestOriginAllowed(request("POST", "/api/remote-host/connect"), () => true)).toBe(true);
+  });
+
+  it("keeps the view-data exemption, which authenticates by token instead", () => {
+    expect(requestOriginAllowed(request("PUT", "/api/collections/notes/view-data"), refuseEverything)).toBe(true);
+  });
+
+  it("hands the predicate both the origin and the peer", () => {
+    const predicate = vi.fn(() => true);
+    requestOriginAllowed(request("POST", "/api/config"), predicate);
+    expect(predicate).toHaveBeenCalledWith("http://evil.example", LAN_PEER);
   });
 });

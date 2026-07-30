@@ -108,6 +108,26 @@ export function saysYes(answer) {
  * updates never cross — so the instance that did not start a session shows a frozen history
  * for it (#611).
  */
+/**
+ * The question asked when another server is ALREADY RUNNING, whatever port this one was told to
+ * use (#1061).
+ *
+ * `secondInstancePrompt` below only fires when the wanted port is taken, so `--port <free>`
+ * started a second instance in silence — which is how eight live sessions had their settings
+ * deleted by a peer's boot. The clash is a symptom; the shared `~/.mulmoterminal` is the thing
+ * that is not supported, and that is true at any port.
+ */
+export function runningInstancesPrompt(instances) {
+  const where = instances.map((i) => (i.port === null ? `pid ${i.pid}` : `http://localhost:${i.port}`)).join(", ");
+  const subject = instances.length === 1 ? "MulmoTerminal is already running" : `${instances.length} MulmoTerminal servers are already running`;
+  return [
+    `${subject} (${where}).`,
+    "  Running more than one is NOT a supported setup: they share ~/.mulmoterminal,",
+    "  so they can overwrite each other's session state.",
+    "Start another one anyway? [y/N] ",
+  ].join("\n");
+}
+
 export const SECOND_INSTANCE_NOTE = [
   "  Note: both share ~/.mulmoterminal. A session's tool history does not live-update",
   "  in the instance that did not start it.",

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { appendBoundedOutput, PrivateModeTracker, recordPtyOutput, stripTerminalQueries } from "../../../server/session/terminal-replay.js";
+import { appendBoundedOutput, stripTerminalQueries, terminalModePrefix } from "../../../server/session/terminal-replay.js";
 
 const ESC = String.fromCharCode(0x1b);
 const BEL = String.fromCharCode(0x07);
@@ -141,59 +141,19 @@ describe("appendBoundedOutput", () => {
   });
 });
 
-describe("PrivateModeTracker", () => {
-  it("tracks DECSET/DECRST — a reset mode leaves the preamble", () => {
-    const t = new PrivateModeTracker();
-    t.feed("\x1b[?1049h\x1b[?2004h");
-    t.feed("\x1b[?2004l");
-    expect(t.preamble()).toBe("\x1b[?1049h");
+describe("terminalModePrefix", () => {
+  it("re-establishes each mode the reattaching browser lost", () => {
+    expect(terminalModePrefix([1049, 1003, 1006])).toBe(`${ESC}[?1049h${ESC}[?1003h${ESC}[?1006h`);
   });
 
-  it("splits multi-parameter SETs (tmux sends ?1000;1006h as one sequence)", () => {
-    const t = new PrivateModeTracker();
-    t.feed("\x1b[?1000;1006h");
-    expect(t.preamble()).toBe("\x1b[?1000h\x1b[?1006h");
+  it("sends nothing when the pane has nothing sticky to restore", () => {
+    expect(terminalModePrefix([])).toBe("");
   });
 
-  it("puts the alt-screen switch FIRST so the replayed drawing lands in the right buffer", () => {
-    const t = new PrivateModeTracker();
-    t.feed("\x1b[?1h\x1b[?1000h\x1b[?1049h");
-    expect(t.preamble().startsWith("\x1b[?1049h")).toBe(true);
-  });
-
-  it("recognizes a sequence split across output chunks", () => {
-    const t = new PrivateModeTracker();
-    t.feed("text\x1b[?10");
-    t.feed("49h more");
-    expect(t.preamble()).toBe("\x1b[?1049h");
-  });
-
-  it("is empty with no modes set, and ignores non-private CSI", () => {
-    const t = new PrivateModeTracker();
-    t.feed("\x1b[31mred\x1b[0m\x1b[2J");
-    expect(t.preamble()).toBe("");
-  });
-});
-
-// The two halves of "a browser attaching later can rebuild this session" travel together, so a
-// new spawner cannot record the tail and forget the modes. Removing either line fails a case here.
-describe("recordPtyOutput", () => {
-  const entry = () => ({ buffer: "", modes: new PrivateModeTracker() });
-
-  it("appends to the bounded tail AND tracks the modes in one call", () => {
-    const e = entry();
-    recordPtyOutput(e, `${ESC}[?1049h${ESC}[?1006hhello`, 1024);
-    expect(e.buffer).toContain("hello");
-    expect(e.modes.preamble()).toContain("[?1049h");
-    expect(e.modes.preamble()).toContain("[?1006h");
-  });
-
-  it("honours the tail limit while still tracking modes that scrolled out of it", () => {
-    const e = entry();
-    recordPtyOutput(e, `${ESC}[?1000h`, 8);
-    recordPtyOutput(e, "0123456789abcdef", 8);
-    expect(e.buffer.length).toBeLessThanOrEqual(8);
-    expect(e.buffer).not.toContain("[?1000h"); // pushed out of the tail — exactly the bug
-    expect(e.modes.preamble()).toContain("[?1000h"); // …but still known
+  // A combined `CSI ? 1049 ; 1003 h` is NOT all mouse modes, so the client would let it through to
+  // xterm — which would then track the mouse itself and turn every drag into coordinate reports
+  // instead of a text selection (#729). One sequence per mode is what keeps the swallow working.
+  it("never combines modes into one parameter list", () => {
+    expect(terminalModePrefix([1049, 1003, 1006])).not.toContain(";");
   });
 });

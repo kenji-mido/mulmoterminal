@@ -17,6 +17,7 @@ import { existsSync, readFileSync } from "node:fs";
 import type { Express, Request } from "express";
 import { isRecord } from "../../common/isRecord.js";
 import { writeFileAtomic } from "../files/atomic-write.js";
+import { requestOriginAllowed } from "../routes/same-origin-guard.js";
 
 const GRID_STATE_FILE = path.join(os.homedir(), ".mulmoterminal", "grid-state.json");
 
@@ -59,7 +60,7 @@ interface GridStateRouteOptions {
   // Writing the grid is a privileged local action (same guard as the other POST routes) so
   // a random site the user visits can't quietly rearrange their grid. GET is read-only and
   // no more sensitive than /api/sessions, so it stays open.
-  isAllowedOrigin: (origin?: string, host?: string) => boolean;
+  isAllowedOrigin: (origin?: string, remoteAddress?: string) => boolean;
   // Broadcast the saved grid so other browsers apply it live (see GRID_STATE_CHANNEL).
   publish: (channel: string, data: unknown) => void;
 }
@@ -70,7 +71,7 @@ export function mountGridStateRoutes(app: Express, { isAllowedOrigin, publish }:
   });
 
   app.post("/api/grid-state", async (req: Request, res) => {
-    if (!isAllowedOrigin(req.headers.origin, req.headers.host)) return res.status(403).json({ error: "forbidden origin" });
+    if (!requestOriginAllowed(req, isAllowedOrigin)) return res.status(403).json({ error: "forbidden origin" });
     const body = isRecord(req.body) ? req.body.state : undefined;
     if (!looksLikeGridState(body)) return res.status(400).json({ error: "state must be a grid object with a cells array" });
     if (Buffer.byteLength(JSON.stringify(body)) > MAX_BODY_BYTES) return res.status(413).json({ error: "grid state too large" });

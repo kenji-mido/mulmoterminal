@@ -28,15 +28,29 @@ const STATE_CHANGING = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 // origin, and the reason these paths must not be judged by origin at all.
 const VIEW_DATA = /^\/api\/collections\/[^/]+\/view-data(\/|$)/;
 
+type OriginPredicate = (origin: string | undefined, remoteAddress: string | undefined) => boolean;
+
 export function needsSameOrigin(method: string, path: string): boolean {
   if (!STATE_CHANGING.has(method.toUpperCase())) return false;
   return !VIEW_DATA.test(path);
 }
 
-export function sameOriginGuard(isAllowedOrigin: (origin: string | undefined, remoteAddress: string | undefined) => boolean) {
+// The same verdict for a route that keeps a guard of its own on top of the gate below — which is
+// most of the local-action routes, deliberately: the gate is the floor, not a replacement.
+//
+// It exists because the safe-method exemption belongs to the RULE and not to the middleware. A
+// per-route guard that asked the predicate directly lost it, and a browser sends NO Origin on a
+// same-origin GET — so those routes refused every page served from an origin the operator had
+// just named, which is #1094. Two of them guarded a GET; the rest happened to sit on a POST,
+// where this returns exactly what the direct call did.
+export function requestOriginAllowed(req: Request, isAllowedOrigin: OriginPredicate): boolean {
+  if (!needsSameOrigin(req.method, req.path)) return true;
+  return isAllowedOrigin(req.headers.origin, req.socket?.remoteAddress);
+}
+
+export function sameOriginGuard(isAllowedOrigin: OriginPredicate) {
   return (req: Request, res: Response, next: NextFunction): void => {
-    if (!needsSameOrigin(req.method, req.path)) return next();
-    if (isAllowedOrigin(req.headers.origin, req.socket?.remoteAddress)) return next();
+    if (requestOriginAllowed(req, isAllowedOrigin)) return next();
     res.status(403).json({ error: "forbidden origin" });
   };
 }

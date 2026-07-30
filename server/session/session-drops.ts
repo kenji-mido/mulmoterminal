@@ -137,7 +137,7 @@ export function cleanupSessionDrops(sessionId: string): void {
  *  reading its drops, since a PTY without tmux died with the server that owned it.
  *
  *  Returns the ids it dropped, for the boot log. */
-export function pruneOrphanDrops(liveIds: ReadonlySet<string>, root: string = DROPS_ROOT): string[] {
+export function pruneOrphanDrops(liveIds: ReadonlySet<string>, root: string = DROPS_ROOT, writtenBefore: number | null = null): string[] {
   const stat = lstatSync(root, { throwIfNoEntry: false });
   if (!stat) return []; // nothing has been dropped yet
   // Never walk a root that is not ours. Removing entries from a directory somebody else
@@ -156,7 +156,19 @@ export function pruneOrphanDrops(liveIds: ReadonlySet<string>, root: string = DR
   const dropped: string[] = [];
   for (const name of names) {
     if (!SESSION_ID_RE.test(name) || liveIds.has(name)) continue;
-    if (removeQuietly(path.join(root, name))) dropped.push(name);
+    const dir = path.join(root, name);
+    // Same rule as the settings sweep (#1061): without tmux, `liveIds` is empty even when a peer
+    // is running, so its directories look like leftovers. Only what predates every live peer can
+    // honestly be called abandoned. A directory we cannot stat is one we decline to judge.
+    if (writtenBefore !== null && !isOlderThan(dir, writtenBefore)) continue;
+    if (removeQuietly(dir)) dropped.push(name);
   }
   return dropped;
+}
+
+// mtime of a drop directory: bumped whenever a file lands in it, so it tracks the session's last
+// use rather than its creation — which is what "could a running peer still want this" needs.
+function isOlderThan(dir: string, cutoff: number): boolean {
+  const stat = lstatSync(dir, { throwIfNoEntry: false });
+  return stat ? stat.mtimeMs < cutoff : false;
 }

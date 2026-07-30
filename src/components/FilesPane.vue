@@ -12,8 +12,7 @@ import { createEditor, langKindForFilename, type CmEditor } from "./cmEditor";
 import { expandedPaths, restoreOrder } from "./filesTreeState";
 import { isWriteToOpenFile } from "../composables/fileWriteMatch";
 import { usePubSub } from "../composables/usePubSub";
-import { FILE_WRITE_CHANNEL } from "../../common/fileWriteChannel";
-import { isRecord } from "../../common/isRecord";
+import { FILE_WRITE_CHANNEL, isFileWriteEvent } from "../../common/fileWriteChannel";
 
 interface Node {
   name: string;
@@ -309,7 +308,7 @@ async function checkForExternalChange(): Promise<void> {
 function watchExternalChanges(): () => void {
   externalTimer = setInterval(checkForExternalChange, EXTERNAL_CHECK_MS);
   const unsubscribe = usePubSub().subscribe(FILE_WRITE_CHANNEL, (data) => {
-    if (isRecord(data) && typeof data.file === "string" && isWriteToOpenFile(data.file, props.cwd, openPath.value)) checkForExternalChange();
+    if (isFileWriteEvent(data) && isWriteToOpenFile(data.file, props.cwd, openPath.value)) checkForExternalChange();
   });
   return () => {
     if (externalTimer !== null) clearInterval(externalTimer);

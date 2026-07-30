@@ -1,11 +1,11 @@
 import { describe, it, expect } from "vitest";
 import { mount } from "@vue/test-utils";
 import CockpitHeader from "../../../src/components/CockpitHeader.vue";
-import type { CellStatus } from "../../../src/components/gridTabs";
+import type { AttentionStatus } from "../../../src/components/attentionStatus";
 import type { PrPhase, WorkPhase } from "../../../src/components/rosterPhase";
 
 type Props = {
-  status: CellStatus;
+  status: AttentionStatus;
   agent: string;
   cwd: string | null;
   home: string | null;

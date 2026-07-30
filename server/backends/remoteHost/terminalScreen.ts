@@ -6,17 +6,37 @@ import { parseStyledRows, rowsToScreen, suggestionFromRows, type ScreenRow } fro
 import type { SessionAgent } from "../../../common/sessionAgent.js";
 import { workItemHeadline, type PrPhase, type WorkItem } from "../../../common/prPhase.js";
 import type { QuickCommandChip } from "./quickCommands.js";
+import { basename } from "node:path";
+import { getAgentAdapter } from "../../agents/registry.js";
+import type { AgentKind } from "../../agents/types.js";
 
 // Map a tmux pane's current command onto the kinds the phone knows. Anything else is a
 // shell or a one-off program the phone has no special input for — "shell" is the right
 // answer for both, since that is where typed commands belong.
-const AGENT_COMMANDS: Record<string, SessionAgent> = { claude: "claude", codex: "codex" };
+//
+// Two spellings per agent: the DEFAULT binary name, and whatever `*_BIN` points at — a pane
+// reports the running program's own name, so a user who set `ANTIGRAVITY_BIN=/opt/agy-next` has
+// panes called `agy-next`, and matching only the default would report their agent as a shell.
+// The basename, because that is what a pane command is; the default stays in the map either way,
+// so overriding the variable never un-recognises sessions started before it was set.
+const AGENT_DEFAULT_COMMAND: Record<AgentKind, string> = { claude: "claude", codex: "codex", antigravity: "agy" };
+
+const agentCommands = (): Record<string, SessionAgent> => {
+  const map: Record<string, SessionAgent> = {};
+  for (const [kind, command] of Object.entries(AGENT_DEFAULT_COMMAND)) {
+    map[command] = kind as SessionAgent;
+    map[basename(getAgentAdapter(kind as AgentKind).bin())] = kind as SessionAgent;
+  }
+  return map;
+};
 
 export const agentFromPaneCommand = (command: string | null): SessionAgent | null => {
   if (!command) {
     return null;
   }
-  return AGENT_COMMANDS[command] ?? "shell";
+  // Rebuilt per call rather than cached: the env vars are read at call time everywhere else too
+  // (adapter.bin()), and this runs once per session row, not per frame.
+  return agentCommands()[command] ?? "shell";
 };
 
 // What a session is working on, as the phone needs it: numbers to identify it, a phase for the
@@ -52,6 +72,13 @@ export interface SessionDetail {
   work?: SessionWorkSummary;
 }
 
+// What a host's `detailOf` may hand over. Deliberately looser than SessionDetail: writing
+// `work: map.get(cwd)` leaves the key behind holding `undefined`, and buildSessionList is
+// what drops it. The wire shape must not carry such a key — see the note there (#1042).
+export interface SessionDetailDraft extends Omit<SessionDetail, "work"> {
+  work?: SessionWorkSummary | undefined;
+}
+
 // The work item as the phone should see it, or undefined when there is nothing to say. Kept here
 // rather than at the call site so the "what counts as worth sending" rule has one home: a merged
 // or closed PR is finished work, which is also why the header chip clears itself on merge.
@@ -71,7 +98,7 @@ export interface SessionListInput {
   // grid's cells, so the single-view chat session and any tmux shell that was never a grid
   // cell are excluded — even while they are live and resumable.
   isGridSession: (id: string) => boolean;
-  detailOf: (id: string) => SessionDetail;
+  detailOf: (id: string) => SessionDetailDraft;
 }
 
 // Live sessions first, then by title, so the phone's list is stable across polls.
@@ -126,6 +153,11 @@ export interface CaptureScreenDeps {
 export interface SessionScreenMeta {
   cwd?: string;
   branch?: string;
+  // The user's own one-line note on the session (#1084), which the phone shows ABOVE the summary:
+  // the line the user wrote outranks what the agent said (sessionDisplayName). Its own field
+  // rather than riding in `summary` the way the picker's row rides in `title` — `summary` is drawn
+  // as a row labelled as the AI's summary, so a handwritten note put there would be mislabelled.
+  memo?: string;
   summary?: string;
   prompt?: string;
   // The dir's REPOSITORY ROOT on GitHub, so the phone can link out to it (#832). Absent for
@@ -153,8 +185,44 @@ export interface SessionScreen extends SessionScreenMeta {
 // written to a Firestore command doc, which rejects an `undefined` value outright, and the
 // phone renders each field it receives as its own labelled row — an empty one would read as
 // "this session has no branch" instead of "not known".
-export function definedScreenMeta(meta: SessionScreenMeta): SessionScreenMeta {
+// What the host hands over BEFORE the trim: every field is a string it may not be able to
+// answer. The trimmed result is a SessionScreenMeta, where an unanswered field has no key.
+type ScreenMetaDraft = Partial<Record<keyof SessionScreenMeta, string | undefined>>;
+
+export function definedScreenMeta(meta: ScreenMetaDraft): SessionScreenMeta {
   return Object.fromEntries(Object.entries(meta).filter(([, value]) => value !== undefined && value.trim() !== ""));
+}
+
+// Where each field of the header comes from. Injected, like the rest of this file, so the join
+// AND the order of the reads are testable without a PTY, a git checkout, or the server's
+// module graph.
+export interface ScreenMetaSources {
+  cwdOf: (id: string) => string;
+  // Both take the cwd, and neither is called for a session that has none — a dir the host
+  // cannot name has no branch and no GitHub page either.
+  branchOf: (cwd: string) => Promise<string | null>;
+  githubUrlOf: (cwd: string) => Promise<string | null>;
+  memoOf: (id: string) => string;
+  summaryOf: (id: string) => string;
+  promptOf: (id: string) => string;
+  // The memo store's boot read. Awaited BEFORE memoOf, or a screen pulled during startup is
+  // told the note is gone — which is indistinguishable from the user having erased it (#1110).
+  memosHydrated: Promise<void>;
+}
+
+export async function buildScreenMeta(id: string, sources: ScreenMetaSources): Promise<SessionScreenMeta> {
+  const cwd = sources.cwdOf(id);
+  await sources.memosHydrated;
+  // Both git reads are independent, so the phone waits for one spawn rather than two.
+  const [branch, githubUrl] = await Promise.all([cwd ? sources.branchOf(cwd) : null, cwd ? sources.githubUrlOf(cwd) : null]);
+  return definedScreenMeta({
+    cwd,
+    branch: branch ?? "",
+    memo: sources.memoOf(id),
+    summary: sources.summaryOf(id),
+    prompt: sources.promptOf(id),
+    githubUrl: githubUrl ?? "",
+  });
 }
 
 // tmux first: it renders the real screen, works while detached, and survives a restart.

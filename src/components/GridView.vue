@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount, onActivated, onDeactivated, nextTick } from "vue";
-import TerminalGrid from "./TerminalGrid.vue";
+import TerminalGrid, { type CockpitRow } from "./TerminalGrid.vue";
 import AppSettingsModal from "./AppSettingsModal.vue";
 import AppToolbar from "./AppToolbar.vue";
 import GuideLinks from "./GuideLinks.vue";
-import { startCollectionChat } from "../composables/useChatLauncher";
-import { router } from "../router";
+import { showSpawnedSession, startCollectionChat } from "../composables/useChatLauncher";
+import { skillSeed } from "./skillSeed";
+import type { BundledSkillName } from "../../common/bundledSkills";
 import {
   initialState,
   addCell,
@@ -19,6 +20,7 @@ import {
   runScriptInNewCell,
   insertCellAfter,
   shellCell,
+  sessionCell,
   launchInCell,
   setSortMode,
   moveCell,
@@ -28,7 +30,6 @@ import {
   nextAttentionUid,
   orderCells,
   pageSlice,
-  activityStatus,
   countByStatus,
   cancelableLaunchUid,
   pageCount,
@@ -37,11 +38,11 @@ import {
   STATE_KEY,
   LEGACY_KEY,
   type GridState,
-  type CellStatus,
   type Cell,
   resolveCellStatus,
   MAX_TERMINALS,
 } from "./gridTabs";
+import { activityStatus, type AttentionStatus } from "./attentionStatus";
 import { gridShortcutFor, isEditableTarget, type GridShortcut } from "../composables/gridShortcut";
 import { adoptedGridState, fetchServerGridState, saveServerGridState, parseServerGridState, normalizedGridJson, normalizeRawGridJson } from "./gridStateServer";
 import { useCaptureKeydown } from "../composables/useCaptureKeydown";
@@ -50,7 +51,7 @@ import { preferredLaunchDir } from "./launchDir";
 import * as conn from "../composables/useTerminalConnections";
 import { rosterCellsKey, staleCacheKeys } from "./rosterCache";
 import type { RunCommand } from "./runCommand";
-import { becameCiFailing, EMPTY_SESSION_META, isPrPhase, mergeSessionMeta, type PrPhase, type WorkPhase } from "./rosterPhase";
+import { becameCiFailing, EMPTY_SESSION_META, isPrPhase, mergeSessionMeta, type PrPhase, type SessionMetaView } from "./rosterPhase";
 import { notifySound } from "../composables/notifySound";
 import { useGridActivity } from "../composables/useGridActivity";
 import { registerNewTerminalHandler, type NewTerminalRequest } from "../composables/useNewTerminal";
@@ -59,8 +60,10 @@ import { reportActiveTerminals } from "../composables/useUnloadGuard";
 import { useAppConfig } from "../composables/useAppConfig";
 import { fetchDirConfig, invalidateDirConfig, useDirPriorities } from "../composables/useDirConfig";
 import { nextSortMode } from "./sortModeButton";
+import type { TerminalAgent } from "../../common/sessionAgent";
 import { usePubSub } from "../composables/usePubSub";
 import type { LaunchAgent } from "../../common/launchAgent";
+import type { LaunchPick } from "./launchers";
 
 // The multi-terminal grid view, shown at /terminals. Leaving the grid is just a
 // route push from the shared toolbar (Chat / Collections / a favorite), so there's
@@ -166,17 +169,17 @@ const noRunningTerminals = computed(() => runningCount(state.value.cells) === 0)
 // no session id (command cells) and a just-launched cell before its id arrives.
 const cellSessionIds = computed(() => state.value.cells.map((c) => c.session).filter((s): s is string => !!s));
 const { activity: gridActivity } = useGridActivity(cellSessionIds);
-const statusByUid = reactive<Record<number, CellStatus>>({});
-const onStatus = (uid: number, s: CellStatus) => (statusByUid[uid] = s);
+const statusByUid = reactive<Record<number, AttentionStatus>>({});
+const onStatus = (uid: number, s: AttentionStatus) => (statusByUid[uid] = s);
 // Which cell the cursor is in, reported up from the grid. Un-zoomed this is the only notion of
 // "the terminal I am on", so the keyboard shortcuts rotate from it.
 const focusedCellUid = ref<number | null>(null);
 const sessionStatus = computed(() => {
-  const m = new Map<string, CellStatus>();
+  const m = new Map<string, AttentionStatus>();
   for (const [id, a] of gridActivity) m.set(id, activityStatus(a.working, a.waiting, a.event));
   return m;
 });
-const statusForSort = computed<Record<number, CellStatus>>(() => resolveCellStatus(state.value.cells, sessionStatus.value, statusByUid));
+const statusForSort = computed<Record<number, AttentionStatus>>(() => resolveCellStatus(state.value.cells, sessionStatus.value, statusByUid));
 // At-a-glance tally across ALL pages, for the toolbar summary.
 const statusCounts = computed(() => countByStatus(state.value.cells, statusForSort.value));
 const reorderable = computed(() => state.value.sortMode === "manual");
@@ -193,11 +196,10 @@ const orderedCells = computed(() => orderCells(state.value.cells, statusForSort.
 const displayCells = computed(() => (zoomedUid(state.value) !== null ? orderedCells.value : pageSlice(orderedCells.value, state.value.page)));
 const expandedUid = computed(() => zoomedUid(state.value));
 
-// The zoomed grid's cockpit roster: a text row per cell — status + dir + AI summary +
-// current prompt + the agent's latest reply — so many parallel agents can be supervised
-// past the 9-thumbnail grid, and the enlarged terminal is switched by picking a row.
-type SessionMeta = { lastPrompt: string | null; aiTitle: string | null; lastResponse: string | null; workPhase: WorkPhase | null };
-const sessionMeta = reactive(new Map<string, SessionMeta>());
+// The zoomed grid's cockpit roster: a text row per cell — status + dir + the user's memo +
+// AI summary + current prompt + the agent's latest reply — so many parallel agents can be
+// supervised past the 9-thumbnail grid, and the enlarged terminal is switched by picking a row.
+const sessionMeta = reactive(new Map<string, SessionMetaView>());
 // Single source of truth for the roster's prompt / summary / reply: each cell's on-disk
 // transcript, read via GET /api/session/:id (always current, and works for sessions this
 // MulmoTerminal doesn't manage — a plain `claude` you resumed emits nothing over pub/sub).
@@ -215,7 +217,7 @@ async function seedMeta(id: string, cwd: string | null) {
     const query = cwd ? `?cwd=${encodeURIComponent(cwd)}` : "";
     const res = await fetch(`/api/session/${id}${query}`);
     if (!res.ok || latestMetaSeed.get(id) !== seed) return;
-    const d = (await res.json()) as Partial<SessionMeta>;
+    const d = (await res.json()) as Partial<SessionMetaView>;
     if (latestMetaSeed.get(id) !== seed) return;
     sessionMeta.set(id, mergeSessionMeta(sessionMeta.get(id) ?? EMPTY_SESSION_META, d));
   } catch {
@@ -356,25 +358,31 @@ onBeforeUnmount(stopPoll);
 
 // A cell with no session/prompt yet still gets a human label from what it IS running.
 const fallbackLabel = (c: Cell): string | null => c.command?.label ?? c.launcher?.label ?? (c.session ? "starting…" : "empty");
-const listRows = computed(() =>
-  orderedCells.value.map((c) => {
-    const meta = c.session ? sessionMeta.get(c.session) : undefined;
-    return {
-      uid: c.uid,
-      cwd: c.cwd,
-      agent: c.agent ?? "claude",
-      status: statusForSort.value[c.uid] ?? ("idle" as CellStatus),
-      summary: meta?.aiTitle ?? null,
-      prompt: meta?.lastPrompt ?? null,
-      response: meta?.lastResponse ?? null,
-      fallback: fallbackLabel(c),
-      phase: (c.cwd ? phaseByCwd.get(c.cwd) : undefined) ?? ("none" as PrPhase),
-      workPhase: meta?.workPhase ?? null,
-      headerColor: (c.cwd ? chromeByCwd.get(c.cwd)?.headerColor : null) ?? null,
-      headerTextColor: (c.cwd ? chromeByCwd.get(c.cwd)?.headerTextColor : null) ?? null,
-    };
-  }),
-);
+// "Nothing known yet" is resolved ONCE per lookup rather than per field. Five of the row's fields
+// come out of the meta and two out of the chrome, so a `??` on each both crossed the complexity
+// limit and made every field independently defaultable — which is how a field the roster never
+// wired up reads as a legitimate null rather than failing to typecheck.
+const chromeOf = (cwd: string | null): RowChrome => (cwd ? chromeByCwd.get(cwd) : undefined) ?? { headerColor: null, headerTextColor: null };
+const rosterRow = (c: Cell): CockpitRow => {
+  const meta = (c.session ? sessionMeta.get(c.session) : undefined) ?? EMPTY_SESSION_META;
+  const chrome = chromeOf(c.cwd);
+  return {
+    uid: c.uid,
+    cwd: c.cwd,
+    agent: c.agent ?? "claude",
+    status: statusForSort.value[c.uid] ?? "idle",
+    memo: meta.memo,
+    summary: meta.aiTitle,
+    prompt: meta.lastPrompt,
+    response: meta.lastResponse,
+    fallback: fallbackLabel(c),
+    phase: (c.cwd ? phaseByCwd.get(c.cwd) : undefined) ?? ("none" as PrPhase),
+    workPhase: meta.workPhase,
+    headerColor: chrome.headerColor,
+    headerTextColor: chrome.headerTextColor,
+  };
+};
+const listRows = computed(() => orderedCells.value.map(rosterRow));
 // The cancelable trailing launch cell's uid (null when there's nothing to cancel):
 // drives both the toolbar's cancel state and the launcher's in-cell close button.
 const cancelUid = computed(() => cancelableLaunchUid(state.value));
@@ -398,7 +406,7 @@ function onAddTerminal() {
 }
 const onSession = (uid: number, id: string) => (state.value = setSession(state.value, uid, id));
 const onCwd = (uid: number, cwd: string) => (state.value = setCwd(state.value, uid, cwd));
-const onAgent = (uid: number, agent: "claude" | "codex") => (state.value = setCellAgent(state.value, uid, agent));
+const onAgent = (uid: number, agent: TerminalAgent) => (state.value = setCellAgent(state.value, uid, agent));
 // Pass the on-screen order so closing the zoomed cell stays zoomed on its filmstrip
 // neighbour (previous, or next when it was the first) instead of collapsing the grid.
 const onClose = (uid: number) =>
@@ -419,10 +427,9 @@ const onToggleExpand = (uid: number) =>
 const onRun = (uid: number, command: RunCommand) => (state.value = runCommand(state.value, uid, command));
 // A running cell's header Run menu: launch in a spare cell (next to it) so the session survives.
 const onRunSpare = (uid: number, command: RunCommand) => (state.value = runScriptInNewCell(state.value, uid, command));
-// The empty cell launcher picked a configured program (shell/codex/…): turn it into a
-// persistent launcher cell. Its session id arrives later via onSession.
-const onLaunch = (uid: number, pick: { index: number; label: string; cwd: string | null }) =>
-  (state.value = launchInCell(state.value, uid, { index: pick.index, label: pick.label }, pick.cwd));
+// The empty cell launcher picked a program — a configured launch command, or the OS default
+// shell: turn it into a persistent launcher cell. Its session id arrives later via onSession.
+const onLaunch = (uid: number, pick: LaunchPick) => (state.value = launchInCell(state.value, uid, pick.launcher, pick.cwd));
 const onMove = (uid: number, dir: -1 | 1) => (state.value = moveCell(state.value, uid, dir));
 const toggleSortMode = () => (state.value = setSortMode(state.value, nextSortMode(state.value.sortMode)));
 const switchTo = (page: number) => (state.value = switchPage(state.value, page));
@@ -442,14 +449,20 @@ onMounted(() => {
 // grid instead of routing here. openTerminalAt then queues + navigates while we're deactivated.
 const SLOT_UID_RE = /^cell-(\d+)$/;
 let offNewTerminal: (() => void) | null = null;
-// Each kind is already expressible as a cell: a shell is a shell launcher, codex is marked
-// with `agent`, and Claude is the plain default. The session id arrives from the server once
-// the cell opens its socket, so all three persist and reconnect like any other cell.
-const cellForAgent = (cwd: string, agent: LaunchAgent | undefined): Omit<Cell, "uid"> => {
-  if (agent === "claude") return { session: null, cwd };
-  if (agent === "codex") return { session: null, cwd, agent: "codex" };
-  return shellCell(cwd);
+// Each kind is already expressible as a cell: a shell is a shell launcher, a non-Claude agent is
+// marked with `agent`, and Claude is the plain default. The session id arrives from the server once
+// the cell opens its socket, so they all persist and reconnect like any other cell.
+//
+// A Record over LAUNCH_AGENTS rather than an if-chain: the chain ended in `shellCell`, so adding an
+// agent to that list without a case here silently opened a SHELL under its name. Now it does not
+// compile.
+const CELL_FOR_AGENT: Record<LaunchAgent, (cwd: string) => Omit<Cell, "uid">> = {
+  shell: (cwd) => shellCell(cwd),
+  claude: (cwd) => ({ session: null, cwd }),
+  codex: (cwd) => ({ session: null, cwd, agent: "codex" }),
+  antigravity: (cwd) => ({ session: null, cwd, agent: "antigravity" }),
 };
+const cellForAgent = (cwd: string, agent: LaunchAgent | undefined): Omit<Cell, "uid"> => (agent ? CELL_FOR_AGENT[agent](cwd) : shellCell(cwd));
 
 const openNewTerminal = ({ cwd, afterSlotKey, agent }: NewTerminalRequest) => {
   const match = afterSlotKey?.match(SLOT_UID_RE);
@@ -535,12 +548,28 @@ const adjacentCwd = (uid: number): string =>
   });
 useCaptureKeydown(onShortcutKey);
 
-// Launch the config skill in a new auto-running session and switch to the single view so it shows
-// (the grid has no single active session). The skill then asks which directory / batch.
-function configureAppearance() {
+// Launch a Settings skill in a new auto-running session and show it as a GRID CELL. The button was
+// pressed in the grid's own Settings, so answering it by switching to the single view reads as the
+// app losing your place — you came back to a different screen than the one you left.
+//
+// Spawned first, then adopted: the spawn route is the only way to seed a first turn (a plain claude
+// cell has no channel to be handed a prompt), and `hidden` is what stops useChatLauncher selecting
+// it in the single view — the switch being avoided. The cell attaches to the session it is given,
+// which is the same path a reload takes to reattach.
+async function launchSkill(skill: BundledSkillName) {
   closeSettings();
-  router.push({ name: "chat" });
-  void startCollectionChat("/mulmoterminal-config");
+  const spawned = await startCollectionChat(skillSeed(skill, "claude"), { hidden: true });
+  if (!spawned) return;
+  // Seeded with the directory the server spawns these in (CLAUDE_CWD, which /api/config reports as
+  // `cwd`); the cell adopts whatever the PTY reports anyway. sessionCell carries the agent, which
+  // matters because a spawn follows the Claude/Codex/Antigravity toggle.
+  const placed = insertCellAfter(state.value, NO_ORIGIN_UID, sessionCell(spawned.id, defaultCwd.value, spawned.agent));
+  // A full grid (MAX_TERMINALS) drops the cell and insertCellAfter hands the state straight back,
+  // which would leave a live agent with nowhere here to appear — show it in the single view instead
+  // of losing it. Judged by identity AFTER the spawn, not by counting before it: the count can
+  // cross the cap while the spawn is in flight, and then the answer taken earlier is wrong.
+  if (placed === state.value) showSpawnedSession(spawned);
+  else state.value = placed;
 }
 </script>
 
@@ -605,6 +634,6 @@ function configureAppearance() {
     <footer v-if="noRunningTerminals" class="flex-none border-t border-border bg-panel px-4 py-2 text-center">
       <GuideLinks />
     </footer>
-    <AppSettingsModal v-if="showSettings" :presets="presets" @configure-appearance="configureAppearance" @close="closeSettings" />
+    <AppSettingsModal v-if="showSettings" :presets="presets" @launch-skill="launchSkill" @close="closeSettings" />
   </div>
 </template>

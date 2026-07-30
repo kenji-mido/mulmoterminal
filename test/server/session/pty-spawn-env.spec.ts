@@ -16,6 +16,12 @@ vi.mock("../../../server/infra/tmux.js", () => ({
 let tmuxOn = false;
 const liveTmuxSessions = new Set<string>();
 
+// ptySpawn stats the cwd and refuses a spawn into a directory that is not there, so this cannot
+// be a literal: "/tmp" is not a directory on Windows, which failed only in the Windows job. Our
+// own cwd is a directory on every platform, by definition — the same reasoning diagnoseSpawnCwd
+// applies to an empty cwd.
+const EXISTING_CWD = process.cwd();
+
 const { spawnPty, ptySpawn, ptyWouldReattach } = await import("../../../server/session/pty-spawn.js");
 
 const envOf = (call: number = 0): NodeJS.ProcessEnv => (spawn.mock.calls[call] as unknown as [string, string[], { env: NodeJS.ProcessEnv }])[2].env;
@@ -35,17 +41,17 @@ beforeEach(() => {
 // exactly what shipped first) leaves the routing broken with no symptom until a request.
 describe("spawnPty — the environment it hands the pty", () => {
   it("removes the named variables", () => {
-    spawnPty("claude", [], "/tmp", ["ANTHROPIC_API_KEY"]);
+    spawnPty("claude", [], EXISTING_CWD, ["ANTHROPIC_API_KEY"]);
     expect(envOf()).not.toHaveProperty("ANTHROPIC_API_KEY");
   });
 
   it("keeps everything else", () => {
-    spawnPty("claude", [], "/tmp", ["ANTHROPIC_API_KEY"]);
+    spawnPty("claude", [], EXISTING_CWD, ["ANTHROPIC_API_KEY"]);
     expect(envOf().MT_KEEP_ME).toBe("kept");
   });
 
   it("leaves the environment alone when nothing is named", () => {
-    spawnPty("claude", [], "/tmp");
+    spawnPty("claude", [], EXISTING_CWD);
     expect(envOf().ANTHROPIC_API_KEY).toBe("sk-ant-leftover");
   });
 });
@@ -80,13 +86,13 @@ describe("ptyWouldReattach", () => {
 // there is what actually protects it — but the non-tmux path has only this.
 describe("ptySpawn — carries the removal down both paths", () => {
   it("applies it on the direct spawn", () => {
-    ptySpawn("s1", "claude", [], "/tmp", false, { unset: ["ANTHROPIC_API_KEY"] });
+    ptySpawn("s1", "claude", [], EXISTING_CWD, false, { unset: ["ANTHROPIC_API_KEY"] });
     expect(envOf()).not.toHaveProperty("ANTHROPIC_API_KEY");
   });
 
   it("applies it on the tmux spawn too", () => {
     tmuxOn = true;
-    const result = ptySpawn("s1", "claude", [], "/tmp", true, { unset: ["ANTHROPIC_API_KEY"] });
+    const result = ptySpawn("s1", "claude", [], EXISTING_CWD, true, { unset: ["ANTHROPIC_API_KEY"] });
     expect(result.tmux).toBe(true);
     expect(envOf()).not.toHaveProperty("ANTHROPIC_API_KEY");
   });
@@ -98,13 +104,13 @@ describe("ptySpawn — carries the removal down both paths", () => {
 describe("ptySpawn — the tmux server's own environment", () => {
   it("scrubs the names from the running server before a provider spawn", () => {
     tmuxOn = true;
-    ptySpawn("s1", "claude", [], "/tmp", true, { unset: ["ANTHROPIC_API_KEY"] });
+    ptySpawn("s1", "claude", [], EXISTING_CWD, true, { unset: ["ANTHROPIC_API_KEY"] });
     expect(scrub).toHaveBeenCalledWith(["ANTHROPIC_API_KEY"]);
   });
 
   it("leaves the server alone for an ordinary session", () => {
     tmuxOn = true;
-    ptySpawn("s1", "claude", [], "/tmp", true);
+    ptySpawn("s1", "claude", [], EXISTING_CWD, true);
     expect(scrub).not.toHaveBeenCalled();
   });
 });

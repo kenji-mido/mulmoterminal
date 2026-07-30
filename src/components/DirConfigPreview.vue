@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // Read-only preview of what each directory's `.mulmoterminal.json` is actually doing.
 //
-// Writing one is covered (the mulmoterminal-config skill); READING one back was not, so a
+// Writing one is covered (the mulmoterminal-dirs skill); READING one back was not, so a
 // setting that was misspelled or rejected looked exactly like a setting that was never made.
 // Each directory expands to the values the app resolved, plus the keys it dropped and the
 // keys it doesn't know — which is what tells those two cases apart.

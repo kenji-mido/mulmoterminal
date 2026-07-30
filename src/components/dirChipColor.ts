@@ -9,19 +9,27 @@ export function dirChipColor(chrome: Pick<DirChrome, "headerColor" | "badgeColor
   return [chrome.headerColor, chrome.badgeColor, chrome.cellColor, chrome.dotColor].find(isHexColor) ?? null;
 }
 
-// How much of the chip the colour gets beyond its leading stripe. A wash this faint stays
-// behind 12px text at every hue — the stripe is what you actually read the colour off, and
-// this is what makes it visible from across the form.
-const CHIP_TINT_PERCENT = 14;
-const CHIP_BORDER_PERCENT = 55;
+// A launch chip carries two INDEPENDENT facts — which directory it is, and whether a session is
+// already running there — so they must not share a visual channel.
+//
+// They did. The directory washed the chip's background and warmed its border at 14% / 55%, and
+// the running state used a blue wash and border at exactly 14% / 55%. That read correctly only
+// while few directories were colour-coded: "tinted" meant "running". Once several were coloured
+// (which #1103's mulmoterminal-dirs skill made a one-step job) a tint meant nothing, and a
+// directory whose colour was blue-ish read as running while idle (#1106).
+//
+// The split, one meaning per channel:
+//   hue on the leading stripe          -> WHICH directory
+//   background + border + the pulse    -> RUNNING
+//
+// So an idle chip has no background whatever its colour, and the stripe is the only place a
+// directory's colour appears. Kept as whole literal class strings rather than composed from a
+// colour constant because Tailwind scans source text: an interpolated value produces no utility.
+export const CHIP_IDLE = "border-border bg-elevated";
+export const CHIP_RUNNING = "border-[color-mix(in_srgb,#3b82f6_55%,var(--border))] bg-[color-mix(in_srgb,#3b82f6_14%,var(--bg-elevated))]";
 
-// Left empty while a session is already running in that directory: the chip's blue is a STATE,
-// and two meanings on one background is how both stop being legible. The stripe still carries
-// the directory's colour there, so the two facts remain readable side by side.
-export function dirChipTint(color: string | null, running: boolean): Record<string, string> {
-  if (!color || running) return {};
-  return {
-    background: `color-mix(in srgb, ${color} ${CHIP_TINT_PERCENT}%, var(--bg-elevated))`,
-    borderColor: `color-mix(in srgb, ${color} ${CHIP_BORDER_PERCENT}%, var(--border))`,
-  };
-}
+// The pulse is what survives a blue directory colour: nothing else in the chip list moves, and
+// motion is the one channel a hue cannot imitate. `motion-reduce` drops it — the background,
+// border and dot still say "running", so the signal is deliberately redundant rather than
+// resting on animation alone.
+export const CHIP_DOT_RUNNING = "bg-[#3b82f6] animate-cell-pulse motion-reduce:animate-none";

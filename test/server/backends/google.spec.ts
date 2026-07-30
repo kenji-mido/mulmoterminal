@@ -122,13 +122,20 @@ describe("mountGoogleRoutes", () => {
   // would silently drop the account link (CSRF).
   describe("origin guard", () => {
     it.each([
-      ["get", "/api/google/status"],
       ["post", "/api/google/authorize"],
       ["post", "/api/google/unlink"],
     ])("rejects a foreign origin on %s %s", async (method, url) => {
       const app = appWith(deps, false);
       const res = method === "get" ? await request(app).get(url) : await request(app).post(url);
       expect(res.status).toBe(403);
+    });
+
+    // #1094. GET is exempt on purpose: a browser sends no Origin on a same-origin GET, so the
+    // check could only refuse the honest page — the reply carries no CORS headers, so a
+    // cross-site read was never possible in the first place.
+    it("answers GET /status even when the origin predicate refuses everything", async () => {
+      const res = await request(appWith(deps, false)).get("/api/google/status");
+      expect(res.status).toBe(200);
     });
 
     it("does not act on a rejected request", async () => {

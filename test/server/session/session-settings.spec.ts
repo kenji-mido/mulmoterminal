@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, it, expect, afterEach } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { tmpdir } from "node:os";
@@ -14,6 +14,7 @@ import {
 } from "../../../server/session/session-settings.js";
 import { hookSettingsJson } from "../../../server/session/hook-settings.js";
 import { buildClaudeArgs } from "../../../server/agents/claude-args.js";
+import { appendedSystemPrompt } from "../../../server/agents/appended-prompt.js";
 
 const SESSION = "settings-spec-session";
 const fileFor = (id: string) => path.join(os.homedir(), ".mulmoterminal", "settings", `${id}.json`);
@@ -146,6 +147,9 @@ describe("the argv a Windows spawn ends up with", () => {
       attachGuiMcp: true,
       mcpConfig,
       allowedTools: "mulmoterminal_readXPost,mulmoterminal_searchX",
+      // Resolved as a real spawn resolves it, both sections on — this argument is prose written
+      // by hand, so it is the one most likely to grow a quote (#942, #973).
+      appendedPrompt: appendedSystemPrompt({ dirSetting: null, globalSetting: true, workdirFooter: "work in mulmoterminal2" }),
     });
     expect(args.filter((a) => a.includes('"'))).toEqual([]);
   });
@@ -186,6 +190,49 @@ describe("pruneOrphanSettings", () => {
     expect(pruneOrphanSettings(new Set([ALIVE]), dir)).toEqual([]);
     expect(existsSync(path.join(dir, `${ALIVE}.json`))).toBe(true);
     expect(existsSync(path.join(dir, `${ALIVE}-mcp.json`))).toBe(true);
+  });
+
+  // The field incident (#1061): on Windows there is no tmux, so `liveIds` is empty and every
+  // settings file read as a leftover — including the eight belonging to a peer's LIVE sessions.
+  // The cutoff is what a second instance can honestly claim: a file older than the earliest
+  // running peer cannot be that peer's.
+  describe("with another instance running (#1061)", () => {
+    const PEER_STARTED = 10_000;
+    const older = (dir: string, name: string) => {
+      write(dir, name);
+      utimesSync(path.join(dir, name), new Date(PEER_STARTED - 5_000), new Date(PEER_STARTED - 5_000));
+    };
+    const newer = (dir: string, name: string) => {
+      write(dir, name);
+      utimesSync(path.join(dir, name), new Date(PEER_STARTED + 5_000), new Date(PEER_STARTED + 5_000));
+    };
+
+    it("keeps a file written after a live peer started — it may be that peer's", () => {
+      const dir = tmpDir();
+      newer(dir, `${DEAD}.json`);
+      newer(dir, `${DEAD}-mcp.json`);
+      expect(pruneOrphanSettings(new Set(), dir, PEER_STARTED)).toEqual([]);
+      expect(existsSync(path.join(dir, `${DEAD}.json`))).toBe(true);
+    });
+
+    it("still drops a file written before every live peer — nobody running can own it", () => {
+      const dir = tmpDir();
+      older(dir, `${DEAD}.json`);
+      expect(pruneOrphanSettings(new Set(), dir, PEER_STARTED)).toEqual([`${DEAD}.json`]);
+    });
+
+    it("prunes exactly as before when nothing else is running", () => {
+      // A lone instance must keep cleaning up after its own crash — that is what the prune is for.
+      const dir = tmpDir();
+      newer(dir, `${DEAD}.json`);
+      expect(pruneOrphanSettings(new Set(), dir, null)).toEqual([`${DEAD}.json`]);
+    });
+
+    it("keeps a surviving session's file whatever the cutoff says", () => {
+      const dir = tmpDir();
+      older(dir, `${ALIVE}.json`);
+      expect(pruneOrphanSettings(new Set([ALIVE]), dir, PEER_STARTED)).toEqual([]);
+    });
   });
 
   // Flagged by Codex on #822: the first version matched ANY `*.json`, so a file that merely

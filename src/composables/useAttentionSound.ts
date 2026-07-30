@@ -3,6 +3,10 @@ import { usePubSub } from "./usePubSub";
 import { notifyKindOf, isActivityMsg, type ActivityState } from "./notifyKind";
 import { NOTIFY_KINDS, type NotifyKind } from "../../common/notifyKinds";
 import { parsePresetRef } from "../../common/notifySounds";
+import { setAudioContextState } from "./audioUnlockState";
+import { createBeepQueue, shouldHoldBeep } from "./pendingBeep";
+import { missedMarkFor } from "./missedAttention";
+import { applyMissedMark } from "./useMissedAttention";
 
 // What the player needs from the user's config: which moments beep, and what each plays.
 // `soundFile` is the all-kind fallback a `sounds` entry overrides.
@@ -14,30 +18,72 @@ export interface SoundConfig {
 
 let audioCtx: AudioContext | null = null;
 
+// Ran when the context reaches "running", so the composable can replay what it had to hold.
+// A set rather than one slot: the player is mounted once, but nothing here should break if a
+// second view ever listens too.
+const resumeListeners = new Set<() => void>();
+
+function onAudioResumed(listener: () => void): () => void {
+  resumeListeners.add(listener);
+  return () => resumeListeners.delete(listener);
+}
+
 function getCtx(): AudioContext | null {
+  if (audioCtx) return audioCtx;
   try {
-    audioCtx = audioCtx ?? new AudioContext();
-    return audioCtx;
+    const ctx = new AudioContext();
+    audioCtx = ctx;
+    setAudioContextState(ctx.state);
+    ctx.addEventListener("statechange", () => {
+      setAudioContextState(ctx.state);
+      if (ctx.state === "running") for (const listener of resumeListeners) listener();
+      // Leaving "running" is not only the autoplay block: iOS reports "interrupted" for a call,
+      // a screen lock or backgrounding, and the unlock listener has already retired itself by
+      // then. Without re-arming, the page reports blocked forever and no gesture ever fixes it.
+      else armUnlock();
+    });
+    return ctx;
   } catch {
     return null;
   }
 }
 
-// Autoplay policy: an AudioContext starts suspended until a user gesture, so a beep
-// fired from an event (not a gesture) would be silent. Arm a one-shot listener that
-// resumes the context on the first click/keypress anywhere; after that, beeps play.
+/** Create the context up front, so its state is known before the first notification rather than
+ *  because of it — the toolbar cannot warn about a block it has not been told about yet. */
+function primeAudio(): void {
+  getCtx();
+}
+
+// Autoplay policy: an AudioContext starts suspended until a user gesture, so a beep fired from
+// an event (not a gesture) would be silent. Arm a listener that resumes the context on the first
+// click/keypress anywhere; after that, beeps play.
+//
+// CAPTURE phase, and retained until the resume actually succeeds. Both are load-bearing: the
+// grid claims its shortcut keys in the capture phase and calls stopPropagation(), so a bubble
+// listener never sees them; and a resume that fails (no activation yet, an interrupted audio
+// session) with the listener already removed would leave the page permanently silent.
+//
+// Re-armable rather than once-per-page: disarming clears the flag, so the statechange handler
+// can arm a fresh pair when the context later leaves "running".
 let unlockArmed = false;
 function armUnlock() {
   if (unlockArmed) return;
   unlockArmed = true;
-  const unlock = () => {
-    const ctx = getCtx();
-    if (ctx && ctx.state === "suspended") ctx.resume().catch(() => {});
-    window.removeEventListener("pointerdown", unlock);
-    window.removeEventListener("keydown", unlock);
+  const options = { capture: true } as const;
+  const disarm = () => {
+    unlockArmed = false;
+    window.removeEventListener("pointerdown", unlock, options);
+    window.removeEventListener("keydown", unlock, options);
   };
-  window.addEventListener("pointerdown", unlock);
-  window.addEventListener("keydown", unlock);
+  function unlock() {
+    const ctx = getCtx();
+    if (!ctx || ctx.state === "running") return disarm();
+    // Only on success: a rejected resume with the listener already gone leaves the page silent
+    // for the rest of its life.
+    ctx.resume().then(disarm, () => {});
+  }
+  window.addEventListener("pointerdown", unlock, options);
+  window.addEventListener("keydown", unlock, options);
 }
 
 // The synthesized fallback, one two-note figure per kind. Rising and bright means the agent
@@ -55,7 +101,6 @@ const CHIME_NOTES: Record<NotifyKind, readonly [number, number]> = {
 function playChime(kind: NotifyKind) {
   const ctx = getCtx();
   if (!ctx) return;
-  if (ctx.state === "suspended") ctx.resume().catch(() => {});
   const tone = (freq: number, start: number, dur: number) => {
     const osc = ctx.createOscillator();
     const gain = ctx.createGain();
@@ -126,7 +171,6 @@ function loadBuffer(key: string, url: string): Promise<void> {
 function playBuffer(buf: AudioBuffer) {
   const ctx = getCtx();
   if (!ctx) return;
-  if (ctx.state === "suspended") ctx.resume().catch(() => {});
   const src = ctx.createBufferSource();
   const gain = ctx.createGain();
   gain.gain.value = 0.6;
@@ -175,12 +219,7 @@ export function soundSources(kind: NotifyKind, cwd: string | null, config: Sound
   return sources;
 }
 
-/**
- * Play the notification for a kind: the nearest configured sound that is already decoded,
- * else the built-in chime. A source not yet decoded is loaded in the background, so the FIRST
- * beep for it falls back and later ones use it — the beep itself never waits on a fetch.
- */
-export function playNotify(kind: NotifyKind, cwd: string | null, config: SoundConfig) {
+function playResolved(kind: NotifyKind, cwd: string | null, config: SoundConfig) {
   for (const { key, url } of soundSources(kind, cwd, config)) {
     const buf = buffers.get(key);
     if (buf) return playBuffer(buf);
@@ -189,10 +228,36 @@ export function playNotify(kind: NotifyKind, cwd: string | null, config: SoundCo
   playChime(kind);
 }
 
+const beepQueue = createBeepQueue();
+
+/**
+ * Play the notification for a kind: the nearest configured sound that is already decoded,
+ * else the built-in chime. A source not yet decoded is loaded in the background, so the FIRST
+ * beep for it falls back and later ones use it — the beep itself never waits on a fetch.
+ *
+ * Returns whether the sound actually went out. `false` means the browser has not unlocked audio
+ * yet and the beep is held for the unlock (see pendingBeep.ts) — the caller uses that to leave a
+ * visible mark, since a beep the user never heard is a notification they never got.
+ */
+export function playNotify(kind: NotifyKind, cwd: string | null, config: SoundConfig): boolean {
+  const ctx = getCtx();
+  if (shouldHoldBeep(ctx?.state ?? null)) {
+    beepQueue.hold({ kind, cwd });
+    return false;
+  }
+  playResolved(kind, cwd, config);
+  return true;
+}
+
 /** Test-button variant: AWAIT the load so a just-picked sound is actually heard. Pass the value
  *  the user is LOOKING at, not the saved one — a preset resolves without the server's config, so
  *  the preview is right even while the save is still in flight. */
 export async function previewNotify(kind: NotifyKind, config: SoundConfig): Promise<void> {
+  // This one runs INSIDE the user's click, which is the only moment a blocked context can be
+  // resumed — so unlike playNotify it unlocks rather than holding, and does so before the fetch
+  // below spends the gesture's window.
+  const ctx = getCtx();
+  if (ctx && ctx.state !== "running") await ctx.resume().catch(() => {});
   const value = globalSoundValue(kind, config);
   if (value) {
     const key = globalKey(value);
@@ -221,12 +286,32 @@ export function useAttentionSound(enabled: Ref<boolean>, config: Ref<SoundConfig
       }),
     { immediate: true, deep: true },
   );
+  // While the sound is on, the context exists — so "blocked" is a fact the toolbar can show
+  // from page load rather than a state discovered by missing a notification. Turning the sound
+  // off drops any held beep with it: replaying it after the user silenced things is noise.
+  watch(enabled, (on) => (on ? primeAudio() : beepQueue.clear()), { immediate: true });
+  // Re-checked against the CURRENT settings, not the ones in force when the beep was held: the
+  // user can silence a kind (or everything) during the blocked window, and replaying what they
+  // just turned off is exactly the noise the setting exists to stop.
+  const offResumed = onAudioResumed(() => {
+    const held = beepQueue.take();
+    if (held && enabled.value && config.value.kinds.includes(held.kind)) playResolved(held.kind, held.cwd, config.value);
+  });
   const prev = new Map<string, ActivityState>();
   const { subscribe } = usePubSub();
   const unsubscribe = subscribe("sessions", (d) => {
     if (!isActivityMsg(d)) return;
+    // Asked BEFORE notifyKindOf, which is what records the session — a session already waiting
+    // when the page loaded gets its first row swallowed as baseline, and that swallowed row is
+    // exactly the attention state nothing announced (#1152).
+    const firstSighting = !prev.has(d.id);
     const kind = notifyKindOf(prev, d);
-    if (kind && enabled.value && config.value.kinds.includes(kind)) playNotify(kind, d.cwd ?? null, config.value);
+    const wanted = kind !== null && enabled.value && config.value.kinds.includes(kind) ? kind : null;
+    const sounded = wanted !== null && playNotify(wanted, d.cwd ?? null, config.value);
+    applyMissedMark(d.id, missedMarkFor({ closed: d.event === "closed", firstSighting, waiting: d.waiting ?? false, suppressed: wanted !== null && !sounded }));
   });
-  onUnmounted(unsubscribe);
+  onUnmounted(() => {
+    unsubscribe();
+    offResumed();
+  });
 }

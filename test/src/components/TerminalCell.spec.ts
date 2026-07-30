@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 import { nextTick } from "vue";
 import TerminalCell from "../../../src/components/TerminalCell.vue";
+import { TOOL_GROUPS } from "../../../common/toolGroups";
 
 // Capture the "sessions" pub/sub callback and the reconnect handler so tests can push
 // activity and simulate a dropped-then-restored socket directly.
@@ -1080,6 +1081,9 @@ describe("TerminalCell", () => {
     const w = mountCell(null, { defaultCwd: "/home/me/repo" });
     await flushPromises();
     await w.find('[data-testid="worktree-reuse"]').trigger("click");
+    // The launch waits on the tool-group sync — one read of the worktree's registrations, plus a
+    // write per group that disagrees with the launcher (syncMcpGroupsInto).
+    await flushPromises();
     const term = w.findComponent({ name: "TerminalView" });
     expect(term.exists()).toBe(true);
     expect(term.props("cwd")).toBe("/wt/old-task");
@@ -1777,6 +1781,33 @@ describe("TerminalCell", () => {
     expect(w.find(".cell").classes()).toContain("border-[var(--cell-border,var(--border))]");
   });
 
+  // The stored preset list is most-recently-used, so its order changes on every launch. The chips
+  // are read next to the grid, which sorts by the directory's declared rank — so they follow that
+  // instead, and a directory that declares none keeps its stored position behind the ranked ones.
+  it("orders preset chips by each directory's orderPriority, leaving unranked dirs last", async () => {
+    const rankByDir: Record<string, number> = { "/home/me/ord-b": 10, "/home/me/ord-c": 5 };
+    globalThis.fetch = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/dir-config")) {
+        const cwd = decodeURIComponent(new URL(u, "http://localhost").searchParams.get("cwd") ?? "");
+        const orderPriority = rankByDir[cwd];
+        return { ok: true, json: async () => (orderPriority === undefined ? {} : { orderPriority }) };
+      }
+      if (u.includes("/api/sessions")) return { ok: true, json: async () => ({ sessions: [] }) };
+      return { ok: true, json: async () => ({ working: false, waiting: false, lastPrompt: null }) };
+    }) as unknown as typeof fetch;
+    const w = mountCell(null, {
+      presets: [
+        { label: "a", path: "/home/me/ord-a" },
+        { label: "b", path: "/home/me/ord-b" },
+        { label: "c", path: "/home/me/ord-c" },
+        { label: "d", path: "/home/me/ord-d" },
+      ],
+    });
+    await flushPromises();
+    expect(w.findAll('[data-testid="cell-chip-main"]').map((b) => b.text())).toEqual(["c", "b", "a", "d"]);
+  });
+
   it("tints a preset chip whose dir already has a running session elsewhere", () => {
     const w = mountCell(null, {
       presets: [
@@ -1841,19 +1872,21 @@ describe("TerminalCell", () => {
     const tinted = chips.find((c) => c.text().includes("tinted"));
     const bare = chips.find((c) => c.text().includes("bare"));
     expect(tinted?.find('[data-testid="cell-chip-color"]').attributes("style")).toContain("rgb(170, 17, 34)");
-    // The chip itself is washed in the same colour, which is what makes it readable across the form.
-    expect(tinted?.attributes("style")).toContain("#aa1122");
+    // The STRIPE is the whole of it. The chip's own background used to be washed in the same
+    // colour, which is exactly what "a session is running here" means — so a colour-coded
+    // directory read as running (#1106). One channel, one meaning.
+    expect(tinted?.attributes("style") ?? "").not.toContain("background");
     // A directory with nothing configured has to look exactly as it did before the stripe existed.
     expect(bare?.find('[data-testid="cell-chip-color"]').exists()).toBe(false);
     expect(bare?.attributes("style") ?? "").not.toContain("color-mix");
   });
 
-  // The two Canvas switches write to ONE file (Claude Code's MCP config, via `claude mcp
+  // The tool-group switches write to ONE file (Claude Code's MCP config, via `claude mcp
   // add/remove`), so their POSTs are queued one behind the other. That queue is only half the
   // guard: a checkbox left live while its write waits its turn can be flipped again, and since a
   // failed write puts its own checkbox back, the earlier rollback would land on top of the later
   // intent — flip on, flip off, end up on. So the flip disables the box immediately.
-  it("disables a Canvas switch from the flip until its write settles", async () => {
+  it("disables a tool-group switch from the flip until its write settles", async () => {
     const write = deferred<{ ok: boolean; json: () => Promise<unknown> }>();
     globalThis.fetch = vi.fn(async (url: string, init?: { method?: string }) => {
       const u = String(url);
@@ -1870,7 +1903,7 @@ describe("TerminalCell", () => {
     const w = mountCell(null);
     await flushPromises();
 
-    const box = w.find('[data-testid="cell-canvas-toggle-render"]');
+    const box = w.find('[data-testid="cell-mcp-toggle-render"]');
     expect(box.exists()).toBe(true);
     await box.setValue(true);
     // Disabled while the write is in flight — not merely once it reaches the front of the queue.
@@ -1879,12 +1912,12 @@ describe("TerminalCell", () => {
     write.resolve({ ok: true, json: async () => ({ ok: true }) });
     await flushPromises();
     await nextTick();
-    expect(w.find('[data-testid="cell-canvas-toggle-render"]').attributes("disabled")).toBeUndefined();
+    expect(w.find('[data-testid="cell-mcp-toggle-render"]').attributes("disabled")).toBeUndefined();
   });
 
   // A rejected write is the case the lock exists for: the checkbox goes back to where it was,
   // and it must be the flip that was actually attempted.
-  it("puts the Canvas switch back when its write fails", async () => {
+  it("puts the tool-group switch back when its write fails", async () => {
     globalThis.fetch = vi.fn(async (url: string, init?: { method?: string }) => {
       const u = String(url);
       if (u.includes("/api/gui-mcp-groups")) {
@@ -1899,12 +1932,12 @@ describe("TerminalCell", () => {
 
     const w = mountCell(null);
     await flushPromises();
-    const box = w.find('[data-testid="cell-canvas-toggle-render"]');
+    const box = w.find('[data-testid="cell-mcp-toggle-render"]');
     await box.setValue(true);
     await flushPromises();
     await nextTick();
 
-    expect((w.find('[data-testid="cell-canvas-toggle-render"]').element as HTMLInputElement).checked).toBe(false);
+    expect((w.find('[data-testid="cell-mcp-toggle-render"]').element as HTMLInputElement).checked).toBe(false);
     expect(w.text()).toContain("failed");
   });
 
@@ -1912,7 +1945,7 @@ describe("TerminalCell", () => {
   // the whole time. The write below waits behind another group's save; read at execution time,
   // the switch ticked for alpha would register the MCP server against beta — a silent write to a
   // folder the user never touched the switch in.
-  it("writes a queued Canvas registration to the directory it was flipped in", async () => {
+  it("writes a queued group registration to the directory it was flipped in", async () => {
     const first = deferred<{ ok: boolean; json: () => Promise<unknown> }>();
     const posted: { cwd: string; group: string; enabled: boolean }[] = [];
     globalThis.fetch = vi.fn(async (url: string, init?: { method?: string; body?: string }) => {
@@ -1935,13 +1968,13 @@ describe("TerminalCell", () => {
     await flushPromises();
 
     // media goes first and hangs; render queues behind it, both flipped in alpha.
-    await w.find('[data-testid="cell-canvas-toggle-media"]').setValue(true);
-    await w.find('[data-testid="cell-canvas-toggle-render"]').setValue(true);
+    await w.find('[data-testid="cell-mcp-toggle-media"]').setValue(true);
+    await w.find('[data-testid="cell-mcp-toggle-render"]').setValue(true);
     expect(posted).toHaveLength(1);
 
     // The user retypes the directory while render's write is still queued. The launcher reloads
     // the switches for the new directory behind a 300ms debounce, so let it fire — that reload is
-    // what moves canvasDir off alpha, and it is exactly what the queued write must not pick up.
+    // what moves mcpGroupDir off alpha, and it is exactly what the queued write must not pick up.
     vi.useFakeTimers();
     try {
       await w.find('[data-testid="cell-dir-input"]').setValue("/home/me/beta");
@@ -1962,7 +1995,7 @@ describe("TerminalCell", () => {
   // a codex grid cell is handed the SAME groups as resolved `-c mcp_servers.*` urls at spawn
   // (server/session/spawn-codex.ts). Hiding the rows on codex left that path with no way to be
   // turned on from the cell that uses it.
-  it("offers the Canvas switches for codex as well as claude", async () => {
+  it("offers the tool-group switches for codex as well as claude", async () => {
     globalThis.fetch = vi.fn(async (url: string) => {
       const u = String(url);
       if (u.includes("/api/gui-mcp-groups")) return { ok: true, json: async () => ({ groups: ["render"] }) };
@@ -1979,9 +2012,332 @@ describe("TerminalCell", () => {
     await codexButton?.trigger("click");
     await nextTick();
 
-    expect(w.find('[data-testid="cell-canvas-toggle-render"]').exists()).toBe(true);
-    expect(w.find('[data-testid="cell-canvas-toggle-media"]').exists()).toBe(true);
+    expect(w.find('[data-testid="cell-mcp-toggle-render"]').exists()).toBe(true);
+    expect(w.find('[data-testid="cell-mcp-toggle-media"]').exists()).toBe(true);
     // And it reads the same registration claude's rows do.
-    expect((w.find('[data-testid="cell-canvas-toggle-render"]').element as HTMLInputElement).checked).toBe(true);
+    expect((w.find('[data-testid="cell-mcp-toggle-render"]').element as HTMLInputElement).checked).toBe(true);
+  });
+
+  // `data` and `external` were routed, gated and pre-approved on the server from the day the
+  // groups were defined, but the launcher only ever drew the two Canvas rows — so the only way to
+  // reach a collection or a google tool from a grid cell was to type `claude mcp add` by hand.
+  // One row per group in TOOL_GROUPS, reading and writing the same registration the other two do.
+  it("offers a switch for every tool group, not just the Canvas ones", async () => {
+    const posted: { cwd: string; group: string; enabled: boolean }[] = [];
+    globalThis.fetch = vi.fn(async (url: string, init?: { method?: string; body?: string }) => {
+      const u = String(url);
+      if (u.includes("/api/gui-mcp-groups")) {
+        if (init?.method === "POST") {
+          posted.push(JSON.parse(String(init.body)));
+          return { ok: true, json: async () => ({ ok: true }) };
+        }
+        return { ok: true, json: async () => ({ groups: ["data"] }) };
+      }
+      if (u.includes("/api/worktrees")) return { ok: true, json: async () => ({ isGit: false, worktrees: [] }) };
+      if (u.includes("/api/scripts")) return { ok: true, json: async () => ({ cwd: "/home/me/proj", scripts: [] }) };
+      if (u.includes("/api/sessions")) return { ok: true, json: async () => ({ sessions: [] }) };
+      return { ok: true, json: async () => ({ working: false, waiting: false, lastPrompt: null }) };
+    }) as unknown as typeof fetch;
+
+    const w = mountCell(null, { defaultCwd: "/home/me/alpha" });
+    await flushPromises();
+
+    for (const group of TOOL_GROUPS) expect(w.find(`[data-testid="cell-mcp-toggle-${group}"]`).exists()).toBe(true);
+    // A group registered on disk comes back ticked, whichever group it is.
+    expect((w.find('[data-testid="cell-mcp-toggle-data"]').element as HTMLInputElement).checked).toBe(true);
+    expect((w.find('[data-testid="cell-mcp-toggle-external"]').element as HTMLInputElement).checked).toBe(false);
+
+    await w.find('[data-testid="cell-mcp-toggle-external"]').setValue(true);
+    await flushPromises();
+    expect(posted).toEqual([{ cwd: "/home/me/alpha", group: "external", enabled: true }]);
+  });
+
+  // A REUSED worktree can carry a registration from an earlier launch. Mirroring only the ticked
+  // groups into it leaves that one standing, so the session gets tools the launcher shows as off
+  // — `external` reaching a third-party account is the case that makes it matter. The groups that
+  // already agree are left alone, because every write shells out to the `claude` CLI.
+  it("clears a stale worktree registration for a group that is switched off", async () => {
+    const posted: { cwd: string; group: string; enabled: boolean }[] = [];
+    const groupsByCwd: Record<string, string[]> = {
+      "/home/me/repo": ["render"],
+      "/wt/old-task": ["render", "external"],
+    };
+    globalThis.fetch = vi.fn(async (url: string, init?: { method?: string; body?: string }) => {
+      const u = String(url);
+      if (u.includes("/api/gui-mcp-groups")) {
+        if (init?.method === "POST") {
+          posted.push(JSON.parse(String(init.body)));
+          return { ok: true, json: async () => ({ ok: true }) };
+        }
+        const cwd = decodeURIComponent(u.split("cwd=")[1] ?? "");
+        return { ok: true, json: async () => ({ groups: groupsByCwd[cwd] ?? [] }) };
+      }
+      if (u.includes("/api/worktrees"))
+        return {
+          ok: true,
+          json: async () => ({ isGit: true, base: "main", worktrees: [{ path: "/wt/old-task", branch: "agent/old-task", task: "old-task", dirty: false }] }),
+        };
+      if (u.includes("/api/scripts")) return { ok: true, json: async () => ({ scripts: [] }) };
+      if (u.includes("/api/sessions")) return { ok: true, json: async () => ({ sessions: [] }) };
+      return { ok: true, json: async () => ({ working: false, waiting: false, lastPrompt: null }) };
+    }) as unknown as typeof fetch;
+
+    const w = mountCell(null, { defaultCwd: "/home/me/repo" });
+    await flushPromises();
+    await w.find('[data-testid="worktree-reuse"]').trigger("click");
+    await flushPromises();
+
+    // render agrees on both sides, data and media are off and absent — only the stale one moves.
+    expect(posted).toEqual([{ cwd: "/wt/old-task", group: "external", enabled: false }]);
+  });
+
+  // The switches belong to a DIRECTORY, and the reload behind them is debounced. Left on screen
+  // during that gap they are the previous directory's positions, and flipping one writes the MCP
+  // registration there — a directory the user has already typed their way off.
+  it("takes the switches away the moment the directory field changes", async () => {
+    globalThis.fetch = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/gui-mcp-groups")) return { ok: true, json: async () => ({ groups: ["render"] }) };
+      if (u.includes("/api/worktrees")) return { ok: true, json: async () => ({ isGit: false, worktrees: [] }) };
+      if (u.includes("/api/scripts")) return { ok: true, json: async () => ({ cwd: "/home/me/alpha", scripts: [] }) };
+      if (u.includes("/api/sessions")) return { ok: true, json: async () => ({ sessions: [] }) };
+      return { ok: true, json: async () => ({ working: false, waiting: false, lastPrompt: null }) };
+    }) as unknown as typeof fetch;
+
+    const w = mountCell(null, { defaultCwd: "/home/me/alpha" });
+    await flushPromises();
+    expect(w.find('[data-testid="cell-mcp-toggle-render"]').exists()).toBe(true);
+
+    vi.useFakeTimers();
+    try {
+      await w.find('[data-testid="cell-dir-input"]').setValue("/home/me/beta");
+      // Before the 300ms reload: no rows at all rather than beta's name over alpha's positions.
+      expect(w.find('[data-testid="cell-mcp-toggle-render"]').exists()).toBe(false);
+      await vi.advanceTimersByTimeAsync(400);
+    } finally {
+      vi.useRealTimers();
+    }
+    await flushPromises();
+    await nextTick();
+    expect((w.find('[data-testid="cell-mcp-toggle-render"]').element as HTMLInputElement).checked).toBe(true);
+  });
+
+  // Ticking a group and launching in the same breath is the ordinary way to use these: the switch
+  // is what the session about to start needs. The launch takes the whole form off the screen, so
+  // the write it queued has to be one the form is no longer party to — tie it to the component's
+  // lifetime and the registration is silently dropped for the session it was ticked for.
+  it("still writes a tool-group registration queued a moment before the launch", async () => {
+    const posted: { cwd: string; group: string; enabled: boolean }[] = [];
+    globalThis.fetch = vi.fn(async (url: string, init?: { method?: string; body?: string }) => {
+      const u = String(url);
+      if (u.includes("/api/gui-mcp-groups")) {
+        if (init?.method === "POST") {
+          posted.push(JSON.parse(String(init.body)));
+          return { ok: true, json: async () => ({ ok: true }) };
+        }
+        return { ok: true, json: async () => ({ groups: [] }) };
+      }
+      if (u.includes("/api/worktrees")) return { ok: true, json: async () => ({ isGit: false, worktrees: [] }) };
+      if (u.includes("/api/scripts")) return { ok: true, json: async () => ({ cwd: "/home/me/proj", scripts: [] }) };
+      if (u.includes("/api/sessions")) return { ok: true, json: async () => ({ sessions: [] }) };
+      return { ok: true, json: async () => ({ working: false, waiting: false, lastPrompt: null }) };
+    }) as unknown as typeof fetch;
+
+    const w = mountCell(null, { defaultCwd: "/home/me/proj" });
+    await flushPromises();
+    await w.find('[data-testid="cell-mcp-toggle-render"]').setValue(true);
+    await w.find('[data-testid="cell-dir-input"]').trigger("keydown.enter");
+    await flushPromises();
+
+    expect(w.find('[data-testid="cell-launch"]').exists()).toBe(false); // it really did launch
+    expect(posted).toEqual([{ cwd: "/home/me/proj", group: "render", enabled: true }]);
+  });
+});
+
+// A launch chip says two things at once — which directory it is, and whether a session is
+// already running there. They used to be drawn in the same two places (background + border) at
+// identical strengths, so once directories were colour-coded a tint stopped meaning "running",
+// and a directory whose colour was blue read as running while idle (#1106).
+describe("launch chips: directory colour vs. running", () => {
+  const chipFor = (w: ReturnType<typeof mount>, label: string) =>
+    w.findAll('[data-testid="cell-chip"]').find((c) => c.find('[data-testid="cell-chip-main"]').text() === label);
+
+  // Unique paths per test: the dir-config cache is module-level and keyed by cwd.
+  function mountChips(colouredPath: string, runningPath: string, colour = "#2f6eb1") {
+    globalThis.fetch = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/dir-config")) {
+        const coloured = u.includes(encodeURIComponent(colouredPath));
+        return { ok: true, json: async () => (coloured ? { headerColor: colour } : {}) };
+      }
+      if (u.includes("/api/scripts")) return { ok: true, json: async () => ({ cwd: "/x", scripts: [] }) };
+      if (u.includes("/api/sessions")) return { ok: true, json: async () => ({ sessions: [] }) };
+      return { ok: true, json: async () => ({ working: false, waiting: false, lastPrompt: null }) };
+    }) as unknown as typeof fetch;
+
+    return mountCell(null, {
+      defaultCwd: "/home/me/proj",
+      presets: [
+        { label: "coloured", path: colouredPath },
+        { label: "running", path: runningPath },
+      ],
+      openCwds: [runningPath],
+    });
+  }
+
+  // The bug itself: the directory's colour reached the chip's own background, which is what
+  // "running" means. It has to stay on the stripe.
+  it("gives an idle chip no background of its own, however it is coloured", async () => {
+    const w = mountChips("/c1", "/r1");
+    await flushPromises();
+    const chip = chipFor(w, "coloured");
+    if (!chip) throw new Error("coloured chip not found");
+
+    expect(chip.attributes("style") ?? "").not.toContain("background");
+    expect(chip.classes().join(" ")).not.toContain("color-mix");
+    // The colour is still on screen — just confined to the stripe.
+    expect(chip.find('[data-testid="cell-chip-color"]').attributes("style")).toContain("rgb(47, 110, 177)");
+  });
+
+  it("marks the running chip with a background and a pulsing dot", async () => {
+    const w = mountChips("/c2", "/r2");
+    await flushPromises();
+    const chip = chipFor(w, "running");
+    if (!chip) throw new Error("running chip not found");
+
+    expect(chip.classes().join(" ")).toContain("color-mix");
+    expect(chip.find('[data-testid="cell-chip-dot"]').classes()).toContain("animate-cell-pulse");
+  });
+
+  // The two assertions above can each pass while the states still render alike. This is the one
+  // that says the user can tell them apart.
+  it("never renders a coloured idle chip the same as a running one", async () => {
+    const w = mountChips("/c3", "/r3");
+    await flushPromises();
+    const idle = chipFor(w, "coloured");
+    const running = chipFor(w, "running");
+    if (!idle || !running) throw new Error("chips not found");
+
+    const signature = (c: NonNullable<ReturnType<typeof chipFor>>) => `${c.classes().sort().join(" ")}|${c.attributes("style") ?? ""}`;
+    expect(signature(idle)).not.toBe(signature(running));
+    // And only one of them claims the running state.
+    expect(idle.find('[data-testid="cell-chip-dot"]').exists()).toBe(false);
+    expect(running.find('[data-testid="cell-chip-dot"]').exists()).toBe(true);
+  });
+
+  // Everything above is colour, shape and motion — none of which reaches a screen reader, and
+  // the dot is aria-hidden. The chip's own button has to SAY it (the ▶ beside it already did).
+  it("says a session is running in the chip's accessible name, not only in colour", async () => {
+    const w = mountChips("/c5", "/r5");
+    await flushPromises();
+    const idle = chipFor(w, "coloured");
+    const running = chipFor(w, "running");
+    if (!idle || !running) throw new Error("chips not found");
+
+    expect(running.find('[data-testid="cell-chip-main"]').attributes("aria-label")).toContain("already running");
+    expect(idle.find('[data-testid="cell-chip-main"]').attributes("aria-label")).not.toContain("already running");
+  });
+
+  // A directory colour-coded in the SAME blue the running state uses is the case that made the
+  // old design unreadable: it looked running, always.
+  it("keeps a blue-coded idle directory distinguishable from a running one", async () => {
+    const w = mountChips("/c4", "/r4", "#3b82f6");
+    await flushPromises();
+    const idle = chipFor(w, "coloured");
+    const running = chipFor(w, "running");
+    if (!idle || !running) throw new Error("chips not found");
+
+    // Class AND style: the old design put the wash in an inline style, so a check on classes
+    // alone would have passed against exactly the bug this test is here for.
+    const painted = (c: NonNullable<ReturnType<typeof chipFor>>) => `${c.classes().join(" ")} ${c.attributes("style") ?? ""}`;
+    expect(painted(idle)).not.toContain("color-mix");
+    expect(painted(running)).toContain("color-mix");
+  });
+});
+
+// #1114: an empty cell can start a plain shell with nothing configured. Until this, the only
+// shells reachable from the launch form were the user's own `launchers` entries — so a fresh
+// install offered three agents and no terminal, and the reporter went looking through Settings.
+describe("TerminalCell launch target — the OS default shell (#1114)", () => {
+  const SHELL_PICK = { launcher: { shell: true, label: "shell" }, cwd: "/home/me/proj" };
+
+  // A git repo whose MCP config reads back, so all three agent-only sections are on screen.
+  function mockFetchWithAgentOptions() {
+    globalThis.fetch = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/gui-mcp-groups")) return { ok: true, json: async () => ({ groups: [] }) };
+      if (u.includes("/api/worktrees")) return { ok: true, json: async () => ({ isGit: true, base: "main", worktrees: [] }) };
+      if (u.includes("/api/scripts")) return { ok: true, json: async () => ({ cwd: "/home/me/proj", scripts: [] }) };
+      if (u.includes("/api/sessions")) return { ok: true, json: async () => ({ sessions: [] }) };
+      return { ok: true, json: async () => ({ working: false, waiting: false, lastPrompt: null }) };
+    }) as unknown as typeof fetch;
+  }
+
+  const pick = (w: ReturnType<typeof mount>, agent: string) => w.find(`[data-testid="cell-target-${agent}"]`).trigger("click");
+
+  it("offers Claude / Codex / Antigravity / Shell, with Claude picked", async () => {
+    const w = mountCell(null);
+    await flushPromises();
+    const row = w.find('[role="radiogroup"]');
+    expect(row.findAll('[role="radio"]').map((b) => b.text())).toEqual(["Claude", "Codex", "Antigravity", "Shell"]);
+    expect(w.find('[data-testid="cell-target-claude"]').attributes("aria-checked")).toBe("true");
+    expect(w.find('[data-testid="cell-target-shell"]').attributes("aria-checked")).toBe("false");
+  });
+
+  it("starts the OS default shell in the typed dir — no configured launcher needed", async () => {
+    const w = mountCell(null);
+    await flushPromises();
+    await pick(w, "shell");
+    await w.find('[data-testid="cell-dir-input"]').setValue("/home/me/proj");
+    await w.find('[data-testid="cell-dir-go"]').trigger("click");
+    // The launcher carries no index: nothing in the user's config is being pointed at.
+    expect(w.emitted("launch")).toEqual([[SHELL_PICK]]);
+    // NOT a session launch — the parent swaps this cell for a launcher cell, so the form stays
+    // put and no agent is persisted for it.
+    expect(w.emitted("agent")).toBeUndefined();
+    expect(w.find('[data-testid="cell-launch"]').exists()).toBe(true);
+  });
+
+  // The other launch button in the same form. The selector has to decide here too, or one pick
+  // opens a shell from the dir field and an agent from the chip beside it.
+  it("starts a shell from a directory chip's launch button too", async () => {
+    const w = mountCell(null, { presets: [{ label: "proj", path: "/home/me/proj" }] });
+    await flushPromises();
+    await pick(w, "shell");
+    await w.find('[data-testid="cell-chip-launch"]').trigger("click");
+    expect(w.emitted("launch")).toEqual([[SHELL_PICK]]);
+    expect(w.emitted("agent")).toBeUndefined();
+  });
+
+  it("still starts a Claude session while Claude stays picked", async () => {
+    const w = mountCell(null);
+    await flushPromises();
+    await w.find('[data-testid="cell-dir-input"]').setValue("/home/me/proj");
+    await w.find('[data-testid="cell-dir-go"]').trigger("click");
+    expect(w.emitted("launch")).toBeUndefined();
+    expect(w.emitted("agent")).toEqual([["claude"]]);
+  });
+
+  it("hides the model / MCP / worktree options for a shell and brings them back for an agent", async () => {
+    mockFetchWithAgentOptions();
+    const w = mountCell(null);
+    await flushPromises();
+    expect(w.find('[data-testid="cell-model-help"]').exists()).toBe(true);
+    expect(w.find('[data-testid="cell-mcp-toggle-render"]').exists()).toBe(true);
+    expect(w.find('[data-testid="cell-worktrees"]').exists()).toBe(true);
+
+    await pick(w, "shell");
+    expect(w.find('[data-testid="cell-model-help"]').exists()).toBe(false);
+    expect(w.find('[data-testid="cell-mcp-toggle-render"]').exists()).toBe(false);
+    expect(w.find('[data-testid="cell-worktrees"]').exists()).toBe(false);
+
+    // Back to an agent: the sections return. Codex keeps its own model configuration, so the
+    // model picker is Claude's alone — that part is unchanged by the shell option.
+    await pick(w, "codex");
+    expect(w.find('[data-testid="cell-mcp-toggle-render"]').exists()).toBe(true);
+    expect(w.find('[data-testid="cell-worktrees"]').exists()).toBe(true);
+    expect(w.find('[data-testid="cell-model-help"]').exists()).toBe(false);
+    await pick(w, "claude");
+    expect(w.find('[data-testid="cell-model-help"]').exists()).toBe(true);
   });
 });

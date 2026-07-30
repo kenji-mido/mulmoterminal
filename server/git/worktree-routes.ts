@@ -6,6 +6,7 @@ import type { Express } from "express";
 import { repoRoot, defaultBaseBranch, listWorktrees, createWorktree, removeWorktree, isDirty } from "./worktrees.js";
 import { worktreeDiff } from "./worktree-diff.js";
 import { pushWorktree, createOrOpenPR } from "./worktree-pr.js";
+import { requestOriginAllowed } from "../routes/same-origin-guard.js";
 
 interface WorktreeRouteOptions {
   isAllowedOrigin: (origin: string | undefined, remoteAddress: string | undefined) => boolean;
@@ -14,7 +15,7 @@ interface WorktreeRouteOptions {
 // A failed git/gh command is a 500; a precondition the user can fix (no remote, not
 // a GitHub repo, …) is a 409. Mirrors the create/remove status convention.
 const SERVER_ERROR_REASONS = new Set(["failed", "push-failed"]);
-function statusFor(result: { ok: boolean; reason?: string }): number {
+function statusFor(result: { ok: boolean; reason?: string | undefined }): number {
   if (result.ok) return 200;
   return SERVER_ERROR_REASONS.has(result.reason ?? "") ? 500 : 409;
 }
@@ -41,7 +42,7 @@ export function mountWorktreeRoutes(app: Express, { isAllowedOrigin }: WorktreeR
   });
 
   app.post("/api/worktrees/create", async (req, res) => {
-    if (!isAllowedOrigin(req.headers.origin, req.socket?.remoteAddress)) return res.status(403).end();
+    if (!requestOriginAllowed(req, isAllowedOrigin)) return res.status(403).end();
     const { repoDir, task } = req.body ?? {};
     if (typeof repoDir !== "string" || typeof task !== "string" || !task.trim()) {
       return res.status(400).json({ error: "repoDir and a non-empty task are required" });
@@ -55,7 +56,7 @@ export function mountWorktreeRoutes(app: Express, { isAllowedOrigin }: WorktreeR
   // re-confirms with `force`; not-managed → a bad path), 500 for an internal git
   // failure the client can't fix by retrying.
   app.post("/api/worktrees/remove", async (req, res) => {
-    if (!isAllowedOrigin(req.headers.origin, req.socket?.remoteAddress)) return res.status(403).end();
+    if (!requestOriginAllowed(req, isAllowedOrigin)) return res.status(403).end();
     const { repoDir, path: worktreePath, deleteBranch, force } = req.body ?? {};
     if (typeof repoDir !== "string" || typeof worktreePath !== "string") {
       return res.status(400).json({ error: "repoDir and path are required" });
@@ -70,7 +71,7 @@ export function mountWorktreeRoutes(app: Express, { isAllowedOrigin }: WorktreeR
 
   // Push the worktree's branch to origin (the first half of "取り込み").
   app.post("/api/worktrees/push", async (req, res) => {
-    if (!isAllowedOrigin(req.headers.origin, req.socket?.remoteAddress)) return res.status(403).end();
+    if (!requestOriginAllowed(req, isAllowedOrigin)) return res.status(403).end();
     const { cwd } = req.body ?? {};
     if (typeof cwd !== "string") return res.status(400).json({ error: "cwd is required" });
     const result = await pushWorktree(cwd);
@@ -80,7 +81,7 @@ export function mountWorktreeRoutes(app: Express, { isAllowedOrigin }: WorktreeR
   // Push, then create a PR via gh — or fall back to the GitHub compare URL. The body
   // returns the URL for the client to open and which path produced it (`via`).
   app.post("/api/worktrees/pr", async (req, res) => {
-    if (!isAllowedOrigin(req.headers.origin, req.socket?.remoteAddress)) return res.status(403).end();
+    if (!requestOriginAllowed(req, isAllowedOrigin)) return res.status(403).end();
     const { cwd } = req.body ?? {};
     if (typeof cwd !== "string") return res.status(400).json({ error: "cwd is required" });
     const result = await createOrOpenPR(cwd);

@@ -11,3 +11,8 @@ export declare const MIN_NODE_LABEL: string;
 export declare function nodeMeetsMinimum(version: string): boolean;
 export declare function serverNodeArgs(serverEntry: string, launchDir: string): string[];
 export declare function serverSpawnEnv(env: Record<string, string | undefined>, port: number, cwd: string): Record<string, string | undefined>;
+export interface RunningInstance {
+  pid: number;
+  port: number | null;
+}
+export declare function runningInstancesPrompt(instances: readonly RunningInstance[]): string;

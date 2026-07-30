@@ -2,10 +2,16 @@
 // argument — a long prompt overflows tmux's `new-session` command-length limit and kills
 // the session. Split from index.ts (#548): the two agents differ only in how they decide
 // the input box is ready, and neither decision needs any of index.ts's session state.
+import type { IPty } from "node-pty";
 import { claudeAdapter } from "../agents/claude.js";
 import type { PtyEntry } from "./types.js";
 import { sanitizeDraftText } from "./pty-text.js";
 import { planDraftInjection } from "./draft-plan.js";
+import { submittableLineForAgent } from "../../common/terminalSubmit.js";
+
+// All a session needs to be typed into: where the bytes go, and which agent reads them
+// (both the submit mapping and the completion-menu guard are Claude Code's behaviour).
+type DraftTarget = Pick<PtyEntry, "agent"> & { term: Pick<IPty, "write"> };
 
 // Claude must have its input box + bracketed-paste mode up before it will capture a
 // typed `draft`; too early and the bytes are echoed into the scrollback instead. We
@@ -26,11 +32,22 @@ const DRAFT_SUBMIT_MS = 150;
 // killing the session). ALL control bytes are stripped first — C0/C1, including ESC,
 // Ctrl-C, CR/LF and an embedded bracketed-paste terminator (\e[201~) — so untrusted text
 // (collection / custom-view) can't inject sequences that break out of the paste. It's
-// wrapped in bracketed paste (\e[200~…\e[201~); initialPrompt then presses Enter to run
-// it, while a draft gets NO Enter so the user reviews + sends. Returns a scanner to feed
+// wrapped in bracketed paste (\e[200~…\e[201~); initialPrompt then submits to run it,
+// while a draft gets NO submit so the user reviews + sends. Returns a scanner to feed
 // the pty output to: it types once the input-box readiness marker paints (after a settle),
 // or after DRAFT_FALLBACK_MS if the marker never appears (UI drift). No-op when neither.
-export function attachDraftInjection(entry: PtyEntry, initialPrompt: string | undefined, draft: string | undefined): (data: string) => void {
+//
+// `submitSequence` supplies the byte(s) that submit on THIS host — called when the submit
+// fires, not when the session is attached, so a `terminalSubmit` edit applies without a
+// restart. It is a parameter rather than a config read here because a hardcoded CR is
+// exactly the bug this path had (#1148): on an `esc-cr` host CR is the newline, so the
+// prompt was typed and never sent.
+export function attachDraftInjection(
+  entry: DraftTarget,
+  initialPrompt: string | undefined,
+  draft: string | undefined,
+  submitSequence: () => string,
+): (data: string) => void {
   const plan = planDraftInjection(initialPrompt, draft, sanitizeDraftText);
   if (!plan) return () => {};
   const { text: draftText, autoSubmit } = plan;
@@ -40,14 +57,21 @@ export function attachDraftInjection(entry: PtyEntry, initialPrompt: string | un
     if (done) return;
     done = true;
     try {
-      // Type the paste first; for an auto-run, submit with a CR in a SEPARATE write a beat
-      // later (DRAFT_SUBMIT_MS) so the Enter isn't dropped while Claude's TUI is still
-      // committing the paste. A draft gets no CR — the user reviews + sends.
-      entry.term.write(`\x1b[200~${draftText}\x1b[201~`);
+      // Type the paste first; for an auto-run, submit in a SEPARATE write a beat later
+      // (DRAFT_SUBMIT_MS) so the Enter isn't dropped while Claude's TUI is still committing
+      // the paste. A draft gets no submit — the user reviews + sends.
+      //
+      // An auto-run line ends in a space (submittableLineForAgent) so no completion menu is
+      // open when the submit lands — an open `/command` or `@path` menu eats it (#1142). The
+      // space rides INSIDE the paste, where the TUI takes it as text; after the terminator it
+      // would be a keystroke, which is exactly what an open menu reads. A draft keeps its text
+      // byte-exact: the user's own Enter is a keystroke they can retry once they see the menu.
+      const line = autoSubmit ? submittableLineForAgent(entry.agent, draftText) : draftText;
+      entry.term.write(`\x1b[200~${line}\x1b[201~`);
       if (autoSubmit) {
         setTimeout(() => {
           try {
-            entry.term.write("\r");
+            entry.term.write(submitSequence());
           } catch {
             // pty already gone — nothing to submit
           }
@@ -92,6 +116,8 @@ export function attachCodexAutoRun(entry: PtyEntry, prompt: string): (data: stri
       entry.term.write(`\x1b[200~${text}\x1b[201~`);
       setTimeout(() => {
         try {
+          // Plain CR, not the configured sequence: `terminalSubmit` describes the user's CLAUDE
+          // keymap, and every other agent submits on CR (submitSequenceForAgent's rule).
           entry.term.write("\r");
         } catch {
           // pty already gone — nothing to submit

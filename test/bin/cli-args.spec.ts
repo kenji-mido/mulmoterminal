@@ -7,6 +7,7 @@ import {
   portInUseAction,
   portInUseMessage,
   secondInstancePrompt,
+  runningInstancesPrompt,
   saysYes,
   SECOND_INSTANCE_NOTE,
   nodeMeetsMinimum,
@@ -328,5 +329,40 @@ describe("serverNodeArgs", () => {
     const flag = serverNodeArgs(ENTRY, "/home/u/My Projects/app").find((a) => a.startsWith("--env-file"));
     expect(flag).toBe(`--env-file-if-exists=${path.join("/home/u/My Projects/app", ".env")}`);
     expect(flag).not.toContain('"');
+  });
+});
+
+// The gap the field incident went through (#1061): the port prompt only fires when the wanted
+// port is TAKEN, so `--port <free>` started a second instance in silence — and the two then
+// shared ~/.mulmoterminal, where one deleted the other's live session settings.
+describe("runningInstancesPrompt", () => {
+  it("names where the running one is, so the user can go look before answering", () => {
+    const text = runningInstancesPrompt([{ pid: 42, port: 34567 }]);
+    expect(text).toContain("http://localhost:34567");
+    expect(text).toContain("already running");
+  });
+
+  it("says plainly that this is not supported, and why", () => {
+    // The port clash is a symptom; the shared home directory is the actual hazard, and it is
+    // there at any port. Saying only "port in use" taught the wrong lesson.
+    const text = runningInstancesPrompt([{ pid: 42, port: 34567 }]);
+    expect(text).toContain("NOT a supported setup");
+    expect(text).toContain("~/.mulmoterminal");
+  });
+
+  it("defaults to no", () => {
+    expect(runningInstancesPrompt([{ pid: 42, port: 34567 }])).toContain("[y/N]");
+  });
+
+  it("counts them when more than one is up", () => {
+    const text = runningInstancesPrompt([
+      { pid: 1, port: 34567 },
+      { pid: 2, port: 34568 },
+    ]);
+    expect(text).toContain("2 MulmoTerminal servers are already running");
+  });
+
+  it("falls back to the pid when an entry never recorded its port", () => {
+    expect(runningInstancesPrompt([{ pid: 77, port: null }])).toContain("pid 77");
   });
 });

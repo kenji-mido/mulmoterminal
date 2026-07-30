@@ -16,6 +16,7 @@ import type { Express, Request, Response } from "express";
 import type { RemoteHostLifecycle, RemoteHostStatus } from "@mulmoclaude/core/remote-host/server";
 import type { RunnerHealth } from "../../../common/remoteHostHealth.js";
 import { isRecord } from "../../../common/isRecord.js";
+import { requestOriginAllowed } from "../../routes/same-origin-guard.js";
 
 interface StatusResponse {
   status: RemoteHostStatus;
@@ -50,10 +51,12 @@ export function mountRemoteHostRoutes(app: Express, deps: RemoteHostRouteDeps): 
   const respond = (res: Response<RemoteHostResponse>, status: RemoteHostStatus): Response =>
     res.json({ status, session: deps.exportSession(), health: healthFor(status) });
 
-  // Origin-guarded (loopback only) + not-initialized guard. Returns the live lifecycle
-  // (already sent the error response and returns null when either guard fails).
+  // Origin-guarded + not-initialized guard. Returns the live lifecycle (already sent the error
+  // response and returns null when either guard fails). The origin half applies to the POSTs
+  // only — a browser sends no Origin on a same-origin GET, so judging /status by it refused the
+  // very page the operator had allowed (#1094).
   const guard = (req: Request, res: Response<RemoteHostResponse>): RemoteHostLifecycle | null => {
-    if (!deps.isAllowedOrigin(req.headers.origin, req.socket?.remoteAddress)) {
+    if (!requestOriginAllowed(req, deps.isAllowedOrigin)) {
       res.status(403).json({ error: "forbidden origin" });
       return null;
     }

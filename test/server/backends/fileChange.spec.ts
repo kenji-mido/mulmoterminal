@@ -50,6 +50,15 @@ describe("initFileChangePublisher", () => {
     expect(typeof payload.mtimeMs).toBe("number");
   });
 
+  it("forwards a document OUTSIDE artifacts/documents too — the write site accepts any .md", async () => {
+    const rel = "README.md";
+    seedFile(rel);
+
+    await publishFileChange(rel);
+
+    expect(published.map((p) => p.channel)).toEqual([`plugin:markdown:file:${rel}`]);
+  });
+
   it("forwards an html artifact to the html plugin channel", async () => {
     const rel = "artifacts/html/2026/06/page.html";
     seedFile(rel);
@@ -58,6 +67,21 @@ describe("initFileChangePublisher", () => {
 
     expect(published).toHaveLength(1);
     expect(published[0].channel).toBe(`plugin:html:file:${rel}`);
+  });
+
+  // The write side takes both HTML extensions and compares them case-insensitively
+  // (core's classifyFilePath), so the refresh side has to as well — otherwise these
+  // save and the open View never updates.
+  it.each([
+    ["docs/report.htm", "html"],
+    ["docs/REPORT.HTML", "html"],
+    ["README.MD", "markdown"],
+  ])("forwards %s on the %s channel", async (rel, scope) => {
+    seedFile(rel);
+
+    await publishFileChange(rel);
+
+    expect(published.map((p) => p.channel)).toEqual([`plugin:${scope}:file:${rel}`]);
   });
 
   it("does not publish for a path that matches no scope", async () => {

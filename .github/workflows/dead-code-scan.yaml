@@ -6,15 +6,22 @@ name: dead-code-scan
 # or a helper whose last caller was removed (exactly the class of orphan a refactor
 # leaves behind when it deletes the only call site in another module).
 #
-# Reports only — this workflow NEVER fails the build (`continue-on-error`), mirroring
-# duplication-scan.yaml:
-#   1. knip can't infer every entry point (CLI subcommands spawned via tsx, codegen),
-#      so a few false positives are expected. Blocking on day one would just train
-#      people to add `// knip-ignore` reflexively.
-#   2. knip has no base-branch diffing, so the report is the FULL current inventory,
-#      not this PR's delta. It's a review aid — a human decides whether a finding is
-#      real and whether this PR made it worse — not a gate. Revisit gating once the
-#      config is tuned enough to be trustworthy.
+# Gates on UNUSED FILES; everything else it finds is reported without failing.
+#
+# This was reports-only, on two conditions it set for itself: that the config be tuned enough
+# to be trustworthy, and that a full-inventory report (knip has no base-branch diffing) not be
+# read as this PR's delta. Both are now met — the inventory is EMPTY, so "the whole inventory"
+# and "your delta" are the same list, and `ignoreDependencies` has gone from `.*` to four named
+# entries with reasons.
+#
+# What tipped it: an orphaned file is invisible to everything else in CI. #1124 replaced a
+# 311-line module with a directory and left the old file behind; typecheck, the full test suite
+# and the build all stayed green, and only jscpd noticed (because the two copies happened to be
+# similar — a less similar orphan would have shipped unnoticed).
+#
+# Unused EXPORTS stay reporting-only: they are the finding knip is most likely to get wrong,
+# since it cannot infer every entry point (CLI subcommands spawned via tsx, codegen). Promote
+# them the same way if that stops being true.
 #
 # Config lives in `knip.jsonc`; run it locally with `yarn knip`.
 
@@ -45,7 +52,6 @@ jobs:
     name: Dead Code Scan (knip)
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v6
         with:
@@ -59,16 +65,21 @@ jobs:
       # to be installed. `--frozen-lockfile` keeps CI honest against yarn.lock.
       - run: yarn install --frozen-lockfile --network-timeout 120000
 
-      # `|| true`: knip exits non-zero when it finds anything, and this workflow is
-      # report-only. The report goes to the PR job summary.
+      # knip's exit code is captured rather than swallowed, and rather than left to decide the
+      # step on its own: the summary has to be written EITHER WAY (a failing job is exactly when
+      # someone wants to read what it found), and a `{ ... } >> $GITHUB_STEP_SUMMARY` block ends
+      # with printf's status, so the knip result would be lost even without a `|| true`.
       - name: Run knip
         run: |
           set -uo pipefail
+          knip_status=0
+          output=$(yarn --silent knip --reporter compact 2>&1) || knip_status=$?
           {
             printf '## Dead code scan (knip)\n\n'
-            printf 'Unused exports / files below. Report-only — a human decides what is\n'
-            printf 'real. See .github/workflows/dead-code-scan.yaml.\n\n'
+            printf 'An unused FILE fails this job. Everything else below is reported for a human\n'
+            printf 'to judge. See .github/workflows/dead-code-scan.yaml.\n\n'
             printf '```\n'
-            yarn --silent knip --reporter compact 2>&1 || true
+            printf '%s\n' "$output"
             printf '```\n'
           } >> "$GITHUB_STEP_SUMMARY"
+          exit "$knip_status"

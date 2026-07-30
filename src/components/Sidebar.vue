@@ -1,7 +1,15 @@
 <script setup lang="ts">
-import { useSessionFilter, type SessionListEmits, type SessionListProps } from "../composables/sessionList";
+import {
+  SESSION_SPINNER,
+  sessionDotFor,
+  sessionListEmptyMessage,
+  useSessionFilter,
+  type SessionListEmits,
+  type SessionListProps,
+} from "../composables/sessionList";
 import SessionFilters from "./SessionFilters.vue";
 import { relativeTime } from "./cellDisplay";
+import { agentBadge } from "../../common/sessionAgent";
 
 // Presentational: the session list + filter are owned by App.vue (a single
 // useSessions instance shared across layouts) so toggling vertical/horizontal
@@ -15,7 +23,7 @@ const props = defineProps<
 >();
 const emit = defineEmits<SessionListEmits>();
 
-const { unreadCount, filteredSessions, isUnread } = useSessionFilter(props);
+const { unreadCount, backgroundCount, filteredSessions, isUnread } = useSessionFilter(props);
 </script>
 
 <template>
@@ -46,12 +54,20 @@ const { unreadCount, filteredSessions, isUnread } = useSessionFilter(props);
       >
         <span class="material-symbols-outlined text-[18px]" aria-hidden="true">add</span> Codex
       </button>
+      <button
+        class="flex cursor-pointer items-center justify-center gap-1.5 rounded-md border-0 bg-selected p-2 text-[13px] text-secondary hover:bg-selected-hover"
+        title="New Antigravity session"
+        @click="emit('new-antigravity')"
+      >
+        <span class="material-symbols-outlined text-[18px]" aria-hidden="true">add</span> AGY
+      </button>
     </div>
 
     <div class="flex items-center gap-1.5 px-3 pb-2">
       <SessionFilters
         :filter="filter"
         :unread-count="unreadCount"
+        :background-count="backgroundCount"
         align-refresh-end
         @update:filter="emit('update:filter', $event)"
         @refresh="emit('refresh')"
@@ -63,7 +79,7 @@ const { unreadCount, filteredSessions, isUnread } = useSessionFilter(props);
       {{ error }}
     </div>
     <div v-else-if="sessions.length === 0" class="px-3.5 py-3 text-[13px] text-muted">No sessions yet</div>
-    <div v-else-if="filteredSessions.length === 0" class="px-3.5 py-3 text-[13px] text-muted">No unread sessions</div>
+    <div v-else-if="filteredSessions.length === 0" class="px-3.5 py-3 text-[13px] text-muted">{{ sessionListEmptyMessage(filter) }}</div>
 
     <ul v-else class="m-0 flex-1 list-none overflow-y-auto p-0">
       <li
@@ -104,15 +120,27 @@ const { unreadCount, filteredSessions, isUnread } = useSessionFilter(props);
           <span
             v-if="s.working && !s.waiting && s.id !== props.activeId"
             data-testid="session-spinner"
-            class="spinner"
+            :class="[SESSION_SPINNER, 'mr-[5px] inline-block align-middle']"
+            role="img"
             title="Claude is working"
             aria-label="Claude is working"
           />
+          <!-- Same slot as the spinner, and no row wants both: `working` excludes `waiting`. Bold
+               already says "wants you"; the hue says which KIND — stopped on a prompt (amber) or
+               finished and unread (green), which used to look identical here (#1139). -->
           <span
-            v-if="s.agent === 'codex'"
+            v-else-if="sessionDotFor(s)"
+            data-testid="session-dot"
+            :class="[sessionDotFor(s)?.cls, 'mr-[5px] inline-block align-middle']"
+            role="img"
+            :title="sessionDotFor(s)?.label"
+            :aria-label="sessionDotFor(s)?.label"
+          />
+          <span
+            v-if="agentBadge(s.agent)"
             data-testid="agent-badge"
             class="mr-[5px] inline-block rounded-[4px] bg-selected px-[5px] align-middle text-[10px] font-semibold uppercase text-dim"
-            >codex</span
+            >{{ agentBadge(s.agent)?.full }}</span
           >
           {{ s.title }}
         </span>
@@ -121,25 +149,3 @@ const { unreadCount, filteredSessions, isUnread } = useSessionFilter(props);
     </ul>
   </aside>
 </template>
-
-<!-- The spinner's animated ring (custom keyframes + a color-mix border) has no
-     utility equivalent, so it stays scoped; everything else is utilities. -->
-<style scoped>
-.spinner {
-  display: inline-block;
-  width: 10px;
-  height: 10px;
-  margin-right: 5px;
-  border: 2px solid color-mix(in srgb, var(--accent) 30%, transparent);
-  border-top-color: var(--accent);
-  border-radius: 50%;
-  vertical-align: middle;
-  animation: sidebar-spin 0.9s linear infinite;
-}
-
-@keyframes sidebar-spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-</style>

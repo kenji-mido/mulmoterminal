@@ -1,4 +1,5 @@
 import type { Express } from "express";
+import { requestOriginAllowed } from "../routes/same-origin-guard.js";
 
 // Deps injected from index.ts so the origin guard, session-id validation, and the
 // orphan-selection boundary are unit-testable without booting the server (mirrors
@@ -47,7 +48,7 @@ export function mountTmuxRoutes(app: Express, deps: TmuxRouteDeps): void {
   // leaving it for the disconnect grace. Works even when the WS is down, and kills a tmux
   // orphaned by a prior server restart (reap alone is a no-op without a live entry).
   app.post("/api/session/:id/terminate", (req, res) => {
-    if (!deps.isAllowedOrigin(req.headers.origin, req.socket?.remoteAddress)) return res.status(403).json({ error: "forbidden origin" });
+    if (!requestOriginAllowed(req, deps.isAllowedOrigin)) return res.status(403).json({ error: "forbidden origin" });
     const id = req.params.id;
     if (!deps.isValidSessionId(id)) return res.status(400).json({ error: "invalid session id" });
     deps.reapSession(id); // live entry → kills pty + tmux + cleanup
@@ -59,7 +60,7 @@ export function mountTmuxRoutes(app: Express, deps: TmuxRouteDeps): void {
   // reap it like terminate — the user is done with it. The transcript is kept, so it stays
   // resumable via `claude --resume`; only the list entry goes away.
   app.post("/api/session/:id/hide", (req, res) => {
-    if (!deps.isAllowedOrigin(req.headers.origin, req.socket?.remoteAddress)) return res.status(403).json({ error: "forbidden origin" });
+    if (!requestOriginAllowed(req, deps.isAllowedOrigin)) return res.status(403).json({ error: "forbidden origin" });
     const id = req.params.id;
     if (!deps.isValidSessionId(id)) return res.status(400).json({ error: "invalid session id" });
     deps.hideSession(id);
@@ -72,7 +73,7 @@ export function mountTmuxRoutes(app: Express, deps: TmuxRouteDeps): void {
   // list AND from `claude --resume`. Destructive and irreversible — the client gates this
   // behind a confirmation. (Hiding is the non-destructive path above.)
   app.post("/api/session/:id/delete", async (req, res) => {
-    if (!deps.isAllowedOrigin(req.headers.origin, req.socket?.remoteAddress)) return res.status(403).json({ error: "forbidden origin" });
+    if (!requestOriginAllowed(req, deps.isAllowedOrigin)) return res.status(403).json({ error: "forbidden origin" });
     const id = req.params.id;
     if (!deps.isValidSessionId(id)) return res.status(400).json({ error: "invalid session id" });
     deps.reapSession(id);
@@ -91,7 +92,7 @@ export function mountTmuxRoutes(app: Express, deps: TmuxRouteDeps): void {
   // resumable (a persisted grid session, or a Claude/Codex transcript on disk). These
   // accumulate across server restarts, which the in-memory reap bookkeeping can't reach.
   app.post("/api/tmux/cleanup-orphans", async (req, res) => {
-    if (!deps.isAllowedOrigin(req.headers.origin, req.socket?.remoteAddress)) return res.status(403).json({ error: "forbidden origin" });
+    if (!requestOriginAllowed(req, deps.isAllowedOrigin)) return res.status(403).json({ error: "forbidden origin" });
     const isResumable = await deps.resumablePredicate();
     const killed: string[] = [];
     for (const id of deps.listTmuxIds()) {

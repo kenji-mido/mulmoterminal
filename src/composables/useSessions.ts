@@ -1,5 +1,6 @@
 import { ref, onMounted, onUnmounted } from "vue";
 import { usePubSub } from "./usePubSub";
+import type { TerminalAgent } from "../../common/sessionAgent";
 
 export interface Session {
   id: string;
@@ -10,22 +11,40 @@ export interface Session {
   /** The hook that set the current state ("Stop" | "Notification" | …), or null —
    *  splits `waiting` into done (Stop) vs blocked (Notification). */
   event?: string | null;
-  /** A hidden background worker (spawnBackgroundChat hidden:true) — listed, but
+  /** A background worker: a scheduled collection refresh, or spawnBackgroundChat
+   *  hidden:true. Listed under the Background filter rather than among the chats, and
    *  never treated as unread/bold. */
   hidden?: boolean;
-  /** "codex" for a codex session (from ~/.codex); absent = a Claude session. Drives the
-   *  row badge and which agent the single view resumes as. */
-  agent?: "codex";
+  /** The agent this session runs; absent = a Claude session. Drives the row badge and which
+   *  agent the single view resumes as. */
+  agent?: TerminalAgent;
 }
 
-// "unread" = a session whose `waiting` flag is set, EXCEPT hidden background
-// workers (mulmoclaude's unread, minus the background noise).
-export type Filter = "all" | "unread";
+// The session-list chips, mirroring mulmoclaude's history filters: "unread" is a session
+// whose `waiting` flag is set, "background" the machine-started workers.
+export type Filter = "all" | "unread" | "background";
 
 /** A session that should draw the user's attention (bold + Unread filter): waiting
- *  for input, and not a hidden background worker. */
+ *  for input, and not a background worker. */
 export function isUnread(s: Session): boolean {
   return !!s.waiting && !s.hidden;
+}
+
+/** A session nobody started by hand: a scheduled collection refresh, or a plugin's hidden
+ *  spawnBackgroundChat. */
+export function isBackground(s: Session): boolean {
+  return !!s.hidden;
+}
+
+/** Which rows a chip shows. "all" means all CHATS — the background workers are the ones
+ *  the user did not start, and letting them share the default list is the clutter this
+ *  filter exists to undo (#1060). They stay one click away rather than being dropped:
+ *  a MulmoTerminal session is a live terminal, so a row the user cannot reach is also a
+ *  process they cannot stop. */
+export function matchesFilter(s: Session, filter: Filter): boolean {
+  if (filter === "unread") return isUnread(s);
+  if (filter === "background") return isBackground(s);
+  return !isBackground(s);
 }
 
 // Merge a freshly-fetched list into the displayed one while keeping the order

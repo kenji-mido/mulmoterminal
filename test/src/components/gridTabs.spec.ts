@@ -8,6 +8,7 @@ import {
   addCell,
   setSession,
   setCwd,
+  setCellAgent,
   closeCell,
   toggleExpand,
   switchPage,
@@ -15,6 +16,7 @@ import {
   runScriptInNewCell,
   insertCellAfter,
   shellCell,
+  sessionCell,
   launchInCell,
   canMoveCell,
   setSortMode,
@@ -25,7 +27,6 @@ import {
   nextAttentionUid,
   orderCells,
   visibleOrdered,
-  activityStatus,
   countByStatus,
   cancelableLaunchUid,
   zoomedUid,
@@ -33,11 +34,11 @@ import {
   parseGridState,
   migrateLegacy,
   initialState,
-  type CellStatus,
   type GridState,
   type Cell,
   gridStatusSummary,
 } from "../../../src/components/gridTabs.js";
+import type { AttentionStatus } from "../../../src/components/attentionStatus.js";
 
 const U = (n: number) => `${String(n % 10).repeat(8)}-aaaa-aaaa-aaaa-aaaaaaaaaaaa`;
 const cell = (uid: number, session: string | null = null, cwd: string | null = null): Cell => ({ uid, session, cwd });
@@ -312,7 +313,7 @@ describe("toggleZoom (the keyboard's way in and out of the zoom)", () => {
 });
 
 describe("nextAttention (jump to a terminal that needs you)", () => {
-  const status = (m: Record<number, CellStatus>): Record<number, CellStatus> => m;
+  const status = (m: Record<number, AttentionStatus>): Record<number, AttentionStatus> => m;
 
   // F8 alone enlarges and collapses. This key only moves, so pressing it on a plain grid must
   // leave a plain grid — it brings the candidate's page on screen instead.
@@ -505,6 +506,32 @@ describe("setSession / setCwd / toggleExpand", () => {
   });
 });
 
+// `agent` is how a reloaded cell knows to reconnect via /ws/codex, and Claude is the ABSENT
+// case — so switching back to it has to REMOVE the key. A persisted grid round-trips through
+// JSON, where `agent: undefined` and no key are indistinguishable on the way out but only the
+// latter can be written; exactOptionalPropertyTypes is what makes the difference expressible.
+describe("setCellAgent", () => {
+  it("records codex on the matching cell", () => {
+    expect(setCellAgent(make([cell(0, U(0)), cell(1, U(1))]), 0, "codex").cells[0].agent).toBe("codex");
+  });
+
+  it("leaves the other cells alone", () => {
+    const s = setCellAgent(make([cell(0, U(0)), cell(1, U(1))]), 0, "codex");
+    expect(Object.hasOwn(s.cells[1], "agent")).toBe(false);
+  });
+
+  it("drops the key when switching back to claude, rather than setting it undefined", () => {
+    const codex = setCellAgent(make([cell(0, U(0))]), 0, "codex");
+    const claude = setCellAgent(codex, 0, "claude");
+    expect(Object.hasOwn(claude.cells[0], "agent")).toBe(false);
+  });
+
+  it("keeps the rest of the cell intact across the switch", () => {
+    const s = setCellAgent(make([cell(0, U(0), "/repo")]), 0, "codex");
+    expect(s.cells[0]).toMatchObject({ uid: 0, session: U(0), cwd: "/repo" });
+  });
+});
+
 describe("switchPage", () => {
   it("is a no-op when selecting the already-active page (keeps zoom + launch cell)", () => {
     const s = make([...running(9), cell(9)], { page: 1, expanded: 3 });
@@ -616,6 +643,27 @@ describe("shellCell", () => {
   });
 });
 
+describe("sessionCell (adopting a session spawned elsewhere)", () => {
+  it("carries a non-Claude agent, so the cell reconnects on that agent's endpoint", () => {
+    expect(sessionCell("s1", "/proj", "codex")).toEqual({ session: "s1", cwd: "/proj", agent: "codex" });
+    expect(sessionCell("s2", "/proj", "antigravity")).toEqual({ session: "s2", cwd: "/proj", agent: "antigravity" });
+  });
+
+  // `toEqual` treats an explicit `agent: undefined` as equal to an absent key, so the invariant has
+  // to be asserted on the KEY. It matters: a persisted cell round-trips through JSON, where
+  // `undefined` disappears — but exactOptionalPropertyTypes also rejects it at the type level, and
+  // both would be satisfied by a shape that reads fine and is wrong.
+  it("writes no agent key at all for Claude, rather than an undefined one", () => {
+    const cell = sessionCell("s3", "/proj", "claude");
+    expect(cell).toEqual({ session: "s3", cwd: "/proj" });
+    expect("agent" in cell).toBe(false);
+  });
+
+  it("accepts a null cwd — the config may not have loaded when a session is adopted", () => {
+    expect(sessionCell("s4", null, "claude")).toEqual({ session: "s4", cwd: null });
+  });
+});
+
 describe("setSortMode / moveCell (manual reorder)", () => {
   it("setSortMode flips between manual and auto", () => {
     expect(setSortMode(make(running(2)), "auto").sortMode).toBe("auto");
@@ -657,21 +705,6 @@ describe("setSortMode / moveCell (manual reorder)", () => {
   });
 });
 
-describe("activityStatus", () => {
-  it("splits waiting into blocked (Notification) vs done (Stop)", () => {
-    expect(activityStatus(false, true, "Notification")).toBe("blocked");
-    expect(activityStatus(false, true, "Stop")).toBe("done");
-    expect(activityStatus(false, true, null)).toBe("done"); // any non-Notification waiting -> done
-  });
-  it("is working when only working, idle when neither", () => {
-    expect(activityStatus(true, false, "UserPromptSubmit")).toBe("working");
-    expect(activityStatus(false, false, null)).toBe("idle");
-  });
-  it("waiting wins over working (a permission pause mid-turn is blocked)", () => {
-    expect(activityStatus(true, true, "Notification")).toBe("blocked");
-  });
-});
-
 describe("countByStatus", () => {
   it("tallies occupied cells by status, skipping empty launchers", () => {
     const cells = [...running(4), cell(4)]; // uid 4 = empty launcher
@@ -688,7 +721,7 @@ describe("countByStatus", () => {
 });
 
 describe("orderCells (auto attention sort)", () => {
-  const status = (m: Record<number, CellStatus>) => m;
+  const status = (m: Record<number, AttentionStatus>) => m;
   it("manual mode returns the list unchanged", () => {
     const cells = running(3);
     expect(orderCells(cells, status({ 0: "working", 1: "blocked", 2: "idle" }), "manual")).toBe(cells);
@@ -767,7 +800,7 @@ describe("visibleOrdered (attention-sort the whole list, then page)", () => {
     // 12 cells over 2 pages. uid 10 starts on page 2; once blocked it sorts to the
     // front and lands on page 1, while the working uid 0 sinks off page 1.
     const s = make(running(12), { page: 0, sortMode: "auto" });
-    const statusByUid: Record<number, CellStatus> = { 0: "working", 1: "blocked", 10: "blocked" };
+    const statusByUid: Record<number, AttentionStatus> = { 0: "working", 1: "blocked", 10: "blocked" };
     const page1 = visibleOrdered(s, statusByUid).map((c) => c.uid);
     expect(page1.slice(0, 2)).toEqual([1, 10]); // both blocked cells, base order, up front
     expect(page1).not.toContain(0); // working uid 0 sank to page 2
@@ -894,36 +927,36 @@ describe("resolveCellStatus", () => {
   // The server's activity for the cell's session wins: it is the only source that knows a
   // turn is blocked, which is what auto mode sorts on.
   it("prefers the session's live status over the cell's own", () => {
-    const out = resolveCellStatus([cell(1, "s1")], new Map<string, CellStatus>([["s1", "blocked"]]), { 1: "working" });
+    const out = resolveCellStatus([cell(1, "s1")], new Map<string, AttentionStatus>([["s1", "blocked"]]), { 1: "working" });
     expect(out[1]).toBe("blocked");
   });
 
   // Command cells have no session id, and a just-launched cell has none yet — without the
   // fallback they would read idle and sort past cells that need nothing.
   it("falls back to the cell's own status when it has no session", () => {
-    expect(resolveCellStatus([cell(2, null)], new Map<string, CellStatus>(), { 2: "working" })[2]).toBe("working");
+    expect(resolveCellStatus([cell(2, null)], new Map<string, AttentionStatus>(), { 2: "working" })[2]).toBe("working");
   });
 
   it("falls back when the session has no activity yet", () => {
-    expect(resolveCellStatus([cell(3, "unknown")], new Map<string, CellStatus>(), { 3: "working" })[3]).toBe("working");
+    expect(resolveCellStatus([cell(3, "unknown")], new Map<string, AttentionStatus>(), { 3: "working" })[3]).toBe("working");
   });
 
   it("lands on idle when nothing knows anything", () => {
-    expect(resolveCellStatus([cell(4, null)], new Map<string, CellStatus>(), {})[4]).toBe("idle");
+    expect(resolveCellStatus([cell(4, null)], new Map<string, AttentionStatus>(), {})[4]).toBe("idle");
   });
 
   it("answers for every cell, not just the ones with activity", () => {
-    const out = resolveCellStatus([cell(1, "s1"), cell(2, null), cell(3, "s3")], new Map<string, CellStatus>([["s1", "blocked"]]), {});
+    const out = resolveCellStatus([cell(1, "s1"), cell(2, null), cell(3, "s3")], new Map<string, AttentionStatus>([["s1", "blocked"]]), {});
     expect(Object.keys(out).sort()).toEqual(["1", "2", "3"]);
   });
 
   it("keys by uid, so two cells on the same session can still differ elsewhere", () => {
-    const out = resolveCellStatus([cell(1, "s1"), cell(2, "s1")], new Map<string, CellStatus>([["s1", "working"]]), {});
+    const out = resolveCellStatus([cell(1, "s1"), cell(2, "s1")], new Map<string, AttentionStatus>([["s1", "working"]]), {});
     expect([out[1], out[2]]).toEqual(["working", "working"]);
   });
 
   it("returns an empty map for no cells", () => {
-    expect(resolveCellStatus([], new Map<string, CellStatus>(), {})).toEqual({});
+    expect(resolveCellStatus([], new Map<string, AttentionStatus>(), {})).toEqual({});
   });
 });
 
@@ -967,7 +1000,7 @@ describe("gridStatusSummary", () => {
 // action that quietly violates one fails here instead of in someone's grid.
 describe("zoom invariants (#829)", () => {
   const order12 = Array.from({ length: 12 }, (_, i) => i);
-  const allIdle: Record<number, CellStatus> = {};
+  const allIdle: Record<number, AttentionStatus> = {};
 
   // Invariant 1 — only toggleZoom changes WHETHER the grid is zoomed.
   const movements: Array<[string, (s: GridState) => GridState]> = [

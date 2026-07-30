@@ -9,10 +9,12 @@ import { hideErrorStacks } from "./infra/hide-error-stacks.js";
 import { toolSummaries } from "./infra/plugins-registry.js";
 import { initMarkdownBackend } from "./backends/markdown.js";
 import { initArtifactsBackend } from "./backends/artifacts.js";
+import { initOpenPathBackend } from "./backends/openPath.js";
 import { getUserMcpServers, getWorklogConfig, getTerminalSubmit, getQuickCommands, APP_CONFIG_FILE } from "./config/config-routes.js";
 import { enforceKeymap } from "./config/keymap-check.js";
 import { readFileSync } from "node:fs";
-import { submitSequenceForAgent } from "../common/terminalSubmit.js";
+import { submitSequence, submitSequenceForAgent } from "../common/terminalSubmit.js";
+import { sessionDisplayName } from "../common/sessionMemo.js";
 import { refreshUpdateStatus } from "./config/update-status.js";
 import {
   tmuxAvailable,
@@ -22,6 +24,9 @@ import {
   tmuxPaneCommand,
   tmuxAttachedClientCount,
   tmuxCaptureStyledPane,
+  tmuxTerminalModes,
+  tmuxRedrawClient,
+  tmuxWindowSize,
 } from "./infra/tmux.js";
 import { sandboxEnabled, sandboxPlatformSupported, dockerAvailable, ensureSandboxImage } from "./infra/sandbox.js";
 import { bindSecurityWarning, browserOriginHostnames, createIsAllowedOrigin } from "./infra/allowed-origin.js";
@@ -49,17 +54,34 @@ import { createTitleManager } from "./session/session-title.js";
 import { generateTitleFromTurns } from "./config/header-title.js";
 import { mountTerminalWebSockets } from "./routes/ws-routes.js";
 import { createConnectionHandlers } from "./session/pty-connection.js";
+import { createTmuxSizeSync } from "./session/tmux-size-sync.js";
 import type { SpawnDeps } from "./session/spawn-deps.js";
-import { activity, aiTitles, devTerminalSessions, hiddenSessions, knownSessions, lastPrompts, ptys, sessionCwd } from "./session/registry.js";
+import {
+  activity,
+  aiTitles,
+  backgroundMarkers,
+  devTerminalSessions,
+  knownSessions,
+  lastPrompts,
+  ptys,
+  sessionCwd,
+  sessionMemos,
+  sessionMemosHydrated,
+} from "./session/registry.js";
+import { hydrateClearedTranscripts } from "./session/cleared-transcripts.js";
 import { runWithHiddenMarker } from "./session/hiddenMarker.js";
+import { registerCompletionHook } from "./session/completion-hooks.js";
 import { createToolStores } from "./session/tool-store.js";
 import { writeDecisionDigest } from "./session/decision-digest-file.js";
 import { createScheduledSessionRegistry, scheduledSessionInUse, scheduledSessionsDir } from "./session/scheduled-sessions.js";
 import { claudeAdapter } from "./agents/claude.js";
 import { codexAdapter } from "./agents/codex.js";
+import { antigravityAdapter } from "./agents/antigravity.js";
+import { createAntigravitySpawner } from "./session/spawn-antigravity.js";
 import { renderScreen } from "./session/headlessScreen.js";
 import {
   agentFromPaneCommand,
+  buildScreenMeta,
   buildSessionList,
   captureSessionScreen,
   sessionWorkSummary,
@@ -102,6 +124,7 @@ import { allowedToolNames, autoAllowedToolNames } from "./infra/plugins-registry
 import { resumableSessionPredicate } from "./session/resumable-sessions.js";
 import { installProcessGuards } from "./infra/process-guards.js";
 import { pruneOrphanSettings } from "./session/session-settings.js";
+import { earliestStartedAt, liveInstances, registerInstance } from "../bin/instances.js";
 import { pruneOrphanDrops } from "./session/session-drops.js";
 
 // Per-session activity flags, driven by Claude hooks (see /api/hook).
@@ -115,8 +138,10 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const CLAUDE_BIN = claudeAdapter.bin();
 const CODEX_BIN = codexAdapter.bin();
+const ANTIGRAVITY_BIN = antigravityAdapter.bin();
 // Model override for codex sessions (--model); null uses codex's own configured default.
 const CODEX_MODEL = process.env.CODEX_MODEL || null;
+const ANTIGRAVITY_MODEL = process.env.ANTIGRAVITY_MODEL || null;
 // Permission mode for backend-spawned Claude sessions. Defaults to "auto" so
 // the backend runs hands-off; override with CLAUDE_PERMISSION_MODE (e.g.
 // "default" / "acceptEdits" / "bypassPermissions" / "plan") when needed.
@@ -132,7 +157,8 @@ await fs.mkdir(CLAUDE_CWD, { recursive: true });
 initWorkspaceSetup({ workspace: CLAUDE_CWD });
 
 // Install the skills we ship into the user's global skills roots so any launched terminal can run
-// `/mulmoterminal-config` (author a .mulmoterminal.json) and `/mulmoterminal-bug-report`.
+// `/mulmoterminal-config` (the settings entry point, which routes to -dirs / -theme / -header /
+// -keys / -model / -notify) and `/mulmoterminal-bug-report`.
 // Best-effort + never clobbers a user's own same-named skill (see install-bundled-skills.ts).
 installBundledSkills();
 
@@ -191,6 +217,26 @@ let pubsub: ReturnType<typeof createPubSub> | null = null;
 // on-disk record) until the user opens it. This keeps `activity` from growing
 // unbounded while preserving the bold-until-viewed behavior.
 
+// Keeps tmux's window in step with the browser's terminal, which SIGWINCH alone does not
+// guarantee (session/tmux-size-sync.ts, #957).
+const tmuxSizeSync = createTmuxSizeSync({
+  windowSizeOf: (id) => tmuxWindowSize(id),
+  resizePty: (id, { cols, rows }) => {
+    try {
+      ptys.get(id)?.term.resize(cols, rows);
+    } catch (err) {
+      // The pty exited between the probe and the repair — the screen it would have fixed is gone.
+      console.warn(`[tmux-size] ${id}: resize dropped: ${messageOf(err)}`);
+    }
+  },
+  onEvent: (event) => {
+    const { id, wanted, seen } = event;
+    const gap = `tmux window ${seen.cols}x${seen.rows}, client ${wanted.cols}x${wanted.rows}`;
+    if (event.kind === "repairing") console.warn(`[tmux-size] ${id}: ${gap} — forcing a resize (#957)`);
+    else console.warn(`[tmux-size] ${id}: ${gap} AFTER the forced resize — the window did not follow (#957)`);
+  },
+});
+
 // Per-connection plumbing (session/pty-connection.ts). The reap decisions stay here —
 // they read activity state and schedule timers that outlive any one connection.
 const { reattachPty, handleClientFrame, handleClientClose } = createConnectionHandlers({
@@ -198,6 +244,10 @@ const { reattachPty, handleClientFrame, handleClientClose } = createConnectionHa
   reap: (id) => reap(id),
   setWaiting: (id, waiting) => setWaiting(id, waiting),
   armReapForDetached: (id) => armReapForDetached(id),
+  terminalModesOf: (id) => tmuxTerminalModes(id),
+  redrawTerminal: (id, clientPid) => tmuxRedrawClient(id, clientPid),
+  checkTerminalSize: (id, size) => tmuxSizeSync.requestCheck(id, size),
+  cancelTerminalSizeCheck: (id) => tmuxSizeSync.cancel(id),
 });
 
 // Mirrors session activity into Firestore so the phone's terminal viewer can refresh
@@ -223,6 +273,7 @@ const lifecycle = createSessionLifecycle({
   sessionActivityPublisher,
   workPhaseOf: (id) => workPhaseTracker.phaseOf(id),
   forgetWorkPhase: (id) => workPhaseTracker.forget(id),
+  forgetTerminalSize: (id) => tmuxSizeSync.forget(id),
 });
 const { cancelReap, reap, armReapForDetached, publishActivity, setWorking, setWaiting } = lifecycle;
 
@@ -241,6 +292,8 @@ const spawnDeps: SpawnDeps = {
   claudeBin: CLAUDE_BIN,
   codexBin: CODEX_BIN,
   codexModel: CODEX_MODEL,
+  antigravityBin: ANTIGRAVITY_BIN,
+  antigravityModel: ANTIGRAVITY_MODEL,
   permissionMode: CLAUDE_PERMISSION_MODE,
   guiMcpTools: GUI_MCP_TOOLS,
   gridMcpTools: GRID_MCP_TOOLS,
@@ -256,6 +309,7 @@ const spawnDeps: SpawnDeps = {
 };
 const { spawnClaudePty } = createClaudeSpawner(spawnDeps);
 const { spawnCodexPty } = createCodexSpawner(spawnDeps);
+const { spawnAntigravityPty } = createAntigravitySpawner(spawnDeps);
 const { spawnCommandPty, spawnLauncherPty, resolveLauncher } = createShellSpawners(spawnDeps);
 
 // The hidden translation worker (session/translation-worker.ts). It drives a headless
@@ -348,6 +402,9 @@ const startClaudeRateLimitProbe = (): void => {
     port: PORT,
     cwd: CLAUDE_CWD,
     sessionId,
+    // The probe IS a claude TUI, so it submits by the user's Claude binding like every other
+    // claude session — read per probe so a config edit needs no restart.
+    submitSequence: () => submitSequence(getTerminalSubmit()),
     // A probe that settles WITHOUT the status line having reported is the "asked, heard nothing"
     // case. report() has already moved the state on if anything arrived, so this only widens the
     // gap when nothing did.
@@ -401,6 +458,7 @@ mountAppRoutes(app, {
   toolSummaries,
   spawnClaudePty,
   spawnCodexPty,
+  spawnAntigravityPty,
   translateViaHiddenChat,
   freshenRosterTitle,
   forgetTitle,
@@ -408,6 +466,9 @@ mountAppRoutes(app, {
   noteWorkPhase: (id, event, toolName) => workPhaseTracker.note(id, event, toolName),
   maybeGenerateTitle,
   reap,
+  // Defined further down; reached only from a request, which cannot arrive before listen().
+  registerBackgroundSession: (id: string) => scheduledSessions.register(id),
+  agentOfSession: (id: string) => agentOfSession(id),
   setWorking,
   setWaiting,
   publishActivity,
@@ -425,6 +486,12 @@ initFileChangePublisher({ workspace: CLAUDE_CWD, pubsub });
 // before any publish/clear and before the collection watchers start.
 await initNotifier({ workspace: CLAUDE_CWD, pubsub });
 
+// Which sessions were `/clear`ed before this process started: tmux keeps their claude running
+// across a restart, so the mark that stops us reading their frozen transcript has to come back
+// with it (#1085). Awaited here — the readers are synchronous, and the first hook can arrive as
+// soon as we listen.
+await hydrateClearedTranscripts();
+
 // Give the markdown host app its workspace (for artifacts/documents storage).
 // File-change live-refresh is handled by the shared publisher above.
 initMarkdownBackend({ workspace: CLAUDE_CWD });
@@ -432,6 +499,11 @@ initMarkdownBackend({ workspace: CLAUDE_CWD });
 // Give the artifacts FileOps backend its workspace root (<workspace>/artifacts) so
 // @mulmoclaude/chart-plugin's executeChart can persist chart documents there.
 initArtifactsBackend({ workspace: CLAUDE_CWD });
+
+// Give the by-path backend the same workspace — presentDocument / presentHtml's
+// `path` argument resolves workspace-relative values against it (absolute ones are
+// taken as-is), and the /htmlfile mount resolves its `ws` scope from it.
+initOpenPathBackend({ workspace: CLAUDE_CWD });
 
 // Create the mulmoScript server ops (stories dir under <workspace>/artifacts,
 // generation fan-out on the plugin pubsub channel). After initArtifactsBackend —
@@ -463,12 +535,23 @@ initAccountingBackend({ workspace: CLAUDE_CWD, pubsub });
 // MulmoTerminal's own session spawn — adapted to @mulmoclaude/core/feeds' AgentWorkerRunner
 // shape here (where spawnClaudePty lives) and injected, so the feeds backend never imports
 // the session layer. A MANUAL refresh spawns a VISIBLE session (hidden:false) the user can
-// watch; `onComplete` is honoured only for hidden (scheduled) workers, which MulmoTerminal
-// doesn't register yet, so it's unused for now. `roleId` is ignored (no role system).
-const feedsSpawnWorker: AgentWorkerRunner = async ({ message, hidden }) => {
+// watch, and the engine sends no `onComplete` for one — watching it IS the report.
+// `roleId` is ignored (no role system).
+//
+// A hidden one gets two things a watched session doesn't need. It goes on the scheduled-session
+// retention (#541), because the chat list keeps it behind the Background filter so nobody is
+// waiting for it to finish and nothing else would ever end it. And it carries the engine's
+// completion hook (#1070), which is what turns a failed refresh into a bell instead of silence.
+// `scheduledSessions` is defined further down, which is safe because the system task that calls
+// this is registered later still (initUserTaskScheduler).
+const feedsSpawnWorker: AgentWorkerRunner = async ({ message, hidden, onComplete }) => {
   const sessionId = randomUUID();
   try {
-    runWithHiddenMarker(hidden, sessionId, hiddenSessions, () => spawnClaudePty(sessionId, null, null, { initialPrompt: message }));
+    runWithHiddenMarker(hidden, sessionId, backgroundMarkers, () => spawnClaudePty(sessionId, null, null, { initialPrompt: message }));
+    if (hidden) scheduledSessions.register(sessionId);
+    // AFTER a successful spawn: a launch that threw has no session to report on, and
+    // registering first would leave a hook nothing will ever fire or clear.
+    if (hidden && onComplete) registerCompletionHook(sessionId, onComplete);
     return { ok: true, chatId: sessionId };
   } catch (err) {
     return { ok: false, error: messageOf(err) };
@@ -521,6 +604,7 @@ const remoteHostListTerminalSessions = async () => {
   // row with no directory and no work item.
   const cwdOfSession = (id: string) => ptys.get(id)?.cwd ?? sessionCwd(id) ?? "";
   const work = await workByCwd([...new Set([...ptys.keys(), ...tmuxListSessionIds()])].map(cwdOfSession));
+  await sessionMemosHydrated; // the memo IS the phone's row title when there is one
   return buildSessionList({
     liveIds: [...ptys.keys()],
     tmuxIds: tmuxListSessionIds(),
@@ -536,7 +620,11 @@ const remoteHostListTerminalSessions = async () => {
       // holding undefined, and Firestore then refuses the entire reply rather than that one field.
       const summary = work.get(cwdOfSession(id));
       return {
-        title: aiTitles.get(id) ?? knownSessions.get(id)?.title ?? "",
+        // The same precedence as the cell header and the sidebar, through the same helper: the
+        // phone is where "which of these is which" is hardest, and it renders `title` and nothing
+        // else — so riding in that field is also what puts a memo on a phone with no core release
+        // and no schema change.
+        title: sessionDisplayName(sessionMemos.get(id), aiTitles.get(id), knownSessions.get(id)?.title),
         cwd: cwdOfSession(id),
         agent: agentOfSession(id),
         ...(summary ? { work: summary } : {}),
@@ -565,27 +653,25 @@ const remoteHostWriteToSession = (sessionId: string, chunk: string): boolean => 
 const remoteHostCanClearBox = (sessionId: string): boolean => canClearInputBox(ptys.get(sessionId)?.agent, activity.get(sessionId)?.working);
 
 // What the phone's per-session view heads the screen with (#786, mulmoserver#107): the same
-// dir / branch / summary / prompt the grid cell shows, read from the tables /api/sessions
+// dir / branch / memo / summary / prompt the grid cell shows, read from the tables /api/sessions
 // answers from. A session that outlived a restart has no PtyEntry, so it has no cwd here and
 // no branch to look up — those fields are simply absent, and the phone shows the screen alone.
-const remoteHostSessionScreenMeta = async (sessionId: string): Promise<SessionScreenMeta> => {
-  const cwd = ptys.get(sessionId)?.cwd ?? "";
-  // Both git reads are independent, so the phone waits for one spawn rather than two.
-  const [head, repoUrl] = await Promise.all([cwd ? currentBranch(cwd) : null, cwd ? resolveGithubUrl(cwd) : null]);
-  return {
-    cwd,
-    branch: head?.branch ?? "",
-    summary: aiTitles.get(sessionId) ?? "",
-    prompt: lastPrompts.get(sessionId) ?? "",
+const remoteHostSessionScreenMeta = (sessionId: string): Promise<SessionScreenMeta> =>
+  buildScreenMeta(sessionId, {
+    cwdOf: (id) => ptys.get(id)?.cwd ?? "",
+    branchOf: async (cwd) => (await currentBranch(cwd)).branch,
     // The repository root, never /tree/<branch>: whether a branch is still ON GitHub cannot
     // be known without asking GitHub. `refs/remotes/origin/*` is a local cache, so a merged
     // branch deleted at merge time keeps resolving here until someone prunes — and every
     // branch this app creates is deleted that way. Measured: the tree URL 404s, the root
     // does not. A per-poll `ls-remote` is the only local fix and costs a network round trip
     // on a screen the phone polls (#832).
-    githubUrl: repoUrl ?? "",
-  };
-};
+    githubUrlOf: resolveGithubUrl,
+    memoOf: (id) => sessionMemos.get(id) ?? "", // beside the summary, never instead of it — see SessionScreenMeta (#1110)
+    summaryOf: (id) => aiTitles.get(id) ?? "",
+    promptOf: (id) => lastPrompts.get(id) ?? "",
+    memosHydrated: sessionMemosHydrated,
+  });
 
 const remoteHostCaptureTerminalScreen = (sessionId: string) =>
   captureSessionScreen(sessionId, {
@@ -634,6 +720,9 @@ initRemoteHostBackend({
   // session's agent — the mapping is Claude's binding, so a shell/codex session in the
   // picker keeps plain CR (same agent lookup as canClearBox above).
   submitSequence: (sessionId) => submitSequenceForAgent(ptys.get(sessionId)?.agent, getTerminalSubmit()),
+  // Which agent the typed text is going to, for the completion-menu guard (#1142) — same lookup
+  // again, because that guard is Claude Code's behaviour and nobody else's.
+  sessionAgent: (sessionId) => ptys.get(sessionId)?.agent,
 });
 
 // Mount per-collection fs.watchers → completion bells via the notifier. After the
@@ -727,6 +816,7 @@ mountTerminalWebSockets({
   handleClientClose,
   spawnClaudePty,
   spawnCodexPty,
+  spawnAntigravityPty,
   spawnCommandPty,
   spawnLauncherPty,
   resolveLauncher,
@@ -755,15 +845,31 @@ server.listen(Number(PORT), BIND_HOST, () => {
   } else {
     console.log("[tmux] not found — terminals are not persistent across a server restart");
   }
+  // Say we are here, so a later launcher can warn about a second instance and a later boot can
+  // tell our live files from a dead server's leftovers (#1061).
+  const unregisterInstance = registerInstance(Number(PORT));
+  process.on("exit", unregisterInstance);
+
   // A crash never reaches reap(), so settings files — one of which may hold a provider's API
   // token — outlive the sessions that used them. Anything not backed by a surviving tmux
   // session is an orphan: a PTY without tmux died with the server that owned it.
+  //
+  // …but only for OUR previous lifetime. A peer running right now has live PTYs, and without
+  // tmux `surviving` is empty, so its files looked like leftovers and were deleted underneath it
+  // (#1061). Files older than the earliest live peer cannot be theirs; newer ones might be — and
+  // that cutoff applies to every sweep here, not just the one the bug was reported against.
+  const peers = liveInstances();
+  const peerCutoff = earliestStartedAt(peers);
   const liveSessionIds = new Set(surviving);
-  const droppedSettings = pruneOrphanSettings(liveSessionIds);
+  const droppedSettings = pruneOrphanSettings(liveSessionIds, undefined, peerCutoff);
   if (droppedSettings.length) console.log(`[settings] removed ${droppedSettings.length} orphaned session settings file(s)`);
   // Dropped files are the same story: copies in tmp that only their session referred to.
-  const droppedDrops = pruneOrphanDrops(liveSessionIds);
+  const droppedDrops = pruneOrphanDrops(liveSessionIds, undefined, peerCutoff);
   if (droppedDrops.length) console.log(`[drops] removed ${droppedDrops.length} orphaned session drop director(ies)`);
+  if (peers.length) {
+    const where = peers.map((p) => (p.port === null ? `pid ${p.pid}` : `port ${p.port}`)).join(", ");
+    console.warn(`[instances] ${peers.length} other MulmoTerminal server(s) running (${where}) — they share ~/.mulmoterminal, which is not a supported setup`);
+  }
   if (sandboxEnabled()) {
     if (!sandboxPlatformSupported()) {
       console.log("[sandbox] MULMOTERMINAL_SANDBOX set but only supported on macOS for now — using host spawn");

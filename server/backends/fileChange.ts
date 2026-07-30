@@ -10,7 +10,6 @@
 import path from "node:path";
 import { configureFileChangePublisher, publishFileChange } from "@mulmoclaude/core/file-change";
 import type { Publisher } from "../infra/pubsub.js";
-import { isDocPath } from "./docPath.js";
 
 type PubSub = Publisher;
 
@@ -18,11 +17,25 @@ const log = {
   warn: (message: string, data?: Record<string, unknown>) => console.warn(`[file-change] ${message}`, data ?? ""),
 };
 
-// Scope matchers mirror the host write sites exactly — the markdown one IS the write site's
-// predicate (docPath.ts), so the two cannot drift into a document that saves but never
-// refreshes.
+// Scope matchers mirror what the host write sites ACCEPT, so a file can't save without
+// refreshing. Both are now "any file of this type": presentDocument/presentHtml's `path`
+// argument opens any `.md` / `.html` on disk (backends/openPath.ts), and the only callers
+// of publishFileChange are those two save paths.
+//
+// Deliberate divergence from MulmoClaude, which still scopes markdown to its own
+// `artifacts/markdowns/**` (server/events/file-change.ts): there, a View editing a repo
+// file simply doesn't get the live-refresh event. Same widening belongs upstream; until
+// it lands, MulmoTerminal refreshes in a case MulmoClaude doesn't.
+// Case-insensitive, and `.htm` as well as `.html`, because that is what the write
+// side accepts: core's `classifyFilePath` compares against MARKDOWN_EXTENSIONS /
+// HTML_EXTENSIONS case-insensitively, so `README.MD` and `report.htm` both save. A
+// matcher narrower than the write site means a file that saves and never refreshes.
+function isMarkdownDoc(posixPath: string): boolean {
+  return /\.md$/i.test(posixPath);
+}
+
 function isHtmlDoc(posixPath: string): boolean {
-  return posixPath.endsWith(".html");
+  return /\.html?$/i.test(posixPath);
 }
 
 /** Configure the shared publisher against MulmoTerminal's pubsub + workspace. Call
@@ -36,7 +49,7 @@ export function initFileChangePublisher(deps: { workspace: string; pubsub: PubSu
     // separators (our rels are already "/"-joined, so this is a no-op on POSIX).
     toPosix: (relativePath) => relativePath.split(path.sep).join("/"),
     pluginScopes: [
-      { scope: "markdown", matches: isDocPath },
+      { scope: "markdown", matches: isMarkdownDoc },
       { scope: "html", matches: isHtmlDoc },
     ],
     warn: (message, data) => log.warn(message, data),

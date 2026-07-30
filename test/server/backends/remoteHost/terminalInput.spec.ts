@@ -48,6 +48,19 @@ describe("sanitizeTerminalInput", () => {
     expect(sanitizeTerminalInput(raw)).toBe("");
   });
 
+  // #1142 was "a slash command from the phone never submits", and the trailing space that fixes
+  // it is added by submittableLine at paste time — NOT by trimming less here. The trim is what
+  // turns control-only input into "" so the caller can refuse it (a control byte becomes a space,
+  // so without the trim `"\x03"` would be a truthy `" "` that submits an empty turn). These pin
+  // that the sanitizer still trims, so a later reading of #1142 doesn't loosen it instead.
+  it.each([
+    ["/sync-repos ", "/sync-repos"],
+    ["/design 1536 ", "/design 1536"],
+    [" /help", "/help"],
+  ])("still trims what the phone sent (%j)", (raw, expected) => {
+    expect(sanitizeTerminalInput(raw)).toBe(expected);
+  });
+
   it("keeps printable non-ASCII (accents, emoji are not control bytes)", () => {
     expect(sanitizeTerminalInput("café 😀")).toBe("café 😀");
   });

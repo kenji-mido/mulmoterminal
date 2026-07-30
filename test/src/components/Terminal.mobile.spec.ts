@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { submittableLine } from "../../../common/terminalSubmit";
 import { mount, flushPromises } from "@vue/test-utils";
 import TerminalView from "../../../src/components/Terminal.vue";
 import { useMobileKeys } from "../../../src/composables/useMobileKeys";
@@ -158,7 +159,9 @@ describe("Terminal.vue — mobile input aids", () => {
     const before = sock?.sent.length ?? 0;
     await w.find('[data-testid="term-continue"]').trigger("click");
     await flushPromises();
-    expect(sock?.sent.slice(before)).toContainEqual(JSON.stringify({ type: "input", data: "continue" }));
+    // Through submittableLine (#1142) like any other Claude submit: the trailing space is what
+    // stops Claude's completion menu from swallowing the submit key. The button is not exempt.
+    expect(sock?.sent.slice(before)).toContainEqual(JSON.stringify({ type: "input", data: submittableLine("continue") }));
     expect(w.find('[data-testid="term-needs-prompt"]').exists()).toBe(false); // cleared on send
   });
 

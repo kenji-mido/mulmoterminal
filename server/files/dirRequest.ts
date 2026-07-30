@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import { statSync } from "node:fs";
 import path from "node:path";
 import { isRecord } from "../../common/isRecord.js";
+import { requestOriginAllowed } from "../routes/same-origin-guard.js";
 
 // Validate a POST { path } request that names a local directory: same-origin,
 // absolute, existing. Returns the directory, or null after sending the matching
@@ -12,7 +13,7 @@ export function resolveDirRequest(
   res: Response,
   isAllowedOrigin: (origin: string | undefined, remoteAddress: string | undefined) => boolean,
 ): string | null {
-  if (!isAllowedOrigin(req.headers.origin, req.socket?.remoteAddress)) {
+  if (!requestOriginAllowed(req, isAllowedOrigin)) {
     res.status(403).json({ error: "forbidden origin" });
     return null;
   }

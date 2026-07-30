@@ -1,4 +1,3 @@
-import type { PrivateModeTracker } from "./terminal-replay.js";
 // Shapes shared by the session layer: the live-PTY table, the sidebar rows those resolve
 // into, and the per-session GUI records. Extracted from index.ts so the registry and the
 // modules that read it can name them without importing the boot module (#548).
@@ -18,9 +17,6 @@ export interface PtyEntry {
   term: IPty;
   ws: WebSocket | null;
   buffer: string;
-  // The private modes (DECSET) currently ON in this PTY — re-asserted on reattach, because
-  // the app set them once at startup and the bounded `buffer` tail long since dropped them.
-  modes: PrivateModeTracker;
   cwd: string; // the dir the PTY actually runs in (reported on reattach)
   // True when this session is the user's actively-viewed pane: the single-view open
   // session, or a focused/zoomed grid cell. Gates the attention flag — a socket being
@@ -31,6 +27,10 @@ export interface PtyEntry {
   // True when `term` is a tmux client (persistent): killing it only detaches, so reap
   // must kill the tmux session to actually end the program.
   tmux?: boolean;
+  // A reattach replayed a delta tail, so the browser's screen is only as complete as that window
+  // (see tmuxRedrawClient). Cleared by the first resize frame after the reattach — waiting for it
+  // is the point, since that frame is where the client tells us the size it actually settled at.
+  redrawPending?: boolean;
   // True when `term` is a `docker run` client (single-view sandbox): reap force-removes
   // the container, since killing the client alone can leave it running.
   sandbox?: boolean;
@@ -51,12 +51,14 @@ export interface ToolResult {
 }
 
 // One entry in a session's tool-call history (Pre/PostToolUse hooks).
+// The optional fields carry `| undefined` because the hook payload they are copied from
+// may omit any of them, and a completed call assigns durationMs in place.
 export interface ToolCall {
-  toolUseId?: string;
-  toolName?: string;
+  toolUseId?: string | undefined;
+  toolName?: string | undefined;
   toolInput?: unknown;
   toolOutput?: unknown;
-  durationMs?: number;
+  durationMs?: number | undefined;
   status: string;
   at: number;
 }

@@ -121,7 +121,7 @@ OPENROUTER_API_KEY=sk-or-…</pre>
 
       <p class="m-0 font-sans text-[11px] leading-relaxed text-secondary">
         Rather not edit JSON? Ask a Claude session in any directory: <em>“set up OpenRouter in my mulmoterminal config”</em> — the bundled
-        <code class="font-mono">mulmoterminal-config</code> skill knows this file and the tested model list.
+        <code class="font-mono">mulmoterminal-model</code> skill knows this file and the tested model list.
       </p>
 
       <p class="m-0 font-sans text-[11px] leading-relaxed text-dim">

@@ -2,7 +2,7 @@
 // backend, and how well each one actually drove Claude Code when it was measured.
 //
 // Shared across the build boundary (like themeIds / dirChrome): the launch picker reads
-// it in the browser, and the mulmoterminal-config skill reads it to know what it may
+// it in the browser, and the mulmoterminal-model skill reads it to know what it may
 // suggest. One list, one source of truth.
 //
 // WHY THE NUMBERS: a model that answers a plain prompt can still be unusable, because the

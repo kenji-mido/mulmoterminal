@@ -22,8 +22,10 @@ function fakeRes() {
   return { res: res as unknown as Response, sent };
 }
 
+// method + path as Express would set them: the origin guard applies the same rule the central
+// gate does, which never judges a safe method. Both callers of resolveDirRequest are POSTs.
 function reqFor(body: unknown, origin?: string): Request {
-  return { headers: { origin }, body } as unknown as Request;
+  return { method: "POST", path: "/api/open-dir", headers: { origin }, body } as unknown as Request;
 }
 
 const allowAll = () => true;

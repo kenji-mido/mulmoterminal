@@ -2,7 +2,6 @@
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "entry": ["server/cli-init.ts", "server/cli-google.ts", "bin/update-check.js", "test/**/*.spec.ts", "*.config.ts"],
   "project": ["server/**/*.ts", "src/**/*.{ts,vue}", "bin/**/*.js", "common/**/*.ts"],
-  "ignore": ["**/dist/**", "**/*.d.ts", "**/logs/**"],
   // Only the dependencies knip structurally cannot see, each with the reason it is
   // invisible. This was `.*` — every dependency ignored — which left the scan silent
   // about dependency rot. Anything absent from this list is checked now, so a
@@ -20,7 +19,11 @@
   "ignoreExportsUsedInFile": true,
   "includeEntryExports": false,
   "rules": {
-    "files": "off",
+    // "error" is what makes knip exit non-zero — a "warn" rule is reported and then exits 0,
+    // so the workflow dropping `continue-on-error` would have gated on nothing. `files` is the
+    // one promoted here: an orphaned file passes typecheck, tests and build (#1124 shipped one),
+    // so nothing else in CI is watching for it. The rest stay reporting-only.
+    "files": "error",
     "dependencies": "warn",
     "devDependencies": "warn",
     "unlisted": "warn",

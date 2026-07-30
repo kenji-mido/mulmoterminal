@@ -36,8 +36,16 @@ export function toShellArg(path: string): string {
   return `'${path.replace(/'/g, "'\\''")}'`;
 }
 
+/** The text to put at the cursor for a set of paths.
+ *
+ *  It ends in a space. Insertions arrive one gesture at a time and the terminal keeps the
+ *  cursor where the last one left it, so without a separator a second paste (#938) or drop
+ *  lands as `path1path2` — one name that reads as neither file. Empty for no paths: a caller
+ *  tells "nothing to insert" from "insert this" by truthiness, and a lone space would insert
+ *  itself and cancel the upload fallback (see onDrop). */
 export function toInsertText(paths: string[]): string {
-  return paths.map(toShellArg).join(" ");
+  if (paths.length === 0) return "";
+  return `${paths.map(toShellArg).join(" ")} `;
 }
 
 export function dropTextFromUriList(uriList: string): string {

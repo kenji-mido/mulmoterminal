@@ -21,10 +21,11 @@ export function buildPushDetail(input: PushDetailInput): string {
   return input.reply || input.lastPrompt || input.aiTitle || "";
 }
 
-// Hidden background workers and translation workers aren't real user tasks, so a turn ending
-// on one must never reach the phone.
-export function shouldSuppressPush(hidden: boolean, translationWorker: boolean): boolean {
-  return hidden || translationWorker;
+// Background workers and translation workers aren't real user tasks, so a turn ending on one
+// must never reach the phone. "never" is why the caller answers `background` from the durable
+// marking rather than from which sessions this process happens to have spawned.
+export function shouldSuppressPush(background: boolean, translationWorker: boolean): boolean {
+  return background || translationWorker;
 }
 
 // Whether the user asked to hear about THIS moment (#850). Two independent answers: the master

@@ -9,10 +9,11 @@
 // server — only the fence extraction and this entry point are new.
 import { ref, onUnmounted } from "vue";
 import { fetchLastTurn } from "../composables/useHandoff";
-import { copyOutcomeFor, copyOutcomeMessage, clipboardAvailable, turnOf } from "./codeBlockCopy";
+import { copyOutcomeFor, copyOutcomeMessage, clipboardAvailable } from "./codeBlockCopy";
 import { trapTabKey, MODAL_FOCUSABLE } from "../utils/focusTrap";
+import type { TerminalAgent } from "../../common/sessionAgent";
 
-const props = defineProps<{ sessionId: string; cwd: string | null; agent: "claude" | "codex" }>();
+const props = defineProps<{ sessionId: string; cwd: string | null; agent: TerminalAgent }>();
 
 const busy = ref(false);
 const note = ref<string | null>(null);
@@ -37,7 +38,7 @@ async function copyLastBlock(): Promise<void> {
   busy.value = true;
   try {
     const turn = await fetchLastTurn({ sessionId: props.sessionId, cwd: props.cwd, agent: props.agent }, "reply");
-    const outcome = copyOutcomeFor(turnOf(turn));
+    const outcome = copyOutcomeFor(turn);
     if (outcome.kind !== "ok") return flash(copyOutcomeMessage(outcome));
     if (!clipboardAvailable()) return showForManualCopy(outcome.text);
     try {

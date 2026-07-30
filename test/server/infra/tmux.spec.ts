@@ -6,6 +6,9 @@ import {
   isResumableTmuxSession,
   parseTmuxEnvironment,
   parseAttachedClientCount,
+  parseTmuxTerminalModes,
+  parseTmuxWindowSize,
+  redrawTargets,
   planMsOverride,
   MS_OVERRIDE_ENTRY,
 } from "../../../server/infra/tmux";
@@ -105,6 +108,13 @@ describe("TMUX_CONF_LINES", () => {
   // binding only `copy-mode` leaves anyone with a vi-ish EDITOR on the five-line jump.
   it("binds both copy-mode tables, since mode-keys decides which is live", () => {
     expect(TMUX_CONF_LINES.filter((l) => l.includes("WheelUpPane"))).toHaveLength(2);
+  });
+
+  // Not cosmetic any more: the size check compares `window_height` against the client's, and a
+  // status line reserves a row — so with the bar on, every resize would read as a disagreement and
+  // nudge the pty for nothing (#957). Measured: with the bar on, `client=80x24` vs `window=80x23`.
+  it("turns the status line off, which the window/client size comparison depends on", () => {
+    expect(TMUX_CONF_LINES).toContain("set -g status off");
   });
 
   // #783: tmux strips OSC 8 hyperlinks (Claude's statusline `PR #NNNN`) unless told the outer
@@ -220,5 +230,82 @@ describe("parseAttachedClientCount", () => {
     expect(parseAttachedClientCount("no server running")).toBeNull();
     expect(parseAttachedClientCount("-1")).toBeNull();
     expect(parseAttachedClientCount("1.5")).toBeNull();
+  });
+});
+
+// Fields, in order: alternate_on, mouse_standard_flag, mouse_button_flag, mouse_all_flag,
+// mouse_utf8_flag, mouse_sgr_flag.
+describe("parseTmuxTerminalModes", () => {
+  // Measured on a live Claude Code 2.1.220 pane under tmux 3.6a.
+  it("reads a mouse TUI's pane as the alternate buffer plus its tracking and SGR modes", () => {
+    expect(parseTmuxTerminalModes("1,0,0,1,0,1\n")).toEqual([1049, 1003, 1006]);
+  });
+
+  it("reads a plain shell's pane as nothing to restore", () => {
+    expect(parseTmuxTerminalModes("0,0,0,0,0,0\n")).toEqual([]);
+  });
+
+  it("maps the older tracking flags too", () => {
+    expect(parseTmuxTerminalModes("1,1,1,0,1,1")).toEqual([1049, 1000, 1002, 1005, 1006]);
+  });
+
+  // A tmux that doesn't know a variable renders it EMPTY. The remaining fields must keep their
+  // own modes rather than sliding onto the previous one.
+  it("keeps the fields aligned when a variable is unknown to this tmux", () => {
+    expect(parseTmuxTerminalModes("1,0,0,,,1")).toEqual([1049, 1006]);
+  });
+
+  it("restores nothing from output tmux could not produce", () => {
+    expect(parseTmuxTerminalModes("")).toEqual([]);
+    expect(parseTmuxTerminalModes("no server running")).toEqual([]);
+  });
+});
+
+// Fields: `#{client_pid} #{client_tty}`.
+describe("redrawTargets", () => {
+  const OUR_PID = 29421;
+
+  it("repaints our own client", () => {
+    expect(redrawTargets(`${OUR_PID} /dev/ttys019\n`, OUR_PID)).toEqual(["/dev/ttys019"]);
+  });
+
+  // tmux promises nothing about the order of list-clients, so taking the first line would send the
+  // repaint to another server's browser and leave this one showing the half-built screen.
+  it("picks ours out of a session several clients are attached to, wherever it is listed", () => {
+    const listed = `40100 /dev/ttys002\n${OUR_PID} /dev/ttys019\n40200 /dev/ttys044\n`;
+    expect(redrawTargets(listed, OUR_PID)).toEqual(["/dev/ttys019"]);
+  });
+
+  // Repainting someone else's client is harmless; repainting nobody is the bug itself.
+  it("falls back to every client when our pid is not in the list", () => {
+    const listed = `40100 /dev/ttys002\n40200 /dev/ttys044\n`;
+    expect(redrawTargets(listed, OUR_PID)).toEqual(["/dev/ttys002", "/dev/ttys044"]);
+  });
+
+  it("has nothing to repaint when no client is attached", () => {
+    expect(redrawTargets("", OUR_PID)).toEqual([]);
+    expect(redrawTargets("\n \n", OUR_PID)).toEqual([]);
+  });
+
+  it("ignores a line that carries no tty", () => {
+    expect(redrawTargets(`${OUR_PID}\n${OUR_PID} /dev/ttys019\n`, OUR_PID)).toEqual(["/dev/ttys019"]);
+  });
+});
+
+describe("parseTmuxWindowSize", () => {
+  it("reads the pair tmux prints", () => {
+    expect(parseTmuxWindowSize("120x40\n")).toEqual({ cols: 120, rows: 40 });
+  });
+
+  // Every non-answer must read as "don't know", never as a disagreement: the caller RESIZES a
+  // live session on a disagreement, and tmux answers with an error line for a session that has
+  // gone (#957).
+  it("refuses anything that is not a pair of numbers", () => {
+    expect(parseTmuxWindowSize("")).toBeNull();
+    expect(parseTmuxWindowSize("can't find session: mt-x")).toBeNull();
+    expect(parseTmuxWindowSize("120x")).toBeNull();
+    expect(parseTmuxWindowSize("x40")).toBeNull();
+    expect(parseTmuxWindowSize("120x40x10")).toBeNull();
+    expect(parseTmuxWindowSize("-1x40")).toBeNull();
   });
 });

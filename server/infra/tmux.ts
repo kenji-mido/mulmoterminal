@@ -9,7 +9,7 @@ import { writeFileSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { isLauncherEnvVar } from "./pty-env.js";
-import { spawnCapture } from "./spawnCapture.js";
+import { spawnCapture, spawnCaptureAsync } from "./spawnCapture.js";
 import { splitLines } from "./split-lines.js";
 
 const SERVER_SOCKET = "mulmoterminal";
@@ -17,6 +17,7 @@ const SESSION_PREFIX = "mt-";
 const CONF_FILE = path.join(os.homedir(), ".mulmoterminal", "tmux.conf");
 
 const tmux = (args: string[]) => spawnCapture("tmux", ["-L", SERVER_SOCKET, ...args]);
+const tmuxAsync = (args: string[]) => spawnCaptureAsync("tmux", ["-L", SERVER_SOCKET, ...args]);
 
 let cachedAvailable: boolean | null = null;
 
@@ -131,6 +132,11 @@ export function planMsOverride(showStdout: string): MsOverridePlan {
 function applyLiveTmuxOptions(): void {
   tmux(["set", "-g", "mouse", "on"]);
   tmux(["set", "-g", "set-clipboard", "on"]);
+  // The status bar is off in CONF_FILE for looks, but the size check (session/tmux-size-sync.ts)
+  // now DEPENDS on it: a status line reserves a row, so `window_height` would sit one below the
+  // client's forever and every resize would read as a disagreement. A tmux server that predates
+  // the conf keeps its status bar across every node restart, so it has to be set live too.
+  tmux(["set", "-g", "status", "off"]);
   // Rebinding is idempotent, so this needs no "is it already ours?" check (unlike the
   // append-only overrides below). A tmux server started before this shipped keeps the
   // five-line jump until it is rebound here — it outlives every node restart.
@@ -289,6 +295,105 @@ export function tmuxPaneCommand(id: string): string | null {
   if (r.status !== 0) return null;
   const name = r.stdout.trim();
   return name === "" ? null : name;
+}
+
+// The pane state that an application SETS ONCE and then relies on forever: which screen buffer
+// it owns, and which mouse reports it asked for. Read back as the DEC private modes that would
+// re-establish it (#1073).
+//
+// Needed because the reattach replay is a bounded tail: `CSI ? 1049 h` is written at pty offset 0
+// (when our tmux client attaches) and never again, so past ~1 MiB it is gone from the replay and
+// the browser restores into the normal buffer — which silently disables the wheel and click
+// synthesis, both gated on the alternate buffer (see session/terminal-replay.ts).
+//
+// Asking tmux instead of tracking the byte stream is what keeps this small: tmux is the emulator
+// that owns the state, so there is no DECRST bookkeeping and no CSI split across pty chunks.
+//
+// 1001/1015/1016 are in the client's swallow set but tmux has no flag for them. No agent we run
+// asks for them, and the client needs 1006 plus one tracking mode — which this covers.
+const TERMINAL_MODE_FLAGS = [
+  { flag: "alternate_on", mode: 1049 },
+  { flag: "mouse_standard_flag", mode: 1000 },
+  { flag: "mouse_button_flag", mode: 1002 },
+  { flag: "mouse_all_flag", mode: 1003 },
+  { flag: "mouse_utf8_flag", mode: 1005 },
+  { flag: "mouse_sgr_flag", mode: 1006 },
+] as const;
+
+// Comma-separated, not space: a variable an older tmux doesn't know renders EMPTY, and only a
+// delimiter that survives an empty field keeps the rest of the values on their own modes.
+const TERMINAL_MODE_FORMAT = TERMINAL_MODE_FLAGS.map(({ flag }) => `#{${flag}}`).join(",");
+
+/** Parse one `TERMINAL_MODE_FORMAT` line into the modes that are on. Positional against the same
+ *  table the format is built from, so the two cannot drift. */
+export function parseTmuxTerminalModes(stdout: string): number[] {
+  const values = stdout.trim().split(",");
+  return TERMINAL_MODE_FLAGS.filter((_, i) => values[i] === "1").map(({ mode }) => mode);
+}
+
+// Empty rather than null when tmux can't answer: an unreadable session and a plain shell lead to
+// the same action — restore nothing — so a nullable would only push a `?? []` onto every caller.
+export function tmuxTerminalModes(id: string): number[] {
+  const r = tmux(["display-message", "-p", "-t", tmuxSessionName(id), TERMINAL_MODE_FORMAT]);
+  return r.status === 0 ? parseTmuxTerminalModes(r.stdout) : [];
+}
+
+// Which client ttys to repaint, from `list-clients -F '#{client_pid} #{client_tty}'`.
+//
+// A session can carry SEVERAL clients — another mulmoterminal server holding it (the case
+// tmuxAttachedClientCount exists for), or a stray `tmux attach` — and tmux promises nothing about
+// their order, so "the first line" can be somebody else's terminal. Ours is identifiable: the pty
+// we spawned IS the tmux client, so `client_pid` is `entry.term.pid`. Measured on a live session:
+// list-clients reported `29421`, and the `new-session -A -s mt-<id>` process we spawned was 29421.
+//
+// When no line carries our pid — a tmux that doesn't report it, or a client someone else attached
+// after ours went away — every client is repainted rather than none. A repaint is idempotent, and
+// skipping ours is the single outcome that leaves the bug in place.
+export function redrawTargets(stdout: string, clientPid: number): string[] {
+  const clients = splitLines(stdout)
+    .map((line) => line.trim().split(/\s+/))
+    .filter((parts) => parts.length >= 2)
+    .map(([pid, tty]) => ({ pid: Number(pid), tty }));
+  const ours = clients.filter((client) => client.pid === clientPid);
+  return (ours.length > 0 ? ours : clients).map((client) => client.tty);
+}
+
+// Make tmux repaint the WHOLE pane onto our client, even though nothing about the pane changed.
+//
+// The reattach replay is a bounded tail of tmux's output — a stream of DELTAS, not a screen. Fed to
+// a freshly reset terminal it reconstructs only the cells that happened to change inside that
+// window: rows that never changed stay blank, and cells written at different moments end up side by
+// side. A pty resize normally hides this, because tmux answers a size change with a full redraw —
+// but a reattach that ends at the size the pty already had leaves tmux with nothing to say, and the
+// browser keeps the half-built screen. Since the replay now lands in the ALTERNATE buffer, which
+// does not reflow, there is also no later resize that can repair it (#1073).
+//
+// Measured against a live session: one `refresh-client` returns every row of a 25-row screen in a
+// single 666-byte burst, where an idle pane sends nothing at all.
+export function tmuxRedrawClient(id: string, clientPid: number): void {
+  const clients = tmux(["list-clients", "-t", tmuxSessionName(id), "-F", "#{client_pid} #{client_tty}"]);
+  if (clients.status !== 0) return;
+  redrawTargets(clients.stdout, clientPid).forEach((tty) => tmux(["refresh-client", "-t", tty]));
+}
+
+/** Parse `#{window_width}x#{window_height}`. Null for anything that isn't a pair of numbers —
+ *  a caller deciding "tmux disagrees with the client" must not read an unreadable answer as a
+ *  disagreement and start resizing on the strength of it. */
+export function parseTmuxWindowSize(stdout: string): { cols: number; rows: number } | null {
+  const pair = /^(\d+)x(\d+)$/.exec(stdout.trim());
+  return pair ? { cols: Number(pair[1]), rows: Number(pair[2]) } : null;
+}
+
+// How big tmux believes the window is. While things are in step this equals the attached
+// client's size — our conf turns the status line off, so no row is reserved — and a difference
+// means the client's SIGWINCH never landed. Nothing repaints its way out of that (see
+// session/tmux-size-sync.ts).
+//
+// Async, unlike its neighbours: a browser window resize settles every open grid cell at once, and
+// ten synchronous tmux spawns in a row would block the event loop for all of them.
+export async function tmuxWindowSize(id: string): Promise<{ cols: number; rows: number } | null> {
+  const r = await tmuxAsync(["display-message", "-p", "-t", tmuxSessionName(id), "#{window_width}x#{window_height}"]);
+  return r.status === 0 ? parseTmuxWindowSize(r.stdout) : null;
 }
 
 // Parse `#{session_attached}`. Its own function so the "unreadable means nobody" rule is

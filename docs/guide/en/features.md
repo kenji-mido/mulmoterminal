@@ -36,6 +36,7 @@ MulmoTerminal — a browser terminal for parallel Claude Code and Codex agents �
 | Feature | Description |
 |---|---|
 | That agent's current work | The header shows "what it's doing right now" |
+| Session note | Your own one line about **what a cell is for** — everything else in the header is what the agent said, which stops telling cells apart once several are open. The pencil beside the header text opens a box (Enter saves, Esc cancels); while a note is set it replaces the header line, and the title it displaced moves to the tooltip. The note is also the session's name in the sidebar list and on the phone. Kept per session: close the cell, restart the server, resume that session and it comes back |
 | Git status chip | `⎇ branch ●changes ↑ahead ↓behind`, always shown |
 | PR phase / work phase | Each roster row badges the branch's **PR state** (draft / CI fail / changes / ready / merged …) and the work phase (planning / editing) |
 | Model / context size | e.g. `Opus · ctx 35%` — the active model and how full the context is |
@@ -90,6 +91,7 @@ so a very large unsaved buffer may not get out.
 | Feature | Description |
 |---|---|
 | File attach | **Drag & drop** a file onto the terminal, or use **Insert a file path** to pick one in the OS dialog — the **absolute path is inserted** |
+| Screenshot paste | **Paste an image** straight into the terminal: it is saved where a dropped file goes and its **absolute path is inserted**. Saves the trip through a file — a screenshot never has to be written somewhere and picked back up. PNG / JPEG / GIF / WebP; pasting text is unchanged |
 | Script execution | Run a command from that directory's `script.json`. From a running session's **Run** menu it launches in **a spare cell next door**, so the conversation isn't interrupted (an empty cell's launcher runs it in place) |
 | Skill menu (**Run a skill in the current session**) | Lists the skills available in that directory (`.claude/skills`); picking one runs its `/<slug>` **in the current session**. Working-dir skills show first; narrow the list with `skills` in `.mulmoterminal.json` |
 | Git actions | One click from a worktree cell: **commit (ask Claude) / push / Open PR** |
@@ -97,7 +99,8 @@ so a very large unsaved buffer may not get out.
 | Summarize output (AI) | Pass terminal output to `claude -p` and summarize **errors / warnings / cause / how to fix** |
 | Copy as prompt | Copy command + directory + summary + follow-up and paste it into any session |
 | Cross-terminal talk | **Bring another terminal's last turn** brings another cell's last turn into this one; **Exchange** does an **automatic round-trip** — send, wait for the other agent's answer, bring it back (great for Claude ↔ Codex mutual review) |
-| Launch commands | Start something other than Claude (`Shell` / `codex` / anything) as a **persistent terminal** |
+| Plain shell | The launcher's **Shell** toggle runs your OS default shell (`$SHELL`) in the chosen directory as a **persistent terminal** — nothing to install, nothing to configure |
+| Launch commands | Start any other interactive command (`codex`, `htop`, …) as a **persistent terminal** |
 | Voice input | Dictate into the prompt via microphone transcription. Settings picks **the language you dictate in** (per browser) — your browser's, per-clip detection, or a fixed one; speaking a language the mic isn't expecting comes back **translated** into the one it is |
 | MCP servers | Join your own HTTP MCP servers to sessions via the MCP SERVERS setting |
 | `/mulmoterminal-bug-report` | Something looks broken? The bundled skill hears the symptom, checks whether it is actually configuration or by design (reading your real config and version), searches the existing issues, and only then helps you file one — with the environment collected and secrets masked |

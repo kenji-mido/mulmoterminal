@@ -1,8 +1,9 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { chmodSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, readdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { BUNDLED_SKILL_NAMES, installOwnedSkill, SCHEMA_ASSET_FILE } from "../../../server/infra/install-bundled-skills";
+import { installOwnedSkill, SCHEMA_ASSET_FILE } from "../../../server/infra/install-bundled-skills";
+import { BUNDLED_SKILL_NAMES } from "../../../common/bundledSkills.js";
 import { loadDirConfig } from "../../../server/config/dir-config";
 import { isRecord } from "../../../common/isRecord.js";
 
@@ -93,7 +94,7 @@ const META_KEYS = ["id", "vibe", "label", "description"];
 // The skill offers these as starting points, so a typo'd hex would silently ship a colour the loader
 // drops — the user picks a preset and part of it just doesn't apply.
 describe("shipped colour presets (palettes.json)", () => {
-  const file = path.join(process.cwd(), "server", "skills", "mulmoterminal-config", "palettes.json");
+  const file = path.join(process.cwd(), "server", "skills", "mulmoterminal-dirs", "palettes.json");
   const parsed: unknown = JSON.parse(readFileSync(file, "utf8"));
   const presets: unknown[] = isRecord(parsed) && Array.isArray(parsed.presets) ? parsed.presets : [];
 
@@ -138,4 +139,63 @@ describe("BUNDLED_SKILL_NAMES", () => {
       expect(skill).toMatch(new RegExp(`^---\\nname: ${name}\\n`));
     });
   }
+
+  // The reverse of the check above, and the failure mode the split introduced: adding a skill
+  // directory is not what ships it. A directory nobody lists is copied nowhere, so the slash
+  // command simply never exists — with no error at any point.
+  it("ships every skill directory under server/skills", () => {
+    const root = path.join(process.cwd(), "server", "skills");
+    const dirs = readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name);
+    expect([...dirs].sort()).toEqual([...BUNDLED_SKILL_NAMES].sort());
+  });
+});
+
+const skillBody = (name: string): string => readFileSync(path.join(process.cwd(), "server", "skills", name, "SKILL.md"), "utf8");
+const frontmatterDescription = (body: string): string => body.match(/^description: (.*)$/m)?.[1] ?? "";
+
+describe("bundled SKILL.md frontmatter", () => {
+  for (const name of BUNDLED_SKILL_NAMES) {
+    // Skill selection is made from the description alone. An empty one is not a skill that is
+    // merely hard to find — it is one the model has no basis to pick over any other.
+    it(`${name} describes itself`, () => {
+      expect(frontmatterDescription(skillBody(name)).trim().length).toBeGreaterThan(0);
+    });
+
+    // A raw control byte survives every check we have -- it type-checks, lints, and renders as
+    // nothing -- while destroying the one thing the text was carrying. The `keymap.send` table
+    // documents ESC and Ctrl-A as the six-character ESCAPE TEXT a user types into JSON; writing
+    // the bytes themselves turns a table of what to type into invisible whitespace.
+    it(`${name} carries no raw control characters`, () => {
+      const control = [...skillBody(name)].filter((ch) => {
+        const code = ch.codePointAt(0) ?? 0;
+        return (code < 0x20 && ch !== "\n" && ch !== "\t") || code === 0x7f;
+      });
+      expect(control).toEqual([]);
+    });
+  }
+});
+
+// The router names its siblings in prose, so a renamed or dropped skill leaves it pointing at
+// something that does not exist — and the user is told to run a command that isn't there.
+describe("mulmoterminal-config routes to skills that exist", () => {
+  const routed = (): string[] => {
+    const named = new Set(skillBody("mulmoterminal-config").match(/mulmoterminal-[a-z-]+/g) ?? []);
+    named.delete("mulmoterminal-config"); // its own name, in the frontmatter and headings
+    return [...named].sort();
+  };
+
+  it("names no skill that isn't bundled", () => {
+    expect(routed().filter((name) => !BUNDLED_SKILL_NAMES.some((bundled) => bundled === name))).toEqual([]);
+  });
+
+  // Each writing skill has to be reachable from the entry point, or the only way to find it is to
+  // already know its name — which defeats having an entry point at all.
+  it("routes to every skill that writes settings", () => {
+    const writers = BUNDLED_SKILL_NAMES.filter(
+      (name) => name !== "mulmoterminal-config" && name !== "mulmoterminal-bug-report" && name !== "mulmoterminal-decisions",
+    );
+    expect(routed()).toEqual([...writers].sort());
+  });
 });

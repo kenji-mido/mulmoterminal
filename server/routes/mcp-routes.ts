@@ -7,10 +7,12 @@
 // tool — it is a landing point for that tool and nothing else, which is why it sits with the
 // MCP surface rather than with the translation routes (#548).
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { Express, Request, Response } from "express";
 
 import { PORT, SESSION_ID_RE } from "../config/env.js";
 import { buildGuiMcpServer } from "../mcp/broker.js";
+import type { GuiCallRecorder } from "../mcp/gui-call-history.js";
 import { translationWorkerIds, markSessionToolGroup, sessionToolGroups } from "../session/registry.js";
 import { isToolGroup, type ToolGroup } from "../../common/toolGroups.js";
 import { submitTranslation } from "../session/translation-worker.js";
@@ -31,9 +33,41 @@ export const TOOL_GROUPS_CHANNEL = "tool-groups";
 
 export interface McpRouteDeps {
   publish: (channel: string, data: unknown) => void;
+  /**
+   * A recorder for this session's GUI tool calls, or null to record nothing. Resolved per
+   * request rather than per session id up front: a session's agent is known only once its PTY
+   * exists, and the same id is asked about again on every later call. See mcp/gui-call-history.ts
+   * for which agents get one and why claude must not.
+   */
+  guiCallHistory: (sessionId: string) => GuiCallRecorder | null;
 }
 
+// Sessions whose MCP client has made contact, so the announcement below is sent once per session
+// rather than on every tool call. In-memory only: after a restart a session announcing itself
+// again is exactly right, since the panel it is telling has also just reconnected.
+const announcedSessions = new Set<string>();
+
 export function mountMcpRoutes(app: Express, deps: McpRouteDeps): void {
+  /**
+   * Tell the panel this session's MCP client is up, so anything it asked too early can be re-asked.
+   *
+   * The pane is handed a session id while the agent is still being spawned, so its first
+   * `/api/tools` lands before there is anything to answer with. The GROUP route below already
+   * announces (with the groups it just learned) and that fixed the grid; a single-view session
+   * connects on the ALL-TOOLS url, learns no group, and so announced nothing — leaving that pane
+   * on whatever the too-early answer said for the rest of the session.
+   *
+   * Deliberately carries NO `groups` field. The grid reads that field to decide whether a cell has
+   * the Canvas MCP, and an all-tools session genuinely has no groups to report — sending `[]` would
+   * read as "this cell cannot draw" for a session that can. Consumers that need groups ignore a
+   * message without them; consumers that only need "ask again" (the tools pane) act on both.
+   */
+  function announceMcpContact(sessionId: string): void {
+    if (announcedSessions.has(sessionId)) return;
+    announcedSessions.add(sessionId);
+    deps.publish(TOOL_GROUPS_CHANNEL, { sessionId });
+  }
+
   // We run in STATELESS mode (sessionIdGenerator: undefined): one fresh Server+transport per
   // request, no session header and no initialize handshake required across requests. The SDK
   // forbids reusing a stateless transport, so it is never cached.
@@ -41,19 +75,35 @@ export function mountMcpRoutes(app: Express, deps: McpRouteDeps): void {
     if (!SESSION_ID_RE.test(sessionId)) {
       return res.status(400).json({ error: "invalid sessionId" });
     }
+    // Both routes, because both kinds of session are asked about too early. The group route's own
+    // announcement below carries the groups it learned; this one only says "I am here".
+    announceMcpContact(sessionId);
     // Hidden translation workers (and only they) get the worker-only submitTranslation
     // tool, so a normal chat's tool list stays clean.
+    // A translation worker is a hidden claude session with no pane to feed, so it never gets a
+    // recorder — asking would only be an extra lookup for a guaranteed null.
+    const isWorker = translationWorkerIds.has(sessionId);
     const server = buildGuiMcpServer(sessionId, `http://127.0.0.1:${PORT}`, {
-      submitTranslationTool: translationWorkerIds.has(sessionId),
+      submitTranslationTool: isWorker,
       group,
+      history: isWorker ? null : deps.guiCallHistory(sessionId),
     });
-    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    // No sessionIdGenerator at all is the SDK's stateless mode. Spelling it `undefined` says
+    // the same thing to the runtime but not to the type — the option is exact-optional.
+    const transport = new StreamableHTTPServerTransport({});
     res.on("close", () => {
       transport.close();
       server.close();
     });
     try {
-      await server.connect(transport);
+      // A cast, which this codebase otherwise refuses — and it asserts only what the SDK itself declares.
+      // @modelcontextprotocol/sdk@1.30.0 writes `class StreamableHTTPServerTransport implements Transport`,
+      // yet types that class's onclose/onerror/onmessage accessors `T | undefined` while Transport spells
+      // them `?: T`. Under exactOptionalPropertyTypes the class therefore fails the interface it claims; the
+      // sibling WebStandardStreamableHTTPServerTransport declares them correctly, which is what makes this a
+      // declaration bug rather than a real mismatch. Upstream issue (open, names this exact workaround):
+      // https://github.com/modelcontextprotocol/typescript-sdk/issues/2083 — drop the cast when it lands.
+      await server.connect(transport as unknown as Transport);
       await transport.handleRequest(req, res, req.body);
     } catch (err) {
       console.error(`[mcp] request failed for ${sessionId}:`, err);

@@ -32,11 +32,17 @@ describe("phaseDisplay", () => {
 });
 
 describe("mergeSessionMeta", () => {
-  const shown = { lastPrompt: "fix the login bug", aiTitle: "Login fix", lastResponse: "done", workPhase: "implementing" as const };
+  const shown = {
+    lastPrompt: "fix the login bug",
+    aiTitle: "Login fix",
+    lastResponse: "done",
+    memo: "ship before the demo",
+    workPhase: "implementing" as const,
+  };
 
   it("takes what the fetch returned", () => {
-    const merged = mergeSessionMeta(shown, { lastPrompt: "new task", aiTitle: "New", lastResponse: "ok", workPhase: "planning" });
-    expect(merged).toEqual({ lastPrompt: "new task", aiTitle: "New", lastResponse: "ok", workPhase: "planning" });
+    const merged = mergeSessionMeta(shown, { lastPrompt: "new task", aiTitle: "New", lastResponse: "ok", memo: "review only", workPhase: "planning" });
+    expect(merged).toEqual({ lastPrompt: "new task", aiTitle: "New", lastResponse: "ok", memo: "review only", workPhase: "planning" });
   });
 
   // The text fields MERGE: the summary can transiently miss a transcript, and blanking every
@@ -45,6 +51,32 @@ describe("mergeSessionMeta", () => {
   it("keeps the text already on screen when the fetch has none", () => {
     const merged = mergeSessionMeta(shown, {});
     expect([merged.lastPrompt, merged.aiTitle, merged.lastResponse]).toEqual(["fix the login bug", "Login fix", "done"]);
+  });
+
+  // aiTitle is ours, held in memory with no transcript fallback, so a successful fetch answers
+  // it outright: null means "there is none now". Merging it like the prompt is how a /clear'ed
+  // session kept showing the title of the conversation the user had just ended (#1085).
+  it("drops the summary when the fetch says there is none", () => {
+    expect(mergeSessionMeta(shown, { aiTitle: null }).aiTitle).toBeNull();
+  });
+
+  // The memo follows aiTitle, not the prompt, for the same reason (#1105): it lives only in the
+  // server's memo map, so a null is the user having ERASED it. Merged like the prompt, an erased
+  // memo would come back on the very next poll — 4 seconds after the user cleared the box.
+  it("keeps the memo when the fetch omits it, and erases it on a null", () => {
+    expect(mergeSessionMeta(shown, {}).memo).toBe("ship before the demo");
+    expect(mergeSessionMeta(shown, { memo: null }).memo).toBeNull();
+    expect(mergeSessionMeta(shown, { memo: "rewritten" }).memo).toBe("rewritten");
+  });
+
+  // The other two DO fall back to the transcript, which can transiently miss — so for them a
+  // null stays "no news". A session that has none sends "" (what /clear writes), which is a
+  // value and merges through.
+  it("keeps the prompt and reply on a null, and clears them on an empty string", () => {
+    const nulled = mergeSessionMeta(shown, { lastPrompt: null, lastResponse: null });
+    expect([nulled.lastPrompt, nulled.lastResponse]).toEqual(["fix the login bug", "done"]);
+    const cleared = mergeSessionMeta(shown, { lastPrompt: "", lastResponse: "" });
+    expect([cleared.lastPrompt, cleared.lastResponse]).toEqual(["", ""]);
   });
 
   // workPhase is the opposite: a successful fetch is authoritative, and null is a real state
@@ -67,7 +99,13 @@ describe("mergeSessionMeta", () => {
   });
 
   it("starts from nothing for a session it has not seen", () => {
-    expect(mergeSessionMeta(EMPTY_SESSION_META, { lastPrompt: "first" })).toEqual({ lastPrompt: "first", aiTitle: null, lastResponse: null, workPhase: null });
+    expect(mergeSessionMeta(EMPTY_SESSION_META, { lastPrompt: "first" })).toEqual({
+      lastPrompt: "first",
+      aiTitle: null,
+      lastResponse: null,
+      memo: null,
+      workPhase: null,
+    });
   });
 
   it("does not mutate what it was given", () => {

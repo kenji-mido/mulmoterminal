@@ -24,6 +24,7 @@ import {
   type GoogleAuthFlow,
 } from "@mulmoclaude/core/google";
 import { hostLogger } from "./hostLogger.js";
+import { requestOriginAllowed } from "../routes/same-origin-guard.js";
 
 export function initGoogleBackend(): void {
   configureGoogleHost({ log: hostLogger });
@@ -79,9 +80,10 @@ async function readStatus(deps: GoogleRouteDeps): Promise<GoogleStatus> {
 
 // Same-origin guarded like the other local-action routes (files/pick-file.ts): without
 // it, any site the user visits could POST /unlink and silently drop their account link.
+// GET /status is exempt via requestOriginAllowed — see #1094.
 export function mountGoogleRoutes(app: Express, { isAllowedOrigin }: GoogleRouteOptions, deps: GoogleRouteDeps = liveDeps): void {
   const forbidden = (req: Request, res: Response): boolean => {
-    if (isAllowedOrigin(req.headers.origin, req.socket?.remoteAddress)) return false;
+    if (requestOriginAllowed(req, isAllowedOrigin)) return false;
     res.status(403).json({ error: "forbidden origin" });
     return true;
   };

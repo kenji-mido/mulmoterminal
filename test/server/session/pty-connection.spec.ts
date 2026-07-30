@@ -1,6 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
 import { createConnectionHandlers, handleCommandFrame } from "../../../server/session/pty-connection.js";
-import { PrivateModeTracker } from "../../../server/session/terminal-replay.js";
 import type { PtyEntry } from "../../../server/session/types.js";
 
 const OPEN = 1;
@@ -47,13 +46,20 @@ function fakeSocket(readyState = OPEN) {
   };
 }
 
-function setup() {
+function setup(terminalModes: readonly number[] = []) {
   const calls: string[] = [];
   const handlers = createConnectionHandlers({
     cancelReap: (id) => calls.push(`cancelReap:${id}`),
     reap: (id) => calls.push(`reap:${id}`),
     setWaiting: (id, waiting) => calls.push(`setWaiting:${id}:${waiting}`),
     armReapForDetached: (id) => calls.push(`armReap:${id}`),
+    terminalModesOf: (id) => {
+      calls.push(`terminalModes:${id}`);
+      return terminalModes;
+    },
+    redrawTerminal: (id, clientPid) => calls.push(`redraw:${id}:${clientPid}`),
+    checkTerminalSize: (id, { cols, rows }) => calls.push(`sizeCheck:${id}:${cols}x${rows}`),
+    cancelTerminalSizeCheck: (id) => calls.push(`sizeCheckCancel:${id}`),
   });
   return { ...handlers, calls };
 }
@@ -61,7 +67,7 @@ function setup() {
 // PtyEntry carries fields these handlers never touch; the fakes model the ones they do.
 function entryWith(over: Partial<PtyEntry> = {}) {
   const { term } = fakeTerm();
-  return { term, ws: null, buffer: "", modes: new PrivateModeTracker(), cwd: "/ws", active: false, agent: "claude", ...over } as unknown as PtyEntry;
+  return { term, ws: null, buffer: "", cwd: "/ws", active: false, agent: "claude", ...over } as unknown as PtyEntry;
 }
 
 describe("handleClientFrame", () => {
@@ -83,6 +89,57 @@ describe("handleClientFrame", () => {
     const entry = entryWith({ term: t.term as never, ws: s.ws as never });
     handleClientFrame(entry, s.ws as never, frame({ type: "resize", cols: 100, rows: 40 }), SESSION);
     expect(t.resizes).toEqual([[100, 40]]);
+  });
+
+  // The redraw waits for this frame on purpose: it is where the client reports the size it
+  // actually settled at, so the repaint that follows is drawn at the right geometry.
+  it("asks for the redraw on the first resize after a reattach, and only that one", () => {
+    const { reattachPty, handleClientFrame, calls } = setup();
+    const t = fakeTerm();
+    const s = fakeSocket();
+    const entry = entryWith({ term: t.term as never, ws: null, buffer: "x", tmux: true });
+    reattachPty(entry, s.ws as never, SESSION);
+    handleClientFrame(entry, s.ws as never, frame({ type: "resize", cols: 100, rows: 30 }), SESSION);
+    handleClientFrame(entry, s.ws as never, frame({ type: "resize", cols: 120, rows: 40 }), SESSION);
+    expect(t.resizes).toEqual([
+      [100, 30],
+      [120, 40],
+    ]);
+    // The pid is the pty's own — it is what picks OUR tmux client out of a session that several
+    // servers may have attached (#1099 review).
+    expect(calls.filter((c) => c.startsWith("redraw:"))).toEqual([`redraw:${SESSION}:4242`]);
+  });
+
+  it("never asks for a redraw on a session that was not reattached", () => {
+    // A fresh spawn's client gets the real screen from the live stream; a repaint would be noise.
+    const { handleClientFrame, calls } = setup();
+    const t = fakeTerm();
+    const s = fakeSocket();
+    const entry = entryWith({ term: t.term as never, ws: s.ws as never, tmux: true });
+    handleClientFrame(entry, s.ws as never, frame({ type: "resize", cols: 100, rows: 30 }), SESSION);
+    expect(calls.filter((c) => c.startsWith("redraw:"))).toEqual([]);
+  });
+
+  // Unlike the redraw, this runs on EVERY resize: a window can fall out of step with its client
+  // long after the reattach, and only a resize frame tells us what the client thinks it is (#957).
+  it("checks the tmux window size on every resize of a tmux session", () => {
+    const { handleClientFrame, calls } = setup();
+    const t = fakeTerm();
+    const s = fakeSocket();
+    const entry = entryWith({ term: t.term as never, ws: s.ws as never, tmux: true });
+    handleClientFrame(entry, s.ws as never, frame({ type: "resize", cols: 100, rows: 30 }), SESSION);
+    handleClientFrame(entry, s.ws as never, frame({ type: "resize", cols: 120, rows: 40 }), SESSION);
+    expect(calls.filter((c) => c.startsWith("sizeCheck:"))).toEqual([`sizeCheck:${SESSION}:100x30`, `sizeCheck:${SESSION}:120x40`]);
+  });
+
+  it("never checks the window size of a session that is not in tmux", () => {
+    // No tmux, no window to disagree with — the pty IS the terminal.
+    const { handleClientFrame, calls } = setup();
+    const t = fakeTerm();
+    const s = fakeSocket();
+    const entry = entryWith({ term: t.term as never, ws: s.ws as never });
+    handleClientFrame(entry, s.ws as never, frame({ type: "resize", cols: 100, rows: 30 }), SESSION);
+    expect(calls.filter((c) => c.startsWith("sizeCheck:"))).toEqual([]);
   });
 
   it("ignores a resize outside the allowed bounds", () => {
@@ -252,10 +309,67 @@ describe("reattachPty", () => {
     expect(s.parsed()[0].data).not.toContain("\x1b[c");
   });
 
-  it("sends nothing when there is no buffered output", () => {
+  it("sends nothing when there is no buffered output and no modes to restore", () => {
     const { reattachPty } = setup();
     const s = fakeSocket();
     reattachPty(entryWith({ ws: null, buffer: "" }), s.ws as never, SESSION);
+    expect(s.sent).toEqual([]);
+  });
+
+  // #1073: `CSI ? 1049 h` is written once at pty offset 0 and has long fallen off the bounded
+  // tail, so without this the browser restores into the NORMAL buffer and the wheel and click
+  // synthesis (#737/#845) stay switched off for the rest of the session.
+  it("re-establishes the pane's modes before replaying the tail", () => {
+    const { reattachPty } = setup([1049, 1003, 1006]);
+    const s = fakeSocket();
+    const entry = entryWith({ ws: null, buffer: "previous output", tmux: true });
+    reattachPty(entry, s.ws as never, SESSION);
+    expect(s.parsed()).toEqual([{ type: "output", data: `\x1b[?1049h\x1b[?1003h\x1b[?1006h${"previous output"}` }]);
+  });
+
+  it("restores the modes even when the tail is empty", () => {
+    // A session reattached right after a reset has nothing to replay and still owns the alt buffer.
+    const { reattachPty } = setup([1049]);
+    const s = fakeSocket();
+    reattachPty(entryWith({ ws: null, buffer: "", tmux: true }), s.ws as never, SESSION);
+    expect(s.parsed()).toEqual([{ type: "output", data: "\x1b[?1049h" }]);
+  });
+
+  it("asks nothing of tmux for a session that isn't tmux-backed", () => {
+    const { reattachPty, calls } = setup([1049]);
+    const s = fakeSocket();
+    reattachPty(entryWith({ ws: null, buffer: "sandboxed output" }), s.ws as never, SESSION);
+    expect(calls).toEqual([`cancelReap:${SESSION}`]);
+    expect(s.parsed()).toEqual([{ type: "output", data: "sandboxed output" }]);
+  });
+
+  it("leaves a pane with nothing sticky set replaying exactly as before", () => {
+    // A plain shell reports every flag off — restoring `?1049h` there would strand it in an
+    // alternate buffer it never asked for, losing its scrollback.
+    const { reattachPty } = setup([]);
+    const s = fakeSocket();
+    reattachPty(entryWith({ ws: null, buffer: "$ ls\n", tmux: true }), s.ws as never, SESSION);
+    expect(s.parsed()).toEqual([{ type: "output", data: "$ ls\n" }]);
+  });
+
+  // The replay reconstructs only what changed inside its window, and the alternate buffer it now
+  // lands in does not reflow — so the real screen has to be asked for rather than inferred.
+  it("marks a tmux session for a redraw, and leaves a non-tmux one alone", () => {
+    const { reattachPty } = setup();
+    const s = fakeSocket();
+    const persistent = entryWith({ ws: null, buffer: "x", tmux: true });
+    const sandboxed = entryWith({ ws: null, buffer: "x" });
+    reattachPty(persistent, s.ws as never, SESSION);
+    reattachPty(sandboxed, s.ws as never, SESSION);
+    expect(persistent.redrawPending).toBe(true);
+    expect(sandboxed.redrawPending).toBeUndefined();
+  });
+
+  it("does not query a socket that is already gone", () => {
+    const { reattachPty, calls } = setup([1049]);
+    const s = fakeSocket(CLOSED);
+    reattachPty(entryWith({ ws: null, buffer: "x", tmux: true }), s.ws as never, SESSION);
+    expect(calls).toEqual([`cancelReap:${SESSION}`]);
     expect(s.sent).toEqual([]);
   });
 
@@ -298,7 +412,15 @@ describe("handleClientClose", () => {
     const entry = entryWith({ ws: s.ws as never, active: true });
     handleClientClose(entry, s.ws as never, SESSION);
     expect(entry.ws).toBeNull();
-    expect(calls).toEqual([`armReap:${SESSION}`]);
+    expect(calls).toEqual([`sizeCheckCancel:${SESSION}`, `armReap:${SESSION}`]);
+  });
+
+  it("drops a settling size check, which has nobody left to repair the screen for", () => {
+    const { handleClientClose, calls } = setup();
+    const s = fakeSocket();
+    const entry = entryWith({ ws: s.ws as never, tmux: true });
+    handleClientClose(entry, s.ws as never, SESSION);
+    expect(calls).toContain(`sizeCheckCancel:${SESSION}`);
   });
 
   it("clears active, so an unclean disconnect cannot suppress the attention flag", () => {
@@ -320,14 +442,5 @@ describe("handleClientClose", () => {
     expect(entry.ws).toBe(current.ws); // the live socket must survive the old one's close
     expect(entry.active).toBe(true);
     expect(calls).toEqual([]);
-  });
-  it("re-asserts the tracked private modes ahead of the tail — a long session's tail no longer carries them", () => {
-    const { reattachPty } = setup();
-    const s = fakeSocket();
-    const modes = new PrivateModeTracker();
-    modes.feed("\x1b[?1049h\x1b[?1000;1006h\x1b[?1h"); // tmux's startup SETs, long since out of the tail
-    const entry = entryWith({ ws: null, buffer: "screen tail", modes });
-    reattachPty(entry, s.ws as never, SESSION);
-    expect(s.parsed()[0].data).toBe("\x1b[?1049h\x1b[?1h\x1b[?1000h\x1b[?1006h" + "screen tail");
   });
 });

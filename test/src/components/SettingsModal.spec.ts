@@ -1,8 +1,10 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 import SettingsModal from "../../../src/components/SettingsModal.vue";
+import SkillLaunchButton from "../../../src/components/SkillLaunchButton.vue";
 import { VOICE_LANGUAGES } from "../../../src/composables/voiceLanguage";
 import { useTheme } from "../../../src/composables/useTheme";
+import { BUNDLED_SKILL_NAMES } from "../../../common/bundledSkills";
 
 const mountModal = (props: Record<string, unknown> = {}) => mount(SettingsModal, { props });
 
@@ -331,5 +333,37 @@ describe("SettingsModal per-kind sounds (#873)", () => {
     const w = mountModal({ dirPaths: ["/proj/a", "/proj/b"] });
     await flushPromises();
     expect(w.findAll('[data-testid="dir-preview-row"]')).toHaveLength(2);
+  });
+});
+
+// Each Settings section that a skill can write hands off to that skill (#1111). The list is
+// ENUMERATED from what actually rendered rather than typed out here: a hand-written list is
+// agreed with by a check written from the same list, so a button pointing at a skill that
+// doesn't ship — or one silently dropped in an edit — passes both (the lesson from #1104's
+// guide renumbering).
+describe("SettingsModal skill buttons", () => {
+  const buttons = (w: ReturnType<typeof mount>) => w.findAllComponents(SkillLaunchButton);
+
+  it("only offers skills that MulmoTerminal ships", () => {
+    const skills = buttons(mountModal()).map((b) => b.props("skill"));
+    expect(skills.length).toBeGreaterThan(0);
+    skills.forEach((skill) => expect(BUNDLED_SKILL_NAMES).toContain(skill));
+  });
+
+  // The mapping a user relies on: press the button in the section you are looking at, get the
+  // skill that owns those keys. `-config` is the router/audit and belongs to the section that
+  // SHOWS a broken setting; the rest own one area each.
+  it.each([
+    ["Create a theme…", "mulmoterminal-theme"],
+    ["Configure appearance…", "mulmoterminal-dirs"],
+    ["Explain my settings…", "mulmoterminal-config"],
+    ["Configure notifications…", "mulmoterminal-notify"],
+    ["Set up shortcuts…", "mulmoterminal-keys"],
+  ])("%s launches %s", async (label, skill) => {
+    const w = mountModal();
+    const button = buttons(w).find((b) => b.props("label") === label);
+    if (!button) throw new Error(`no Settings button labelled "${label}"`);
+    await button.find("button").trigger("click");
+    expect(w.emitted("launch-skill")?.at(-1)?.[0]).toBe(skill);
   });
 });

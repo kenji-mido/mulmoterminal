@@ -40,6 +40,11 @@ export interface ProbeDeps {
   cwd: string;
   sessionId: string;
   onSettled: () => void;
+  // The byte(s) that submit on THIS host, read when the probe submits (`terminalSubmit`). The
+  // probe drives a real `claude` TUI, so on an `esc-cr` host a bare CR is the NEWLINE: hardcoding
+  // it left the question typed but never asked, and the probe could only time out — the gauge then
+  // never refreshes, with nothing on screen to say why (#1148).
+  submitSequence: () => string;
 }
 
 /**
@@ -106,7 +111,7 @@ export function startRateLimitProbe(deps: ProbeDeps): () => void {
         pty?.write(PROBE_PROMPT);
         setTimeout(() => {
           try {
-            if (!stopped) pty?.write("\r");
+            if (!stopped) pty?.write(deps.submitSequence());
           } catch {
             stop();
           }

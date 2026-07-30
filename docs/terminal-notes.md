@@ -80,8 +80,12 @@ server   ── node-pty  ── tmux (persistence)  ── agent (claude / code
 
 Whether Enter submits or inserts a newline is decided by Claude Code from the received **bytes**,
 and that mapping is environment-dependent. `terminalSubmit` (`"cr"` default / `"esc-cr"`) picks
-which byte submits; it drives the browser key handler **and** the phone remote-view submit, scoped
+which byte submits; it drives the browser key handler, the phone remote-view submit **and** the
+spawn-time `initialPrompt` injection (`session/draft-injection.ts`, #1148 — it had a hardcoded CR,
+so a seeded prompt was typed and never sent on an `esc-cr` host), scoped
 to Claude sessions only (shell/codex keep plain CR). See the [config guide](guide/en/config.html#terminal-submit).
+Anything auto-submitted also ends its line with a space (`submittableLine`, #1142), or an open
+`/command` / `@path` completion menu eats the submit — on **either** mapping.
 The `esc-cr` bare-Enter interception is guarded on `isComposing` so IME confirm isn't eaten.
 
 ### Links — three independent mechanisms
@@ -198,6 +202,65 @@ force the DOM renderer or observe effects (`window.open`, buffer state) instead 
   device queries (a DA reply would surface as `0;276;0c` in the prompt).
 - The replay buffer tail is sliced carefully so a cut never lands inside an escape sequence (#434),
   and is sized (~1 MiB) so scrollback survives a reattach (#776).
+- **A tail cannot carry a mode the app set once.** `CSI ? 1049 h` is written at pty offset 0 — when
+  our tmux client attaches — and never again, so past 1 MiB it is certainly gone from the replay
+  and the browser restores into the **normal** buffer. Measured on a real session: the tail had
+  five `?1003h`/`?1006h` (apps re-set those) and **zero** `?1049h`. That alone switches the wheel
+  and click synthesis off for good, since both are gated on the alternate buffer (#1073).
+  So `reattachPty` asks tmux what the pane is in right now (`tmuxTerminalModes` — `alternate_on`
+  and the `mouse_*_flag`s) and prefixes the DECSETs to the replay. tmux owns this state, which is
+  why nothing here parses the pty stream for it.
+  - **One sequence per mode.** The client only swallows a `CSI ? … h` whose parameters are ALL
+    mouse modes; `CSI ? 1049 ; 1003 h` would reach xterm and put it into real mouse tracking,
+    turning every drag into coordinate reports — the #729 regression.
+  - Only tmux-backed sessions restore; a sandbox/tmux-less pty replays as before.
+- **The replay is a stream of deltas, not a screen — so the screen is asked for.** The bounded tail
+  reconstructs only the cells that changed inside its window: rows painted before it opened stay
+  blank, and cells written at different moments sit side by side. A TUI makes this the normal case
+  (Claude Code paints a transcript row once, then spends megabytes rewriting one status row). A pty
+  **resize** used to hide it — tmux answers a size change with a full repaint, and the normal buffer
+  reflowed — but a reattach at the size the pty already had leaves tmux silent, and the alternate
+  buffer does not reflow. So `reattachPty` marks the entry and the first `resize` frame after it
+  calls `tmuxRedrawClient` (`list-clients` → `refresh-client`), which repaints every row. Waiting
+  for that frame is deliberate: it is where the client reports the size it settled at.
+  - **Which client** is picked by `client_pid`, not by list order: a session can carry several
+    (another server, a stray `tmux attach`) and tmux orders them arbitrarily. The pty we spawned IS
+    the tmux client, so its pid identifies ours.
+
+### A repaint is only worth as much as the window it repaints (#957)
+
+**tmux learns a client's size from `SIGWINCH`, and the kernel raises `SIGWINCH` only when the size
+actually CHANGES.** So re-sending the size the pty already holds is silent — and that is what every
+path in the app does: the browser's `ResizeObserver` re-fits to the same size, a reload re-attaches
+and sends it again from `sock.onopen`, and `tmuxRedrawClient` repaints faithfully at the size tmux
+still believes in. Once the window and its client disagree, **nothing in the product closes the
+gap**; only a real size change does, which is why resizing the browser window by hand was the
+known workaround.
+
+The screen this produces looks like a lost repaint but is not one: content in the top-left corner,
+blank columns to the right and blank rows below, the agent's input box gone. The tell is that a
+**reload does not fix it** — those cells were never written, because tmux's window really is that
+small. Measured off a report: content wrapping at ~77 columns inside a ~136-column terminal.
+
+Measured on tmux 3.6a against a live disagreement (client 120x40, window 80x24):
+
+| attempted repair | window after |
+|---|---|
+| re-send the size the pty already has | 80x24 — unchanged |
+| `refresh-client -t <our tty>` | 80x24 — unchanged |
+| resize the pty to 120x39, then back | **120x40 — repaired** |
+
+So `session/tmux-size-sync.ts` probes `#{window_width}x#{window_height}` once a resize burst
+settles and, on a disagreement, nudges the pty a row and back. **Do not reach for `resize-window`**
+— it works, and it switches that window to `window-size manual`, after which the window stops
+following its client for good.
+
+Two mechanisms are known to open the gap, and the nudge repairs both: a second client on the
+session (another server holding it, the overlap during a `yarn` restart — `window-size latest`
+sizes the window to *that* client, which reproduces the symptom exactly while it is attached), and
+a `SIGWINCH` that never lands. Which one the field reports came from is **not established**; the
+repair logs both sizes (`[tmux-size]`) so the next occurrence is attributable, and a `still-wrong`
+line means a third mechanism.
 
 ## The tmux passthrough rule
 
@@ -251,7 +314,7 @@ looking) — flag them for QA on the release.
 | File-path links | `registerFilePathLinks` order vs WebLinks; `/api/files/raw` cwd containment | click a generated file path → previews the file |
 | Enter / newline | `terminalSubmit` mapping + `isComposing` guard; `macOptionIsMeta` | Enter submits, Shift+Enter newlines; IME confirm not eaten; both `cr` and `esc-cr` |
 | Mouse / wheel | `guardMouseTracking` swallow set (1000/1002/1003/1006); wheel→SGR in alt buffer; `wheelNotches` accumulation vs xterm's own `consumeWheelEvent` | wheel scrolls transcript (not prompt history); drag selects, doesn't emit mouse reports; a trackpad swipe moves a TUI about as far as it moves the scrollback |
-| Reattach | `stripTerminalQueries` patterns; replay buffer size | reattaching a session doesn't leak `0;276;0c`-style junk; scrollback survives |
+| Reattach | `stripTerminalQueries` patterns; replay buffer size; `tmuxTerminalModes` still reports `alternate_on` / `mouse_*_flag`, and `refresh-client` still forces a FULL repaint, on the installed tmux | reattaching a session doesn't leak `0;276;0c`-style junk; scrollback survives; after a reload the wheel still scrolls a Claude cell's transcript, and the screen matches `capture-pane` rather than showing spliced-together fragments (#1073) |
 
 **Fast isolation techniques** (learned the hard way):
 - A terminal behavior that works on a **direct `term.write()`** but fails through a live session ⇒
@@ -266,4 +329,4 @@ looking) — flag them for QA on the release.
 `docs/spawn-architecture.md` (session lifecycle), `docs/gui-protocol-spike.md`,
 `docs/remote-host-protocol.md` (what the phone can ask of a session),
 `src/composables/useTerminalConnections.ts`, `server/infra/tmux.ts`, `server/session/*.ts`.
-Issues: #206, #263/#264/#293, #265/#266, #434, #445, #572, #729, #737, #772/#780, #776, #778, #782, #783/#785.
+Issues: #206, #263/#264/#293, #265/#266, #434, #445, #572, #729, #737, #772/#780, #776, #778, #782, #783/#785, #1073.

@@ -87,6 +87,7 @@ describe("buildClaudeArgs with addDirs", () => {
     attachGuiMcp: false,
     mcpConfig: "{}",
     allowedTools: "",
+    appendedPrompt: null,
   };
 
   it("passes one variadic flag holding every directory", () => {
@@ -159,10 +160,53 @@ describe("path resolution parity", () => {
       attachGuiMcp: false,
       mcpConfig: "{}",
       allowedTools: "",
+      appendedPrompt: null,
       addDirs: dirs,
     });
     const flagged = args.slice(args.indexOf("--add-dir") + 1);
     const mounted = buildDockerRunArgs("s1", args, "/work", "/cfg/c.json", null, dirs).filter((_value, i, all) => all[i - 1] === "-v");
     flagged.forEach((dir) => expect(mounted).toContain(`${dir}:${dir}`));
+  });
+});
+
+// #938 rides on this same list: a pasted screenshot is saved outside the working directory,
+// and Claude Code asks permission to read outside it. The pair below is what keeps the two
+// features from taking anything away from each other.
+// A file dropped OR pasted into a session is saved outside its cwd, and the agent is granted that
+// directory through the same channel a user's own `addDirs` travels. Kept as one test because the
+// two halves fail separately: the flag without the mount reads fine and breaks only in the sandbox.
+describe("the session's drop directory shares the addDirs channel", () => {
+  const DROPS = path.resolve("/drops/s1");
+  // How spawn-claude composes it: the user's resolved list, then the app's own entry.
+  const withDropsDir = (configured: string[]) => [...configured, DROPS];
+
+  it("reaches the flag and the mount together, alongside what the user configured", () => {
+    const dirs = withDropsDir(resolveAddDirs([DOCS], BASE, exists([DOCS])) ?? []);
+    expect(dirs).toEqual([DOCS, DROPS]);
+    const args = buildClaudeArgs({
+      sessionId: "s1",
+      resume: null,
+      canResume: false,
+      settings: "/cfg/s.json",
+      permissionMode: "auto",
+      attachGuiMcp: false,
+      mcpConfig: "{}",
+      allowedTools: "",
+      addDirs: dirs,
+      appendedPrompt: null,
+    });
+    expect(args.slice(args.indexOf("--add-dir") + 1)).toEqual([DOCS, DROPS]);
+    const mounted = buildDockerRunArgs("s1", args, "/work", "/cfg/c.json", null, dirs).filter((_value, i, all) => all[i - 1] === "-v");
+    expect(mounted).toContain(`${DROPS}:${DROPS}`);
+    expect(mounted).toContain(`${DOCS}:${DOCS}`);
+  });
+
+  // MAX_ADD_DIRS caps what a user may ask for; the app's own entry is added after that cap
+  // and must not be the one that falls off.
+  it("survives a config that already filled MAX_ADD_DIRS", () => {
+    const configured = Array.from({ length: MAX_ADD_DIRS }, (_unused, i) => path.resolve(`/d${i}`));
+    const dirs = withDropsDir(resolveAddDirs(configured, BASE, exists(configured)) ?? []);
+    expect(dirs).toHaveLength(MAX_ADD_DIRS + 1);
+    expect(dirs[dirs.length - 1]).toBe(DROPS);
   });
 });

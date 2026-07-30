@@ -21,6 +21,8 @@ import ReloadPrompt from "./components/ReloadPrompt.vue";
 import { useSessions, type Filter } from "./composables/useSessions";
 import { browseClose } from "./composables/useCollectionBrowse";
 import { registerChatOpener, startCollectionChat } from "./composables/useChatLauncher";
+import { skillSeed } from "./components/skillSeed";
+import type { BundledSkillName } from "../common/bundledSkills";
 import { useAppConfig } from "./composables/useAppConfig";
 import { useDirConfig } from "./composables/useDirConfig";
 import { useFaviconState } from "./composables/useFaviconState";
@@ -35,6 +37,7 @@ import { usePubSub } from "./composables/usePubSub";
 import { openTerminalAt } from "./composables/useNewTerminal";
 import { LAUNCH_TERMINAL_CHANNEL, isLaunchAgent, type LaunchAgent } from "../common/launchAgent";
 import { clampTerminalWidth, maxTerminalWidth, MIN_TERMINAL, splitterKeyWidth } from "./components/splitterWidth";
+import { type TerminalAgent } from "../common/sessionAgent";
 
 // View mode is now the URL: the multi-terminal grid is /terminals, everything else
 // (chat + the collection/accounting overlays) lives under the single-view shell.
@@ -72,9 +75,9 @@ function onRunScript(command: PendingCommand) {
 }
 
 const activeId = ref<string | null>(null);
-// Which agent the single view runs (Claude by default). Codex connects to /ws/codex with the
-// GUI MCP attached, so it drives the GUI panel like Claude.
-const singleAgent = ref<"claude" | "codex">("claude");
+// Which agent the single view runs (Claude by default). A non-Claude one connects to its own
+// endpoint (/ws/codex, /ws/antigravity) with the GUI MCP attached, so it drives the GUI panel too.
+const singleAgent = ref<TerminalAgent>("claude");
 const connectKey = ref(0);
 const terminalRef = ref<InstanceType<typeof TerminalView> | null>(null);
 
@@ -231,15 +234,16 @@ function sendTextMessage(text: string): boolean {
   return terminalRef.value?.submitText(text) ?? false;
 }
 
-// Open a fresh session that auto-runs the mulmoterminal-config skill (rather than hijacking the
-// active session), and select it so it shows. The skill then asks which directory / batch. codex
-// rewriting is handled server-side (spawnBackgroundChat → codexifySkillSeed).
-function configureAppearance(): void {
-  void startCollectionChat("/mulmoterminal-config");
+// Open a fresh session that auto-runs a Settings skill (rather than hijacking the active
+// session), and select it so it shows. The skill then asks what to change. codex rewriting is
+// handled server-side (spawnBackgroundChat → codexifySkillSeed), which is why the claude form is
+// what goes on the wire.
+function launchSkill(skill: BundledSkillName): void {
+  void startCollectionChat(skillSeed(skill, "claude"));
   showSettings.value = false;
 }
 
-function selectSession(id: string, agent: "claude" | "codex" = "claude") {
+function selectSession(id: string, agent: TerminalAgent = "claude") {
   if (id !== activeId.value) clearDraftHint(); // switching away from a preparing draft
   singleAgent.value = agent; // resume the row's agent (codex rows reconnect via /ws/codex)
   activeId.value = id;
@@ -341,6 +345,12 @@ function newCodexSession() {
   connectKey.value++;
 }
 
+function newAntigravitySession() {
+  singleAgent.value = "antigravity";
+  activeId.value = null;
+  connectKey.value++;
+}
+
 // The server reports the live session id (a generated id for new sessions).
 // Adopt it as the active id so it highlights. The sidebar list itself is
 // driven server-side: the server publishes the new session on the "sessions"
@@ -372,6 +382,7 @@ function onSession(id: string) {
         @select="selectSession"
         @new="newSession"
         @new-codex="newCodexSession"
+        @new-antigravity="newAntigravitySession"
         @toggle-layout="toggleLayout"
         @refresh="refresh"
         @hide="hideSession"
@@ -385,6 +396,7 @@ function onSession(id: string) {
         @select="selectSession"
         @new="newSession"
         @new-codex="newCodexSession"
+        @new-antigravity="newAntigravitySession"
         @toggle-layout="toggleLayout"
         @refresh="refresh"
         @hide="hideSession"
@@ -412,7 +424,7 @@ function onSession(id: string) {
           :style="fillTerminal ? { flex: '1 1 0%' } : { flex: `0 0 ${terminalWidth}px` }"
           persist-key="single"
           :session-id="activeId"
-          :codex="singleAgent === 'codex'"
+          :agent="singleAgent"
           :connect-key="connectKey"
           :dir-cwd="effectiveCwd"
           :dir-name="singleDirConfig.name"
@@ -453,14 +465,7 @@ function onSession(id: string) {
     <PrsOverlay />
     <!-- Full-screen file explorer + editor; opened by a terminal header's Files button. -->
     <FilesOverlay />
-    <AppSettingsModal
-      v-if="showSettings"
-      :cwd="effectiveCwd"
-      :session-id="activeId"
-      :presets="presets"
-      @configure-appearance="configureAppearance"
-      @close="closeSettings"
-    />
+    <AppSettingsModal v-if="showSettings" :cwd="effectiveCwd" :session-id="activeId" :presets="presets" @launch-skill="launchSkill" @close="closeSettings" />
   </div>
   <!-- Outside the !isGrid block: the confirmation belongs to the app, not to one view. -->
   <ConfirmDialog

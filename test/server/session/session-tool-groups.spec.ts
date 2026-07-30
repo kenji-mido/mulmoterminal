@@ -44,7 +44,7 @@ describe("parseSessionToolGroups", () => {
 });
 
 describe("sessionToolGroupLine", () => {
-  // Leading newline, like dev-terminal-sessions.ts: whatever the file ended with — including a
+  // Leading newline, like session-id-log.ts: whatever the file ended with — including a
   // write cut off mid-line — an appended entry starts its own line, so the damage is one entry.
   it("leads with the newline so an append always starts its own line", () => {
     expect(sessionToolGroupLine(ID, "render")).toBe(`\n${ID} render`);

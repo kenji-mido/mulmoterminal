@@ -32,6 +32,8 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { ClipboardAddon, type IClipboardProvider } from "@xterm/addon-clipboard";
 import { swallowsMouseTracking } from "./mouseTrackingModes";
+import { arrowSequence, type ArrowDir } from "./terminalArrowKeys";
+import { documentHidden, whenDocumentVisible } from "./documentVisibility";
 import { clearResetModes, recordSwallowedModes } from "./mouseReports";
 import { guardMouseClicks, guardMouseWheel, guardTouchScroll } from "./terminalMouseInput";
 import { bufferIsShort, readBufferShape } from "./terminalBufferHealth";
@@ -42,7 +44,14 @@ import { reconnectDelayMs, shouldReconnect } from "./reconnectPolicy";
 import type { RunCommand } from "../components/runCommand";
 import { readableSlot, type SlotCandidate, type SlotInfo } from "./readableSlot";
 import { exitCodeOf, messageEffect } from "./serverMessage";
-import { enterKeyOverride, submitSequence, DEFAULT_TERMINAL_SUBMIT_MODE, type EnterKeyEvent, type TerminalSubmitMode } from "../../common/terminalSubmit";
+import {
+  enterKeyOverride,
+  submitSequence,
+  submittableLine,
+  DEFAULT_TERMINAL_SUBMIT_MODE,
+  type EnterKeyEvent,
+  type TerminalSubmitMode,
+} from "../../common/terminalSubmit";
 import { TERMINAL_FONT_SIZE_DEFAULT } from "../../common/terminalFontSize";
 import { TERMINAL_FONT_FAMILY_DEFAULT } from "../../common/terminalFontFamily";
 import { getTerminalSubmitMode } from "./terminalSubmitMode";
@@ -54,6 +63,7 @@ import { isCopyOnSelectEnabled } from "./copyOnSelect";
 import { createFilePathLinkProvider } from "./terminalFilePathLinkProvider";
 import { tryOpenInPane } from "./filesPaneOpener";
 import { filesGotoFile } from "./useFilesView";
+import type { TerminalAgent } from "../../common/sessionAgent";
 
 // "superseded" is a distinct state, not a flavour of disconnected: the session is ALIVE, just
 // held by another window, so the view can offer to take it back instead of a dead pill.
@@ -109,18 +119,19 @@ export interface ConnTarget {
   // (`{ shell: true }`, the header "new terminal" button). Unlike `command` this is a
   // PERSISTENT session — it reconnects on drop and reattaches by session id, like a Claude cell.
   launcher: { index: number } | { shell: true } | null;
-  // A first-class codex session (/ws/codex) instead of a Claude one. Persistent &
-  // reattachable like a Claude cell; the server discovers + resumes codex's own id.
-  codex?: boolean;
+  // A first-class non-Claude session (/ws/codex, /ws/antigravity) instead of a Claude one.
+  // Persistent & reattachable like a Claude cell; the server discovers + resumes that agent's
+  // own conversation id. Absent means Claude.
+  agent?: TerminalAgent;
   // The provider/model the launch form picked for this session (#584). Claude only —
   // it rides the /ws query and overrides the directory's default.
   launch?: LaunchChoice | null;
 }
 
 // The `terminalSubmit` mapping describes the user's CLAUDE binding, so it only applies to
-// Claude cells. A launcher / codex / command / dev-terminal cell is a shell or another TUI
+// Claude cells. A launcher / another agent / command / dev-terminal cell is a shell or another TUI
 // where a bare Enter must stay xterm's native \r — a reversed setting must not rewrite it.
-export const isClaudeTarget = (t: ConnTarget): boolean => !t.devTerminal && !t.command && !t.launcher && !t.codex;
+export const isClaudeTarget = (t: ConnTarget): boolean => !t.devTerminal && !t.command && !t.launcher && (t.agent ?? "claude") === "claude";
 
 // The submit/newline byte mapping in effect for one connection: the user's `terminalSubmit`
 // setting for a Claude cell, the standard binding for everything else. Used by the keyboard
@@ -128,6 +139,11 @@ export const isClaudeTarget = (t: ConnTarget): boolean => !t.devTerminal && !t.c
 // which byte submits.
 const effectiveSubmitMode = (c: Conn): TerminalSubmitMode => (isClaudeTarget(c.target) ? getTerminalSubmitMode() : DEFAULT_TERMINAL_SUBMIT_MODE);
 const submitBytesFor = (c: Conn): string => submitSequence(effectiveSubmitMode(c));
+
+// A line WE are about to submit, ended so Claude's completion menu isn't holding the submit key
+// (#1142). Claude cells only, and scoped by the same predicate as the submit bytes: in a shell the
+// guard's trailing space would be real input (a line ending in `\` escapes the newline there).
+const submittableFor = (c: Conn, text: string): string => (isClaudeTarget(c.target) ? submittableLine(text) : text);
 
 // Forwarded to whatever component is currently attached, so the parent's existing
 // session/cwd/exit wiring (grid_v2 persistence, recent-dir recording, re-run UI)
@@ -567,21 +583,11 @@ function scheduleReconnect(c: Conn) {
   }, delay);
 }
 
-// A hidden document must not TAKE a session. The server binds a session to one socket, so a
-// client that opens one supersedes whoever held it — and a phone in a pocket, or a tab behind
-// another window, would do that to the screen the user is actually working on. It happens
-// without any action: the grid is shared, so a cell opened on the desktop appears here too and
-// this client connects it out from under them.
-//
-// Only NEW connects wait. A socket already open stays open — switching tabs must not drop a
-// running session, which is the whole point of the persistent connections.
-function shouldDeferConnect(): boolean {
-  return typeof document !== "undefined" && document.hidden;
-}
-
 function connect(c: Conn) {
   if (c.released) return;
-  if (shouldDeferConnect()) {
+  // Only NEW connects wait while hidden. A socket already open stays open — switching tabs must
+  // not drop a running session, which is the whole point of the persistent connections.
+  if (documentHidden()) {
     c.deferredConnect = true;
     return;
   }
@@ -675,7 +681,7 @@ function handleMessage(c: Conn, event: MessageEvent) {
 // applies it. `superseded` keeps its own status because the session did not end: it moved, and
 // the view offers to take it back.
 function handleTerminalEnd(c: Conn, msg: { type: string; message?: unknown; exitCode?: unknown }) {
-  const effect = messageEffect(msg.type, !!c.target.command, msg.message);
+  const effect = messageEffect(msg.type, !!c.target.command, msg.message, exitCodeOf(msg));
   if (!effect.terminal) return;
   c.sawExit = true;
   if (effect.banner) c.term.write(effect.banner);
@@ -816,6 +822,8 @@ export function terminate(key: string) {
 // connection's `terminalSubmit` mapping (ESC+CR for a Claude cell in esc-cr mode), so a GUI
 // send commits the same way the keyboard does. Both writes pin to the socket captured now;
 // if the slot reconnects before the submit fires we skip it rather than submit a stray turn.
+// A Claude cell's text goes through submittableFor so an open completion menu can't eat that
+// submit — the Skill menu's `/<slug>` is the case that made it necessary (#1142).
 // Returns whether the text was delivered.
 export function submitText(key: string, text: string): boolean {
   const c = conns.get(key);
@@ -824,7 +832,7 @@ export function submitText(key: string, text: string): boolean {
   if (!sock || sock.readyState !== WebSocket.OPEN) return false;
   setNeedsPrompt(c, false); // a prompt is on its way — the session is no longer stuck
   const submit = submitBytesFor(c);
-  sock.send(JSON.stringify({ type: "input", data: text }));
+  sock.send(JSON.stringify({ type: "input", data: submittableFor(c, text) }));
   setTimeout(() => {
     if (c.ws === sock && sock.readyState === WebSocket.OPEN) {
       sock.send(JSON.stringify({ type: "input", data: submit }));
@@ -859,7 +867,9 @@ export function pasteAndSubmit(key: string, text: string): boolean {
   const sock = c?.ws;
   if (!text || !c || !sock || sock.readyState !== WebSocket.OPEN) return false;
   const submit = submitBytesFor(c);
-  sock.send(JSON.stringify({ type: "input", data: `${PASTE_START}${text}${PASTE_END}` }));
+  // The guard's space rides INSIDE the paste, where the TUI takes it as text — after the
+  // terminator it would be a keystroke, and an open completion menu is what reads those (#1142).
+  sock.send(JSON.stringify({ type: "input", data: `${PASTE_START}${submittableFor(c, text)}${PASTE_END}` }));
   setTimeout(() => {
     if (c.ws === sock && sock.readyState === WebSocket.OPEN) sock.send(JSON.stringify({ type: "input", data: submit }));
   }, PASTE_SUBMIT_MS);
@@ -876,7 +886,7 @@ const slotCandidate = (c: Conn): SlotCandidate => ({
   isShellLauncher: !!c.target.launcher && "shell" in c.target.launcher,
   sessionId: c.knownSessionId,
   cwd: c.knownCwd ?? c.target.cwd,
-  codex: !!c.target.codex,
+  agent: c.target.agent ?? "claude",
 });
 
 export function listSlots(): SlotInfo[] {
@@ -891,17 +901,7 @@ export function sendKey(key: string, data: string): void {
   if (c?.ws?.readyState === WebSocket.OPEN) c.ws.send(JSON.stringify({ type: "input", data }));
 }
 
-// Arrow keys are mode-sensitive: a TUI in application-cursor-keys mode (DECCKM — Claude Code's
-// own TUI, vim, less…) expects ESC O A, while a normal shell expects ESC [ A. xterm tracks the
-// mode for us, so the on-screen arrows can ask it rather than guessing and sending the wrong
-// bytes to whichever of the two is running.
-export type ArrowDir = "up" | "down" | "right" | "left";
-const ARROW_FINAL: Record<ArrowDir, string> = { up: "A", down: "B", right: "C", left: "D" };
-
-/** Pure, so the mode split is tested without standing up a terminal. */
-export function arrowSequence(dir: ArrowDir, appMode: boolean): string {
-  return (appMode ? "\x1bO" : "\x1b[") + ARROW_FINAL[dir];
-}
+export { arrowSequence, type ArrowDir };
 
 export function sendArrow(key: string, dir: ArrowDir): void {
   const c = conns.get(key);
@@ -927,24 +927,21 @@ export function insertText(key: string, text: string) {
 // the user turned to last holds the sessions, and nothing re-triggers until someone looks
 // somewhere else. Registered once for the module — the deferral is a property of the DOCUMENT,
 // not of any one slot.
-if (typeof document !== "undefined") {
-  document.addEventListener("visibilitychange", () => {
-    if (document.hidden) return;
-    for (const [key, c] of conns.entries()) {
-      // Only a slot that is actually ON SCREEN. A slot outlives the view that mounted it (that
-      // is what makes a page switch cheap), so the map holds ones nothing is rendering — and a
-      // detached slot taking "its" session back would take it from the cell the user is looking
-      // at, on this very device. Being looked at is the rule; an element is how a slot is.
-      if (!c.attachedEl) continue;
-      if (c.deferredConnect) {
-        c.deferredConnect = false;
-        connect(c);
-      } else if (connView.get(key)?.status === "superseded") {
-        reconnect(key); // taken by another window while we were away — take it back
-      }
+whenDocumentVisible(() => {
+  for (const [key, c] of conns.entries()) {
+    // Only a slot that is actually ON SCREEN. A slot outlives the view that mounted it (that
+    // is what makes a page switch cheap), so the map holds ones nothing is rendering — and a
+    // detached slot taking "its" session back would take it from the cell the user is looking
+    // at, on this very device. Being looked at is the rule; an element is how a slot is.
+    if (!c.attachedEl) continue;
+    if (c.deferredConnect) {
+      c.deferredConnect = false;
+      connect(c);
+    } else if (connView.get(key)?.status === "superseded") {
+      reconnect(key); // taken by another window while we were away — take it back
     }
-  });
-}
+  }
+});
 
 export function focus(key: string) {
   conns.get(key)?.term.focus();

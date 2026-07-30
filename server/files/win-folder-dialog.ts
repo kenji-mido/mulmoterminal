@@ -1,3 +1,5 @@
+import { PS_UTF8_STDOUT } from "./win-powershell-utf8.js";
+
 // The Windows folder picker, in the dialog Explorer actually uses (#1003).
 //
 // `System.Windows.Forms.FolderBrowserDialog` — what this used to open, and what the fallback at
@@ -93,6 +95,7 @@ namespace MtPicker {
 // a syntax error. A spec pins that, because prettier reflowing this template would not fail
 // anything else.
 export const winFolderDialogScript = (prompt: string): string => `
+${PS_UTF8_STDOUT}
 $ErrorActionPreference = 'Stop'
 function Get-MtModernFolder {
   Add-Type -TypeDefinition @'

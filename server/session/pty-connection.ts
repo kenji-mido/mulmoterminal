@@ -9,7 +9,7 @@ import type { IPty } from "node-pty";
 import type { WebSocket } from "ws";
 import { messageOf } from "../errors.js";
 import { isResizeFrame } from "./ws-frames.js";
-import { stripTerminalQueries } from "./terminal-replay.js";
+import { stripTerminalQueries, terminalModePrefix } from "./terminal-replay.js";
 import type { PtyEntry } from "./types.js";
 
 /** A frame as it arrives off the socket. Only `toString()` is used — ws hands us a
@@ -24,6 +24,19 @@ export interface ConnectionDeps {
   setWaiting: (id: string, waiting: boolean) => void;
   /** Socket gone: keep, grace, or reap according to what the session was doing. */
   armReapForDetached: (id: string) => void;
+  /** The screen-buffer / mouse modes this session's pane is in right now, for the replay to
+   *  re-establish (#1073). Empty when there is nothing to restore. */
+  terminalModesOf: (id: string) => readonly number[];
+  /** Ask tmux to repaint the whole pane, so a reattached browser stops showing whatever the
+   *  replayed delta window happened to reconstruct (#1073). `clientPid` identifies OUR tmux client
+   *  among the several a session can carry — it is the pty's own pid. */
+  redrawTerminal: (id: string, clientPid: number) => void;
+  /** Check, once the resize burst settles, that tmux's window really is the size the browser
+   *  asked for — and force it if not. A repaint cannot fix a window that is genuinely too small,
+   *  and nothing else closes that gap (#957, session/tmux-size-sync.ts). */
+  checkTerminalSize: (id: string, size: { cols: number; rows: number }) => void;
+  /** The socket is gone, so a settling size check has nobody to repair the screen for. */
+  cancelTerminalSizeCheck: (id: string) => void;
 }
 
 // browser -> command PTY. Like handleClientFrame but for the session-less command
@@ -65,14 +78,19 @@ export function createConnectionHandlers(deps: ConnectionDeps) {
       entry.ws.close();
     }
     entry.ws = ws;
-    if (entry.buffer && ws.readyState === ws.OPEN) {
+    if (ws.readyState === ws.OPEN) {
+      // The replay is a bounded TAIL, and the modes an app sets once at startup — the alternate
+      // buffer above all — fell off its front long ago. Restore them first, or the browser draws
+      // this into the normal buffer and the wheel stops reaching the app (#1073). Only a tmux
+      // session can be asked; anything else replays as before.
+      const prefix = entry.tmux ? terminalModePrefix(deps.terminalModesOf(sessionId)) : "";
       // Strip terminal queries from the replay so xterm doesn't re-answer them as stray input
       // (e.g. a DA reply surfacing as "0;276;0c" in the prompt) — see terminal-replay.ts.
-      // Lead with the live private modes (alt screen, mouse tracking, cursor keys…): the app
-      // set them ONCE at startup, so a chatty session's bounded tail no longer carries them —
-      // without this a reattached browser gets the screen but not the state, and wheel/touch
-      // scrolling and arrow encoding silently break on exactly the long-lived sessions.
-      ws.send(JSON.stringify({ type: "output", data: entry.modes.preamble() + stripTerminalQueries(entry.buffer) }));
+      const data = prefix + stripTerminalQueries(entry.buffer);
+      if (data) ws.send(JSON.stringify({ type: "output", data }));
+      // What that replay draws is only the part of the screen that changed inside the window, so
+      // the real screen is asked for once the client reports the size it settled at, below.
+      if (entry.tmux) entry.redrawPending = true;
     }
     return entry;
   }
@@ -103,6 +121,16 @@ export function createConnectionHandlers(deps: ConnectionDeps) {
         entry.term.write(msg.data);
       } else if (isResizeFrame(msg)) {
         entry.term.resize(msg.cols, msg.rows);
+        // A size that CHANGED already makes tmux redraw; one that matches what the pty had leaves
+        // it silent, and the reattached browser would keep the half-built screen forever — the
+        // alternate buffer it now restores into does not reflow, so no later resize repairs it.
+        if (entry.redrawPending) {
+          entry.redrawPending = false;
+          deps.redrawTerminal(sessionId, entry.term.pid);
+        }
+        // And a repaint is only worth as much as the window it repaints: the same silence means
+        // tmux can be left believing in a size the client abandoned long ago (#957).
+        if (entry.tmux) deps.checkTerminalSize(sessionId, { cols: msg.cols, rows: msg.rows });
       }
     } catch (err) {
       // e.g. a write/resize that races the PTY exiting — drop it, never crash.
@@ -116,6 +144,7 @@ export function createConnectionHandlers(deps: ConnectionDeps) {
     // Ignore if a newer client already reattached to this session.
     if (entry.ws !== ws) return;
     entry.ws = null;
+    deps.cancelTerminalSizeCheck(sessionId);
     // A session with no live socket is by definition not being viewed. Clear `active`
     // so an UNCLEAN disconnect (crash / network drop / killed tab, where the client
     // can't send `view active:false`) can't leave the attention flag suppressed until

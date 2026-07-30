@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { ref, watch, onUnmounted } from "vue";
 import { useSessionFeed } from "../composables/useSessionFeed";
+import { onToolGroupsAnnounced } from "../composables/useToolGroupsAnnounce";
 
 // The tools pane mirrors MulmoClaude's right sidebar: an "Available Tools" list
 // (the GUI plugin tools, with collapsible descriptions) and a "Tool Call History"
-// for the active session. The history is fed by Claude's PreToolUse/PostToolUse
-// hooks, so it shows EVERY tool call — built-ins (Bash, Read, …), other MCP tools,
-// and our GUI plugin tools — not just the GUI ones. Live updates arrive on the
+// for the active session. For a CLAUDE session the history is fed by its PreToolUse/PostToolUse
+// hooks, so it shows EVERY tool call — built-ins (Bash, Read, …), other MCP tools, and our GUI
+// plugin tools. For codex / agy, which have no hooks, it is fed by our MCP broker and holds the
+// GUI tools alone — /api/tools reports which, as `guiOnlyHistory`. Live updates arrive on the
 // toolcalls:<id> channel; history replays from /api/tool-calls/:id on (re)select.
 interface AvailableTool {
   toolName: string;
@@ -26,6 +28,15 @@ interface ToolCall {
 const props = defineProps<{ sessionId: string | null }>();
 const emit = defineEmits<{ close: [] }>();
 
+// Whether this session's history holds the GUI tools ALONE (the broker fed it) rather than every
+// tool (claude's hooks fed it). An empty GUI-only history looks exactly like an agent that ran
+// nothing, so the pane says which it is — see the note in the template.
+//
+// The SERVER decides it, and the client cannot: a codex launcher chip runs the user's own command
+// through the login shell, so nothing the browser holds about that cell names an agent at all
+// (server/mcp/gui-call-history.ts).
+const guiOnlyHistory = ref(false);
+
 const availableTools = ref<AvailableTool[]>([]);
 const toolCalls = ref<ToolCall[]>([]);
 const expandedTools = ref<Set<string>>(new Set());
@@ -39,21 +50,48 @@ const expandedCalls = ref<Set<string>>(new Set());
 // Reloaded on every session change rather than cached per id: the server learns a session's
 // groups from the connections it makes, so the answer for one id can go from "everything" to
 // the real subset within a second of that session starting.
+//
+// The session id is NOT enough to tell two loads apart, and since the re-ask below there are
+// routinely two in flight for the id that is current — the early one asked at mount and the one
+// the announcement triggered. Both pass a session-id guard, so an older reply landing second
+// would restore the empty list this pane exists to get rid of. Only the newest may apply, which
+// is the same rule and the same counter useSessionFeed keeps (#620).
+let latestToolsLoad = 0;
 async function loadAvailableTools(sessionId: string | null) {
+  const loadId = ++latestToolsLoad;
   const url = sessionId ? `/api/tools?sessionId=${encodeURIComponent(sessionId)}` : "/api/tools";
+  // Overtaken: a load for another session (we switched away), or a newer load for this one.
+  const overtaken = () => sessionId !== props.sessionId || loadId !== latestToolsLoad;
   try {
     const res = await fetch(url);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const body = await res.json();
-    // Late reply for a session we have since switched away from: dropping it keeps the list
-    // from showing another cell's tools.
-    if (sessionId !== props.sessionId) return;
+    if (overtaken()) return;
     availableTools.value = body.tools ?? [];
+    guiOnlyHistory.value = body.guiOnlyHistory === true;
   } catch {
-    if (sessionId === props.sessionId) availableTools.value = [];
+    if (overtaken()) return;
+    availableTools.value = [];
+    // Unknown, so claim nothing: a note that appears on a failed request would be a statement
+    // about a history we could not ask about.
+    guiOnlyHistory.value = false;
   }
 }
 watch(() => props.sessionId, loadAvailableTools, { immediate: true });
+
+// The question above is normally asked BEFORE it can be answered: the browser is handed a session
+// id while the agent is still being spawned, so its MCP client has not connected and the server
+// has learned no groups yet. That first "nothing" then stood until something happened to remount
+// the pane — closing and reopening it, or switching cells — which is exactly the "No GUI plugin
+// tools enabled." a freshly started session showed.
+//
+// So re-ask when the server says that session's MCP client is up. Re-asking rather than reading the
+// pushed `groups`: the reply also carries the tool DESCRIPTIONS and `guiOnlyHistory`, which the push
+// does not, and the announcement for a single-view session carries no groups at all (see
+// mcp-routes.ts).
+onToolGroupsAnnounced((announcement) => {
+  if (announcement.sessionId === props.sessionId) void loadAvailableTools(props.sessionId);
+});
 
 function callKey(c: ToolCall, i: number): string {
   return c.toolUseId ?? `${c.toolName}-${i}`;
@@ -179,7 +217,10 @@ onUnmounted(() => window.clearTimeout(historyCopyTimer));
             {{ historyCopied ? "Copied" : "Copy all" }}
           </button>
         </div>
-        <div v-if="toolCalls.length === 0" class="text-[12px] text-dim">No tool calls yet.</div>
+        <div v-if="guiOnlyHistory" data-testid="gui-only-note" class="mb-1.5 text-[11px] leading-[1.35] text-dim">
+          This agent reports no hooks, so the list holds its GUI tool calls only — not its shell commands or file edits.
+        </div>
+        <div v-if="toolCalls.length === 0" class="text-[12px] text-dim">{{ guiOnlyHistory ? "No GUI tool calls yet." : "No tool calls yet." }}</div>
         <div v-for="(call, i) in toolCalls" :key="callKey(call, i)" data-testid="tool-call" class="mt-1.5 rounded-md border border-border bg-deep px-2 py-1.5">
           <button
             class="flex w-full cursor-pointer items-center justify-between gap-2 border-0 bg-transparent px-0 py-1 text-left text-inherit"

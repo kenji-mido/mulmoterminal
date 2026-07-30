@@ -42,7 +42,7 @@ A full-screen surface (Collections, Wiki, PRs, Accounting, Files) now **returns 
 
 ![Single view — focus on one agent](../images/single-view.png)
 
-## Launching an agent (launcher form)
+## Launching an agent or a shell (launcher form)
 
 Empty cells in the grid show a **launcher form**. This is where you choose **what** to run and **where**.
 
@@ -50,11 +50,17 @@ Empty cells in the grid show a **launcher form**. This is where you choose **wha
 
 | Part | Role |
 |---|---|
-| **Claude / Codex** toggle | Choose the **agent** to run in this cell |
+| **Claude / Codex / Antigravity / Shell** toggle | Choose what runs in this cell — an **agent**, or **Shell**: your OS default shell (`$SHELL`), with nothing to install and nothing to configure |
 | **WORKING DIRECTORY** | Enter the working directory (the play button launches it). Frequently used directories are offered as clickable *cwd preset* **chips** that fill the field (the chip's play button launches right away) |
 | **Model picker** (when Claude is selected) | Pick the backend / model for this session only (→ [providers](providers.html)) |
 | **OR ISOLATE IN A WORKTREE** | In a git repo, enter a task name and hit **New worktree** to create an isolated worktree and launch there |
-| **OR LAUNCH** | Start a non-agent **launch command** (`Shell` / `codex` / anything) as a persistent terminal |
+| **OR LAUNCH** | Start a configured **launch command** (`codex`, `htop`, anything) as a persistent terminal |
+
+**Shell** takes the same working directory and the same play button as an agent. A shell has no
+model, no MCP registration and no worktree, so those rows disappear while it is picked — and the
+cell it opens is a persistent terminal (running / exited), not an agent session.
+
+![The same form with Shell picked — only the working directory is left](../images/grid-launch-form-shell.png)
 
 ## Reading a cell — "what each agent is doing and where"
 
@@ -137,10 +143,16 @@ originally zoomed in from.
 
 On a Mac laptop keyboard there are no dedicated Page Up / Page Down keys; use **`Fn`+`↑`** and **`Fn`+`↓`**.
 
-## Mixing Claude and Codex {#claude-and-codex}
+## Mixing Claude, Codex and Antigravity {#claude-and-codex}
 
-In the same grid, you can launch **Claude** or **Codex** per cell. Both share the same terminal experience,
-persistence, GUI panel, and visibility machinery. Use each for its strengths, or throw the same task at both and compare.
+In the same grid, you can launch **Claude**, **Codex** or **Antigravity** (`agy`) per cell — or **Shell**, when
+you only want a terminal. The agents share the same terminal experience, persistence, GUI panel, and visibility
+machinery. Use each for its strengths, or throw the same task at several and compare.
+
+Antigravity needs `agy` on your `PATH`. `ANTIGRAVITY_BIN` / `ANTIGRAVITY_MODEL` / `ANTIGRAVITY_HOME` override the
+binary, the model, and where it keeps conversations. One difference worth knowing: its GUI-panel registration is
+written **per directory** (`.agents/mcp_config.json`, kept out of your `git status`), not per session, because
+that is the only project-scoped file `agy` reads.
 
 ---
 

@@ -17,8 +17,10 @@ const ids = (rows: SessionRow[]) => rows.map((r) => r.id);
 const filter = (over: Partial<Parameters<typeof selectSessionRows>[1]> = {}) => ({
   isInternalHelper: never,
   isDevTerminal: never,
+  isBackground: never,
   includePending: true,
   limit: 50,
+  backgroundLimit: 10,
   ...over,
 });
 
@@ -69,6 +71,43 @@ describe("selectSessionRows", () => {
   it("filters before capping, so a hidden row cannot consume a slot", () => {
     const rows = [disk("worker", 9), disk("a", 2), disk("b", 1)];
     expect(ids(selectSessionRows(rows, filter({ isInternalHelper: (id) => id === "worker", limit: 2 })))).toEqual(["a", "b"]);
+  });
+
+  // Background workers are LISTED — the client puts them behind a chip. Dropping them here
+  // would take away the only way to open one, and a MulmoTerminal session is a live
+  // terminal: a row you cannot reach is a process you cannot stop (#1060).
+  it("keeps background rows, in recency order with the chats", () => {
+    const rows = [disk("chat", 2), disk("refresh", 3)];
+    expect(ids(selectSessionRows(rows, filter({ isBackground: (id) => id === "refresh" })))).toEqual(["refresh", "chat"]);
+  });
+
+  // The rule that pays for the separate cap: the client hides background rows by default, so
+  // under one shared cap a busy refresh schedule empties the chat list and the screen just
+  // looks like a project with no history.
+  it("does not let background rows consume the chat cap", () => {
+    const rows = [disk("bg1", 9), disk("bg2", 8), disk("a", 2), disk("b", 1)];
+    const isBackground = (id: string) => id.startsWith("bg");
+    expect(ids(selectSessionRows(rows, filter({ isBackground, limit: 2 })))).toEqual(["bg1", "bg2", "a", "b"]);
+  });
+
+  it("caps background rows on their own limit, keeping the newest", () => {
+    const rows = [disk("bg1", 9), disk("bg2", 8), disk("bg3", 7), disk("a", 1)];
+    const isBackground = (id: string) => id.startsWith("bg");
+    expect(ids(selectSessionRows(rows, filter({ isBackground, backgroundLimit: 2 })))).toEqual(["bg1", "bg2", "a"]);
+  });
+
+  it("lists no background rows at a zero background limit, and keeps the chats", () => {
+    const rows = [disk("bg", 9), disk("a", 1)];
+    expect(ids(selectSessionRows(rows, filter({ isBackground: (id) => id === "bg", backgroundLimit: 0 })))).toEqual(["a"]);
+  });
+
+  // Both exclusions apply to the same row set: a grid session that is also a background
+  // worker is still a grid session, and the chat listing must not get it back through the
+  // background bucket.
+  it("still hides a grid session from chat when it is also a background worker", () => {
+    const rows = [disk("chat", 1), disk("grid", 3)];
+    const only = { isDevTerminal: (id: string) => id === "grid", isBackground: (id: string) => id === "grid" };
+    expect(ids(selectSessionRows(rows, filter(only)))).toEqual(["chat"]);
   });
 
   it("does not mutate the caller's array", () => {

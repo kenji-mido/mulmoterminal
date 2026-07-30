@@ -106,9 +106,21 @@ describe("remote-host routes", () => {
 
   it("rejects a forbidden origin with 403 before touching the lifecycle", async () => {
     const getLifecycle = vi.fn(() => fakeLifecycle());
-    const res = await request(mountApp({ isAllowedOrigin: () => false, getLifecycle })).get("/api/remote-host/status");
+    const res = await request(mountApp({ isAllowedOrigin: () => false, getLifecycle }))
+      .post("/api/remote-host/connect")
+      .send({ idToken: "tok" });
     expect(res.status).toBe(403);
     expect(getLifecycle).not.toHaveBeenCalled();
+  });
+
+  // #1094. A browser sends no Origin on a same-origin GET, so a /status judged by origin refused
+  // every page served from a LAN address the operator had allowed — while every unguarded GET on
+  // the server answered it. Nothing is protected by refusing: the response carries no CORS
+  // headers, so a cross-site page cannot read it however the request is made.
+  it("answers GET /status even when the origin predicate refuses everything", async () => {
+    const res = await request(mountApp({ isAllowedOrigin: () => false })).get("/api/remote-host/status");
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ status: CONNECTED, session: SESSION_BLOB, health: ONLINE });
   });
 
   it("returns 503 when the runner is not initialized", async () => {

@@ -9,7 +9,7 @@
 // The env block is the transport for a reason: Claude Code applies it itself, so it
 // reaches the session identically on the host, under tmux — where a pane inherits the
 // tmux SERVER's environment, not the spawning client's — and inside a container.
-import { writeFileSync, mkdirSync, readdirSync } from "node:fs";
+import { writeFileSync, mkdirSync, readdirSync, statSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { removeQuietly } from "../infra/fs-cleanup.js";
@@ -71,8 +71,19 @@ export function cleanupSessionSettings(sessionId: string): void {
  *
  *  `liveIds` is what actually survived the restart — the tmux sessions still running. Nothing
  *  else can still be reading its settings: a PTY without tmux died with the server that owned
- *  it. Returns the ids it dropped, for the boot log. */
-export function pruneOrphanSettings(liveIds: ReadonlySet<string>, dir: string = SETTINGS_DIR): string[] {
+ *  it. Returns the ids it dropped, for the boot log.
+ *
+ *  That last inference only holds for the process that OWNED the previous lifetime. A second
+ *  instance running RIGHT NOW has live PTYs of its own, and on a host without tmux `liveIds` is
+ *  empty — so every one of its files read as a leftover and was deleted underneath it (#1061,
+ *  seen in the field: eight settings files of live sessions removed by a peer's boot).
+ *
+ *  `writtenBefore` is the cutoff that fixes it: the moment the earliest live peer started. A file
+ *  older than that cannot belong to any of them, so it is still a leftover; a newer one might be,
+ *  and a maybe is not enough to delete somebody's live state. Null means nothing else is running
+ *  and every non-surviving file is fair game — the original behaviour, which is also what a lone
+ *  instance sees. */
+export function pruneOrphanSettings(liveIds: ReadonlySet<string>, dir: string = SETTINGS_DIR, writtenBefore: number | null = null): string[] {
   let names: string[];
   try {
     names = readdirSync(dir);
@@ -83,9 +94,21 @@ export function pruneOrphanSettings(liveIds: ReadonlySet<string>, dir: string = 
   for (const name of names) {
     const id = sessionIdFromFileName(name);
     if (id === null || liveIds.has(id)) continue;
-    if (removeQuietly(path.join(dir, name))) dropped.push(name);
+    const file = path.join(dir, name);
+    if (writtenBefore !== null && !isOlderThan(file, writtenBefore)) continue;
+    if (removeQuietly(file)) dropped.push(name);
   }
   return dropped;
+}
+
+// A file we cannot stat is one we decline to judge: unreadable is not evidence of being old, and
+// the cost of guessing wrong here is deleting state a running session may still need.
+function isOlderThan(file: string, cutoff: number): boolean {
+  try {
+    return statSync(file).mtimeMs < cutoff;
+  } catch {
+    return false;
+  }
 }
 
 // `<id>.json` and `<id>-mcp.json` are the two we write, and `<id>` is always a session id —

@@ -1,6 +1,6 @@
 # mulmoterminal
 
-**Run a whole team of coding agents from your browser — and actually keep up with them.**
+**Run multiple Claude Code and Codex sessions in parallel — and see which one needs you.**
 
 A **browser terminal** for **parallel AI coding agents**: several **Claude Code** and **Codex**
 sessions side by side, each in its own cell, with the one that needs you marked in colour. Vibe
@@ -14,6 +14,9 @@ and a **phone push** reaches you when a turn finishes.
   view, everyday workflows, the full feature list, configuration, and mobile push notifications.
 - **ユーザーガイド:** [日本語](https://receptron.github.io/mulmoterminal/guide/ja/) —
   グリッドの使い方・日々のワークフロー・機能一覧・設定・スマホ通知の設定はこちら。
+- **Updates / アップデート情報:** new releases and features are announced **in Japanese** on X —
+  新バージョンや新機能のお知らせは X の
+  [Singularity Society (@SingularitySoci)](https://x.com/SingularitySoci) で。
 
 ![MulmoTerminal — a grid of live Claude Code sessions, each color-coded by state, updating in real time](https://raw.githubusercontent.com/receptron/mulmoterminal/main/docs/guide/images/hero.gif)
 
@@ -71,15 +74,19 @@ npx mulmoterminal@latest        # starts on http://localhost:34567 and opens you
 
 *Zoomed in, the **cockpit roster** replaces thumbnails with information: every session as a
 text row — directory, AI summary, your last prompt, the agent's latest reply, a status word,
-and the branch's **PR phase** badge. Click a row to swap the enlarged terminal.*
+and the branch's **PR phase** badge. A row whose agent is **waiting on you** rings amber and
+blinks; one that has merely **finished** rings green and stays still (Settings → Waiting rows
+turns the movement off). Click a row to swap the enlarged terminal.*
 
 ### What it is, under the hood
 
 Each session runs as a real PTY on the server (the agent CLI in a pseudo-terminal) and is
 streamed to an [xterm.js](https://xtermjs.org/) terminal in the browser over a WebSocket. A
 sidebar lists every session for the project and reflects, in real time, which are **working**
-(the agent is thinking) and which **need attention** (waiting for input, or finished with
-output you haven't seen) — driven by Claude/Codex activity hooks the server injects per spawn.
+(the agent is thinking, a spinner), which are **waiting on you** (a permission prompt or a
+question — an amber dot; nothing proceeds until you answer) and which are **finished with output
+you haven't seen** (a green dot) — driven by Claude/Codex activity hooks the server injects per
+spawn. The horizontal tab bar carries the same two dots.
 
 ![Single view — one agent in focus, terminal on the left and a GUI panel on the right](https://raw.githubusercontent.com/receptron/mulmoterminal/main/docs/guide/images/single-view.png)
 
@@ -100,6 +107,17 @@ in the sandbox too), so the agent reads it without a permission prompt; the copi
 when the session ends, and any left by a crash are swept at the next start. Up to 110 MiB per
 file — the same ceiling as a phone attachment. **A session already running when you upgrade
 was launched without that grant**, so drops into it still prompt; new sessions don't.
+
+**Pasting a screenshot** — take a screenshot and paste it straight into the terminal
+(`Cmd`/`Ctrl`+`V`). The image is saved to the session's own drop directory — the same place a
+dropped file goes, with the same grant, the same 110 MiB ceiling and the same cleanup when the
+session ends — and its **absolute path** is inserted at the cursor, so the agent can read it.
+Unlike a drop, this does not need the browser to expose a path — the bytes are on the
+clipboard — so it also covers Chrome, where dropping a file cannot insert a path. It works
+wherever the browser puts the image on the clipboard as `image/png`, `image/jpeg`,
+`image/gif`, or `image/webp`. Anything else is left to the terminal's own paste handling,
+exactly as before — including a paste that carries **plain text** next to the image, which
+copying from a web page usually does, so that pasting text keeps working.
 
 <a id="clicking-a-file-path"></a>
 
@@ -215,7 +233,10 @@ and every CLI in the table above), seeds the launcher's **directory
 presets** from the projects in your Claude Code history, and writes `~/.mulmoterminal/config.json`.
 It's **idempotent** — re-run it any time to refresh the presets; it overwrites the managed parts
 and keeps your other settings. When `claude` is installed it can hand off to the
-`/mulmoterminal-config` skill for interactive tweaks.
+`/mulmoterminal-config` skill for interactive tweaks — it routes to the one that owns what you
+want to change. Once the app is up you can also reach them from **Settings**: each section that a
+skill can write ends in a button that starts that skill in a new session, which is how the settings
+with no UI (a theme of your own, `keymap`) get written without hand-editing JSON.
 
 **Google account (optional).** Link a Google account to enable the chat's `google` tool and the
 phone's `google.calendar.*` commands: read/create events on any calendar (not just your primary),
@@ -352,12 +373,12 @@ SDK; we drive the real interactive CLI and relay its TTY over the WebSocket.
 
 ---
 
-## Agents: Claude & Codex
+## Agents: Claude, Codex & Antigravity
 
 MulmoTerminal drives **interactive coding-agent CLIs**, not just Claude. An
 `AgentAdapter` seam abstracts the per-agent bits (which binary to spawn, how it resumes)
-so the PTY, grid, persistence, and GUI-panel plumbing stay shared. Two adapters ship
-today — **Claude Code** (the default) and **Codex**.
+so the PTY, grid, persistence, and GUI-panel plumbing stay shared. Three adapters ship
+today — **Claude Code** (the default), **Codex**, and **Antigravity** (`agy`).
 
 - **Claude** — spawned as `claude` (override with `CLAUDE_BIN`). The server passes
   `--session-id <uuid>`, so it knows the live session's id even before its transcript
@@ -371,10 +392,36 @@ today — **Claude Code** (the default) and **Codex**.
   `CODEX_HOME`) and maps the new rollout to the session — attributed only when it's
   unambiguous, never by "newest wins". Resume reattaches a live PTY, adopts a surviving
   tmux session, or cold-resumes the rollout id.
+- **Antigravity** — spawned as `agy` (override with `ANTIGRAVITY_BIN`; `ANTIGRAVITY_MODEL` sets
+  `--model`). Antigravity runs on its own WebSocket (`/ws/antigravity`). Like Codex it mints its
+  own conversation id, so the server watches `~/.gemini/antigravity-cli/brain/` (home overridable
+  via `ANTIGRAVITY_HOME`) for the directory the new conversation creates — attributed only when
+  unambiguous — and cold-resumes it with `--conversation <id>`. That mapping is appended to
+  `~/.mulmoterminal/antigravity-conversations.jsonl`, so a conversation is still resumable after
+  the server restarts.
+
+  Its **GUI tools work differently**, because `agy` takes no MCP flag: it reads its servers from
+  `.agents/mcp_config.json` in the working directory. MulmoTerminal writes that file from the
+  directory's [Canvas switches](#wiki-collections--the-gui-panel) — the same switches Claude's cells read — so
+  one switch serves every agent, and rewrites it whenever a switch flips or an agy session starts.
+  Servers in it that MulmoTerminal did not write are left alone, the file is removed once no group
+  is on, and it is kept out of your `git status` through `.git/info/exclude` — a local switch on a
+  local machine, so it never reaches a diff or your team. The entry runs `server/mcp/bridge.mjs`, a stdio-to-HTTP shim onto the same in-process
+  GUI MCP server the other agents call. The **session id is never written into that file** — it is
+  per directory and shared by every session running there — and reaches the bridge through the agy
+  process's own environment instead.
+
+  The Docker sandbox does NOT cover agy: it stays claude-only until `buildDockerRunArgs` is
+  generalized (see `plans/feat-multi-agent-support.md`, PR#5). `agy` also ships as a standalone
+  binary rather than an npm package, so the sandbox image has nothing to install.
 
 **Choosing an agent.** The single view has a **New Codex session** button; each grid
-cell's launch form and the Collections browser carry a **Claude / Codex** toggle (your
-choice is remembered).
+cell's launch form carries a **Claude / Codex / Antigravity / Shell** toggle, and the
+Collections browser a **Claude / Codex / Antigravity** one (your choice is remembered).
+**Shell** is not an agent: it runs your OS default shell (`$SHELL`, or `/bin/sh`) in the
+chosen directory, with nothing to install and nothing to configure. It starts a launcher
+cell, so it has no model, no MCP registration, and no worktree — those rows disappear
+while it is picked.
 
 **Other models.**
 Claude Code can run against any **Anthropic-compatible** backend (OpenRouter, Moonshot, a
@@ -501,7 +548,14 @@ the `claude` / `codex` sessions themselves.
 | `CODEX_BIN`  | `codex`        | The Codex CLI binary to spawn. |
 | `CODEX_MODEL`| codex default  | Model passed to Codex as `--model` (unset = Codex's own default). |
 | `CODEX_HOME` | `~/.codex`     | Codex home — where its session rollouts and MulmoTerminal-mirrored skills live. |
+| `ANTIGRAVITY_BIN` | `agy`     | The Antigravity CLI binary to spawn. |
+| `ANTIGRAVITY_MODEL` | agy default | Model passed to Antigravity as `--model` (unset = agy's own default). |
+| `ANTIGRAVITY_HOME` | `~/.gemini/antigravity-cli` | Antigravity home directory containing session brain storage. |
 | `MULMOTERMINAL_HOME` | `~/.mulmoterminal` | Root for managed **git worktrees**. |
+| `CLAUDE_CONFIG_DIR` | `~` | Claude Code's own config directory. `.claude.json` lives **inside** it, so relocating your Claude Code config moves that file too — MulmoTerminal reads it to tell whether the per-project GUI MCP server is registered (`server/infra/gui-mcp-registration.ts`). Leave it unset and `~/.claude.json` is used. |
+| `MULMOCLAUDE_WORKSPACE_PATH` | `~/mulmoclaude` | Where the managed MulmoClaude workspace lives. MulmoTerminal seeds presets/helps **only** into this directory, so launching in an arbitrary project never writes them there (`server/backends/workspaceSetup.ts`). Set it to the same value MulmoClaude uses. |
+| `MULMOTERMINAL_NO_SKILL_INSTALL` | unset | Set to any value to skip installing the bundled skills (`mulmoterminal-config` and the `-dirs` / `-theme` / `-header` / `-keys` / `-model` / `-notify` / `-bug-report` / `-decisions` family) into `~/.claude/skills/` and the Codex skills root on startup. |
+| `GEMINI_IMAGE_MODEL` | `gemini-3.1-flash-image-preview` | Model used for image generation (needs `GEMINI_API_KEY`). The default is a **preview** model Google schedules for retirement around mid-2026, so pin a stable one here (e.g. `gemini-2.5-flash-image`) rather than waiting for a code change. |
 | `WAIT_REAP_GRACE_MS` | `1800000` | How long a **waiting** background session is kept before it's auto-reaped (`0` or negative = never). |
 
 The Docker-sandbox variables (`MULMOTERMINAL_SANDBOX`, `MULMOTERMINAL_SANDBOX_IMAGE`,
@@ -531,7 +585,7 @@ The Settings modal (⚙) persists per-user UI choices to `~/.mulmoterminal/confi
 | `soundKinds` | Which moments beep — see [Notification sounds](#notification-sounds). Defaults to `["finished","waiting"]`; the other kinds are opt-in. |
 | `sounds`     | Per-kind sound: `{ "waiting": "preset:coin" }`. A `preset:<id>` reference or an absolute path; a kind with no entry falls back to `soundFile`. |
 | `prRepos`    | `owner/repo` entries whose open PRs/issues the cross-repo **PRs & Issues** view aggregates (via your `gh` login). |
-| `launchers`  | `{ label, command }` entries offered in a grid cell's launcher besides Claude — a plain shell, `codex`, any interactive command. |
+| `launchers`  | `{ label, command }` entries offered in a grid cell's launcher besides the agents — any interactive command. A plain shell needs no entry: the launch form's **Shell** toggle opens `$SHELL` unconfigured. |
 | `quickCommands` | `{ label, text, agents? }` phrases the **phone** offers as chips on a session's terminal view. Tapping one puts `text` in the input box; it is not sent until you press send. `agents` (`"claude"` / `"codex"` / `"shell"`) scopes a chip to session kinds — omit it to offer the chip everywhere. Empty by default. |
 | `userMcpServers` | `{ id, url }` HTTP MCP servers merged into the **single-view** Claude session's `--mcp-config` (a `localhost` URL is reached over `host.docker.internal` in the Docker sandbox). Takes effect on the next session. |
 | `buttons`    | Header action buttons — see [Header buttons](#header-buttons). Omit to keep the defaults; set to replace them. |
@@ -545,6 +599,7 @@ The Settings modal (⚙) persists per-user UI choices to `~/.mulmoterminal/confi
 | `decisionDigest` | Keep a **Markdown digest of the decisions this project's sessions asked for**, refreshed at startup and every few hours, so an agent can read what has already been decided before asking something similar. Written to `~/.mulmoterminal/decisions/<project>.md` (never into your repository) and served to agents by the bundled `mulmoterminal-decisions` skill. **Off by default** — it is a vision-stage idea, and it writes a file that would otherwise not exist. The digest holds dated facts, never inferred rules. |
 | `issueWorkComments` | Let a cell **comment on the issue it is working on**: once when it starts, and again when its PR merges (closing the issue if GitHub has not already). The comment names the working **directory** it happened in — the folder name only, never the path — so a reader can tell which clone. **Off by default**; it writes to GitHub, often on somebody else's issue. Needs `gh` logged in. See the [Configuration guide](https://receptron.github.io/mulmoterminal/guide/en/config.html#issue-work-comments). |
 | `prWorkdirFooter` | Ends a PR body with `work in <clone>` — the directory name of the clone the work happened in, so a PR says which of several side-by-side checkouts produced it. Applies to **both** paths that open PRs here: **⧉ Open PR** appends it to the PR it creates, and every Claude session is told to end the bodies it writes with the same line (the name is resolved by the server, so a session inside a managed worktree still names the main checkout). **On by default**; set `false` to opt out — read per PR and per session spawn, so no restart is needed (there is no Settings control for it). Appending is idempotent: an existing PR never gets a second copy. |
+| `appendSystemPrompt` | Whether a spawned Claude session is asked to end a reply with a **closing summary** — what was asked, what was achieved, what was not (see [Closing summary](#closing-summary)). **On by default**; set `false` to opt out, and a directory's `.mulmoterminal.json` outranks this. Read per spawn, so no restart is needed (there is no Settings control for it), though a session already running keeps what it was launched with. `true` / `false` only. |
 | `fontFamily` | The **terminal font** every session renders in — a CSS font-family stack, e.g. `"'Cica', 'MS Gothic', monospace"`. No Settings UI: edit the file, then **restart** (this config is read once at startup). Unset uses the built-in stack (JetBrains Mono / Fira Code / Menlo / Consolas, then CJK faces for Japanese, Korean and Chinese). Unlike the per-browser font **size**, this is one value for the whole host — it names fonts, and which fonts exist is a property of the machine. A directory can override it. See the [Configuration guide](https://receptron.github.io/mulmoterminal/guide/en/config.html#font-family). |
 
 Every MulmoTerminal on the machine shares this one file, so an older build could save over a key a
@@ -568,8 +623,8 @@ agent), or `"open"`. An `open` button targets one of `url` / `reveal` (OS file m
 opened next to the current one) / `pr: true` (open the current branch's PR — the button is hidden when
 there's no open PR) / `pickFile: true` (OS file dialog → insert the path).
 `${dir}`, `${branch}`, `${repo}`, … substitute live context, and `when` (e.g. `"isGitRepo"`) gates
-visibility. The `/mulmoterminal-config` skill writes a valid config interactively; per-dir buttons
-merge over the global ones by `id`.
+visibility. The `/mulmoterminal-header` skill writes a valid config interactively; per-dir buttons
+merge over the global ones by `id`, while `chips` replace the global list wholesale.
 
 ### Notification sounds
 
@@ -665,9 +720,10 @@ malformed file is ignored.
   "colors": { "background": "#190a23", "cursor": "#ff2e63" }, // per-key palette overrides
   "fontSize": 16,                       // terminal font size in px (8–32); overrides Settings
   "fontFamily": "'Cica', monospace",    // terminal font stack; overrides the global config
-  "orderPriority": 10,                  // rank in the grid's "priority" ordering (lowest first)
+  "orderPriority": 10,                  // rank in the grid's "priority" order and the launcher chips (lowest first)
   "sound": "./.mulmoterminal/alert.mp3", // attention sound, RELATIVE to this directory
-  "sounds": { "command-failed": "preset:gong" } // per-notification-kind override
+  "sounds": { "command-failed": "preset:gong" }, // per-notification-kind override
+  "appendSystemPrompt": false           // no closing summary here; omit to follow the global setting
 }
 ```
 
@@ -688,17 +744,18 @@ malformed file is ignored.
 | `theme`      | xterm palette for terminals in this directory (one of the built-in theme ids). |
 | `colors`     | Per-key xterm palette overrides applied on top of `theme` (or the app theme when `theme` is unset). Keys are xterm `ITheme` names (`background`, `foreground`, `cursor`, `selectionBackground`, the 16 ANSI colors, …); values are hex (`#rgb` / `#rrggbb` / `#rrggbbaa`). Unknown keys / bad values are dropped. |
 | `fontSize`   | Terminal font size in px for this directory (8–32), overriding the Settings value. A size outside the range is clamped; a non-number is ignored. Changing it re-fits the terminal, so the PTY learns the new width — unlike browser zoom, which leaves the two disagreeing. |
-| `orderPriority` | This directory's rank in the grid's **priority** ordering — the third mode on the toolbar's ordering button, next to auto (attention-first) and manual (the move buttons). Any integer, **lowest first**; negatives are allowed. Directories that set nothing sort last, keeping their existing order, so adding the key to one project doesn't shuffle the rest. Only the priority mode reads it. |
+| `orderPriority` | This directory's rank in the grid's **priority** ordering — the third mode on the toolbar's ordering button, next to auto (attention-first) and manual (the move buttons). Any integer, **lowest first**; negatives are allowed. Directories that set nothing sort last, keeping their existing order, so adding the key to one project doesn't shuffle the rest. The grid reads it in **priority** mode only; the launcher's directory chips always sort by it, so a project sits in the same place on both. |
 | `fontFamily` | CSS font-family stack for this directory's terminals, overriding the global `fontFamily`. Use the names as your OS lists them (`"'Cica', 'MS Gothic', monospace"`). An unusable stack is ignored whole rather than half-applied; `monospace` is appended if you name no generic family. Prefer fonts whose fullwidth glyphs are exactly twice the Latin width, or box-drawing frames tear. |
 | `sound`      | Attention sound for this directory's sessions, a path **relative to the directory** (served at `GET /api/dir-sound`). The fallback for every kind. |
 | `sounds`     | Per-kind override of `sound`: `{ "command-failed": "preset:gong" }`. Each value is a `preset:<id>` or a directory-relative path, under the same confinement. |
+| `appendSystemPrompt` | Whether this directory's Claude sessions are asked to end a reply with a **closing summary** (see [Closing summary](#closing-summary)). Omit to follow the global `appendSystemPrompt`, which is on; `true` / `false` here outranks it. Read per spawn, so a new session in this directory picks up an edit without a restart. |
 | `addDirs`    | Extra directories this project's Claude sessions may read and edit — the terminal-side equivalent of opening several folders in one VS Code workspace, via Claude Code's `--add-dir`. Relative entries resolve against **this file's directory** (`"../shared-lib"`), a path that doesn't exist is dropped, max 16. In the Docker sandbox each one is bind-mounted too, so the grant is real inside the container — which widens the sandbox on purpose. Claude only: codex has no equivalent flag and ignores the key. |
 
 **Security.** `sound` and every `sounds` entry are directory-relative paths only — absolute
 paths and any `../` that escapes the directory are rejected, and the path is never taken from the
 HTTP request, so an opened project can't point the player at arbitrary files.
 **When changes take effect.** A write made *through Claude's tools* — which includes the
-`mulmoterminal-config` skill — applies **live**: the tool hook that reports the write doubles
+`mulmoterminal-dirs` skill — applies **live**: the tool hook that reports the write doubles
 as the reload signal, so colors, palette, font size and grid order update without reopening
 anything. There is no filesystem watcher, so an edit made **outside** a session (your own
 editor) is picked up when the terminal is next opened.
@@ -756,8 +813,9 @@ alongside the Claude sessions. Scripts are **per-directory**: the cell reads the
 different projects' scripts.
 
 The same launcher also has an **or launch** row for your configured **launch commands**
-— a plain interactive shell, `codex`, any command — set in Settings (⚙) → **Launch
-commands** as `{ label, command }` (e.g. `Shell` → `$SHELL`, `Codex` → `codex`). Unlike
+— any interactive command — set in Settings (⚙) → **Launch commands** as
+`{ label, command }` (e.g. `htop` → `htop`, `Codex` → `codex`). A plain shell needs no
+entry here: the launch form's **Shell** toggle already opens `$SHELL`. Unlike
 a one-shot script, a launcher runs as a **persistent terminal in the cell's directory**:
 it survives grid page switches and reconnects, and its dot shows running vs. exited (it
 has no Claude hooks, so no blocked/done states).
@@ -902,7 +960,7 @@ repo without colliding. Worktrees live under `~/.mulmoterminal/worktrees/` (over
 
 ![An empty cell's launch form — choose the agent, working directory, or a worktree](https://raw.githubusercontent.com/receptron/mulmoterminal/main/docs/guide/images/grid-launch-form.png)
 
-*Every empty grid cell shows this launch form: toggle **Claude / Codex**, type a **working directory** (frequent ones autocomplete from your presets), or — in a git repo — name a task under **OR ISOLATE IN A WORKTREE** and hit **＋ New worktree** to start the agent on its own isolated branch. **OR LAUNCH** starts a plain shell or any launch command instead.*
+*Every empty grid cell shows this launch form: toggle **Claude / Codex / Antigravity / Shell**, type a **working directory** (frequent ones autocomplete from your presets), or — in a git repo — name a task under **OR ISOLATE IN A WORKTREE** and hit **＋ New worktree** to start the agent on its own isolated branch. **Shell** runs your OS default shell there instead of an agent; **OR LAUNCH** runs one of your configured launch commands.*
 
 A worktree cell's header carries a **diff badge** (`+<commits> ●<dirty>`); click it for a
 **Changes vs `<base>`** panel (file list + patch) with actions:
@@ -976,8 +1034,8 @@ your **own HTTP MCP servers** into the single-view session via Settings → `use
 **Wiki.** The toolbar **Wiki** button opens a read-only browser over `<workspace>/data/wiki/`
 — an **index** (tag-filterable page catalog), rendered **pages** with `[[wiki links]]` and
 backlinks, a **graph** view (pages ranked by references), and a **lint** report (orphans /
-broken links / tag drift). Read-only endpoints: `GET /api/wiki`, `/api/wiki/graph`,
-`/api/wiki/lint`.
+broken links / tag drift) whose `[[links]]` are clickable too. Read-only endpoints:
+`GET /api/wiki`, `/api/wiki/graph`, `/api/wiki/lint`.
 
 **Collections.** The toolbar **Collections** button browses the workspace's collection
 "cards" (`@mulmoclaude/collection-plugin`). Running a collection **action** fetches a seed
@@ -1084,13 +1142,32 @@ newest first, including freshly-created sessions that aren't yet written to disk
 - `500 { "error": string }` on an unexpected filesystem error. A missing project
   directory is **not** an error — it yields an empty `sessions` array.
 
+### Directories that cannot be used
+
+Every `?cwd=` — on the terminal sockets and on the read routes alike — names the directory
+the request is about. When one is named and cannot be used, the server says so instead of
+quietly answering about the **default workspace** (#1151):
+
+| Where | What happens |
+| --- | --- |
+| `/ws`, `/ws/codex`, `/ws/antigravity`, `/ws/launch`, `/ws/run` | The socket is closed with `{ type: "error", message }`, which the terminal shows as a red banner and does not retry. |
+| A session that is still running (`?session=` names a live PTY or a surviving tmux session) | **Attaches anyway**, with a warning in the server log. Moving or renaming a directory must not shut you out of an agent that is still working in it — and the cwd reported back comes from the running PTY, not from the request. |
+| `GET /api/scripts`, `/api/skills`, `/api/dir-config`, `/api/dir-sound`, `/api/git-status`, `/api/pr-phase`, `/api/header`, `/api/sessions`, `/api/codex/sessions`, `/api/session/:id`, `/api/transcript/*`, `/api/cost` | `404 { error, cwd }` — a directory that is not there. |
+| A `?cwd=` that cannot name a directory at all (relative, or repeated as `?cwd=a&cwd=b`) | `400 { error, cwd }`. |
+
+A request that names **no** directory is unaffected: `CLAUDE_CWD` is then the answer it
+asked for. The wording of the refusal is the one a refused spawn already uses, so the same
+condition reads the same whether it is caught here or by `ptySpawn` itself.
+
 ### HTTP: `GET /api/scripts`
 
 The runnable entries from `<cwd>/script.json` for a cell's chosen directory
-(`?cwd=<dir>`, falling back to `CLAUDE_CWD`); see
-[Scripts (Run menu)](#scripts-run-menu). The resolved `cwd` is echoed back (the
-server may fall back from a bad path), and each entry carries its `index` (the
-position the client sends back to `/ws/run`).
+(`?cwd=<dir>`, or `CLAUDE_CWD` when none is named); see
+[Scripts (Run menu)](#scripts-run-menu). The resolved `cwd` is echoed back, and each
+entry carries its `index` (the position the client sends back to `/ws/run`). A `?cwd=`
+that names a directory the server cannot enter is answered `404 { error, cwd }` rather
+than with the default workspace's scripts — see
+[Directories that cannot be used](#directories-that-cannot-be-used).
 
 ```jsonc
 // GET /api/scripts?cwd=/Users/me/proj
@@ -1108,8 +1185,8 @@ A missing or invalid `script.json` is **not** an error — it yields an empty
 
 ### HTTP: `GET /api/skills`
 
-The Claude skills discoverable for a terminal's chosen directory (`?cwd=<dir>`,
-falling back to `CLAUDE_CWD`) — project scope (`<cwd>/.claude/skills`) plus user scope
+The Claude skills discoverable for a terminal's chosen directory (`?cwd=<dir>`, or
+`CLAUDE_CWD` when none is named) — project scope (`<cwd>/.claude/skills`) plus user scope
 (`~/.claude/skills`), deduped by slug (project shadows user), **working-dir skills
 first**; see [Skills (Skill menu)](#skills-skill-menu). A `skills` allowlist in that
 directory's `.mulmoterminal.json` narrows and reorders the result; absent → all. The
@@ -1414,6 +1491,16 @@ Key rules:
 - Brand-new sessions appear in the sidebar **immediately** (before their `.jsonl`
   exists) via the in-memory `knownSessions` registry + a `created` push; an
   unused one disappears when its PTY is reaped.
+- **Background workers get their own filter.** A session nobody started by hand —
+  a collection's scheduled refresh, or a plugin's `spawnBackgroundChat`
+  `hidden: true` — is listed under the **Background** chip instead of among the
+  chats, so a refresh schedule doesn't fill the history. It stays openable (a
+  MulmoTerminal session is a live terminal, so a row you can't reach is a process
+  you can't stop), and it is put on the same count+age retention as the
+  scheduler's own sessions. The chip appears only when there is one to show. A
+  **manual** collection Refresh is a normal visible session — unchanged. The
+  marking is persisted (`~/.mulmoterminal/background-sessions.json`), so a worker
+  stays out of the chat list after it finishes and after a restart.
 
 ---
 
@@ -1455,7 +1542,17 @@ placed last with nothing after it.
 
 It is deliberately **not** written on every turn: mid-work replies and short factual answers
 carry no standing request, and a summary that always appears stops being read. The wording
-lives in `server/agents/session-summary-prompt.ts`; there is no setting to turn it off.
+lives in `server/agents/session-summary-prompt.ts`.
+
+**On by default, and switchable off** with `appendSystemPrompt: false` — in
+`~/.mulmoterminal/config.json`, or in a directory's `.mulmoterminal.json`, which outranks the
+global value. Read per spawn, so no restart is needed; a session already running keeps what it
+was launched with. Nothing in the app parses what the summary says, so turning it off costs no
+feature — the roster and push notifications simply show the raw tail of the reply.
+
+Which sections `--append-system-prompt` ends up carrying is decided in
+`server/agents/appended-prompt.ts`: this one and the `prWorkdirFooter` clone line are separate
+settings on the same flag, and with both off the flag is not passed at all.
 
 Passed inline rather than as `--append-system-prompt-file` for the same reason `--settings`
 is: the sandbox spawn runs in a container that cannot read a host path.
@@ -1474,12 +1571,13 @@ has its `/` and `.` characters replaced with `-` (e.g.
 A session's display **title** is derived by scanning its JSONL for, in order of
 preference:
 
-1. a live **AI title** the server generated for the session this run (see below),
-2. else the latest `ai-title` record's `aiTitle` (e.g. written by MulmoClaude),
-3. else the latest `last-prompt` record's `lastPrompt`,
-4. else the first real user message (slash/local-command wrappers like
+1. the **session note** the user wrote (see below),
+2. else a live **AI title** the server generated for the session this run (see below),
+3. else the latest `ai-title` record's `aiTitle` (e.g. written by MulmoClaude),
+4. else the latest `last-prompt` record's `lastPrompt`,
+5. else the first real user message (slash/local-command wrappers like
    `<local-command-…>` are skipped),
-5. else `"(untitled session)"`.
+6. else `"(untitled session)"`.
 
 In-memory sessions not yet persisted show as `"New session"` until their file
 appears, at which point the on-disk title takes over.
@@ -1498,6 +1596,23 @@ only when a title is **due**: none yet, the newest prompt was a trivial/context-
 ack (so the raw last prompt would be stale), or every few turns to keep a long session's
 title current. The title lives in memory (never written into Claude's own transcript); a
 resumed session falls back to any on-disk `ai-title`.
+
+### Session note
+
+Every tier above says what the **agent** said, which stops answering "which cell is this?"
+once several sessions are open. So a cell header also takes a **note you write yourself**: the
+pencil button beside the header text opens a one-line box (Enter saves, Esc cancels, clicking
+away saves). While a note is set it *replaces* the header line — the title it displaced stays in
+the tooltip — and it becomes the session's title in the sidebar list and on the phone's roster
+too, so one session goes by one name everywhere.
+
+Notes are capped at 200 characters and folded to a single line. They are stored per **session
+id** in `~/.mulmoterminal/session-memos.jsonl` and survive both the session being reaped and a
+server restart: resume the session and the note comes back. Saving one publishes it on the
+`sessions` channel, so every other open tab and the phone update without asking.
+
+`POST /api/session/:id/memo` with `{ "text": "…" }` writes one; an empty `text` erases it. The
+route answers with the **stored** text, which is what a reload will show.
 
 ---
 
@@ -1526,7 +1641,8 @@ server/
   mcp/            per-session MCP broker
   backends/       wiki, collections, feeds, accounting, notifier,
                   translation, whisper, remote-host, html, files
-  skills/         bundled skills (mulmoterminal-config, mulmoterminal-bug-report, mulmoterminal-decisions)
+  skills/         bundled skills: mulmoterminal-config (entry point + audit), -dirs, -theme,
+                  -header, -keys, -model, -notify, -bug-report, -decisions
   fix-pty-perms.js              postinstall: fixes node-pty binary permissions
 src/
   App.vue                       Layout; owns the active session + single/grid view
@@ -1537,13 +1653,19 @@ src/
     Terminal.vue                             xterm.js terminal; /ws, /ws/codex, /ws/run
     AppToolbar.vue                           shared header + toolbar buttons
     GridView.vue, TerminalGrid.vue, TerminalCell.vue, CommandCell.vue, LauncherCell.vue
+    CellLaunchForm.vue                       what an EMPTY cell shows: dir + target + resume /
+                                             scripts / worktrees / tool groups
     GuiPanel.vue, PluginFrame.vue            GUI panel (Canvas) + Shadow-DOM plugin host
     FilesOverlay.vue                         file browser + CodeMirror editor
     GitBranchChip.vue, ModelContextBadge.vue header chips / badges
     PrsOverlay.vue                           cross-repo PRs & Issues
     Wiki*View.vue, Collections*.vue, AccountingOverlay.vue   workspace views
     TimelineOverlay.vue, ToolsPane.vue, NotificationBell.vue, RemoteHostControl.vue
-    SettingsModal.vue                        ⚙ settings
+    SettingsModal.vue                        ⚙ settings — the dialog shell + section order
+    settings/                                one file per settings section (theme, sounds,
+                                             web push, google, PR repos, launchers, quick
+                                             commands, MCP, cost, shortcuts, …), plus the
+                                             shared SettingsStepper / SettingsListRow
   composables/                  useSessions, usePubSub, useGitStatus, useCost,
                                 useChatLauncher, useFilesView, useWikiBrowse,
                                 useCollectionBrowse, useNotifications, useVoiceInput, …

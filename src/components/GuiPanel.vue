@@ -1,11 +1,10 @@
 <script setup lang="ts">
-import { ref, computed, watch, onBeforeUnmount } from "vue";
+import { ref, computed, watch } from "vue";
 import { useSessionFeed } from "../composables/useSessionFeed";
-import { usePubSub } from "../composables/usePubSub";
+import { onToolGroupsAnnounced } from "../composables/useToolGroupsAnnounce";
 import { getPlugin } from "../plugins-registry";
 import PluginFrame from "./PluginFrame.vue";
 import { TOOL_GROUPS, groupOfTool, toolsInGroup } from "../../common/toolGroups";
-import { TOOL_GROUPS_CHANNEL } from "../toolGroupsChannel";
 
 // The GUI panel renders the toolResults produced by GUI-protocol plugins. It
 // mirrors the terminal's active session: live results arrive on that session's
@@ -127,14 +126,10 @@ watch(() => props.sessionId, loadAvailableTools, { immediate: true });
 
 // The answer above is normally asked BEFORE it can be true: the browser is handed a session id
 // while claude is still being spawned, so its MCP client has not connected to the group URLs yet
-// and the server has not learned which tools this cell got. The same channel the grid's Canvas
-// button waits on says when that changes.
-const { subscribe: subscribeToolGroups } = usePubSub();
-const offToolGroups = subscribeToolGroups(TOOL_GROUPS_CHANNEL, (data) => {
-  const msg = data as { sessionId?: string };
-  if (msg?.sessionId && msg.sessionId === props.sessionId) loadAvailableTools(props.sessionId);
+// and the server has not learned which tools this cell got.
+onToolGroupsAnnounced((announcement) => {
+  if (announcement.sessionId === props.sessionId) loadAvailableTools(props.sessionId);
 });
-onBeforeUnmount(() => offToolGroups());
 
 // What this session can be asked for, grouped. Ordered by TOOL_GROUPS (blast radius, least
 // first) rather than by the order the server happened to list them, so the hint does not
@@ -213,7 +208,12 @@ const hasTools = computed(() => toolSections.value.some((section) => section.too
       <!-- Guarded as well as cleared on session change: a stale view rendered under an
            "unavailable" heading would contradict it. -->
       <template v-for="r in unavailable ? [] : results" :key="r.uuid">
-        <PluginFrame v-if="getPlugin(r.toolName)" class="frame" :css="getPlugin(r.toolName)!.css" :height="getPlugin(r.toolName)!.height">
+        <PluginFrame
+          v-if="getPlugin(r.toolName)"
+          class="[&+&]:mt-4 [&+&]:border-t [&+&]:border-border [&+&]:pt-4"
+          :css="getPlugin(r.toolName)!.css"
+          :height="getPlugin(r.toolName)!.height"
+        >
           <component
             :is="getPlugin(r.toolName)!.viewComponent"
             :selected-result="r"
@@ -228,10 +228,3 @@ const hasTools = computed(() => toolSections.value.some((section) => section.too
 
 <!-- Adjacent-frame spacing is a sibling-combinator rule with no clean utility
      equivalent, so it stays scoped; everything else is utilities. -->
-<style scoped>
-.frame + .frame {
-  margin-top: 16px;
-  padding-top: 16px;
-  border-top: 1px solid var(--border);
-}
-</style>

@@ -71,6 +71,33 @@ describe("CommandCell", () => {
     expect(w.emitted("close")).toHaveLength(1);
   });
 
+  // All five chrome events now reach the parent through ONE object binding (cellChromeBinding)
+  // rather than five hand-written `@` lines. A key that binding gets wrong is a button that
+  // silently does nothing, and canvas/tools had no cell-level coverage at all — so all five are
+  // asserted, not just the two that already were.
+  it("forwards every chrome event, including the canvas and tools toggles", async () => {
+    const w = mount(CommandCell, { props: { expanded: true, filesOpen: false, canvasAvailable: true, command: COMMAND, home: "/work" } });
+    await w.find('[aria-label="Show files"]').trigger("click");
+    await w.find('[aria-label="Show canvas"]').trigger("click");
+    await w.find('[aria-label="Show tools"]').trigger("click");
+    await w.find('[aria-label="Restore terminal"]').trigger("click");
+    await w.find('[aria-label="Close terminal"]').trigger("click");
+    expect(w.emitted("toggle-files")).toHaveLength(1);
+    expect(w.emitted("toggle-canvas")).toHaveLength(1);
+    expect(w.emitted("toggle-tools")).toHaveLength(1);
+    expect(w.emitted("toggle-expand")).toHaveLength(1);
+    expect(w.emitted("close")).toHaveLength(1);
+  });
+
+  // The canvas button is disabled when the directory has no render MCP, so the binding must carry
+  // canvasAvailable through — a `true` that arrived as undefined would disable a usable button.
+  it("disables the canvas toggle when the cell has no render MCP", () => {
+    const w = mount(CommandCell, { props: { expanded: true, command: COMMAND, home: "/work" } });
+    expect(w.find('[data-testid="cell-canvas-btn"]').attributes("disabled")).toBeDefined();
+    const available = mount(CommandCell, { props: { expanded: true, canvasAvailable: true, command: COMMAND, home: "/work" } });
+    expect(available.find('[data-testid="cell-canvas-btn"]').attributes("disabled")).toBeUndefined();
+  });
+
   it("zooms on a header-background click in the normal grid (mirrors clicking the body)", async () => {
     const w = mountCell(); // expanded: false, zoomed: undefined → tiled grid
     expect(w.find(".cell-header").classes()).toContain("is-zoomable");

@@ -130,6 +130,21 @@ export function capToolOutput(output: unknown): unknown {
   return output;
 }
 
+// What the hook layer hands the call recorders. `status` is a plain string rather than the
+// hook's completed/failed union because this store only records what it was told, and
+// ToolCall.status is what it persists.
+interface ToolCallStartRecord {
+  toolUseId?: string | undefined;
+  toolName?: string | undefined;
+  toolInput?: unknown;
+}
+
+interface ToolCallEndRecord extends ToolCallStartRecord {
+  toolOutput?: unknown;
+  durationMs?: number | undefined;
+  status: string;
+}
+
 /** The panel's stores, bound to one pub/sub and one directory root. */
 export function createToolStores({ publish, root = MULMOTERMINAL_HOME }: ToolStoreDeps) {
   // GUI toolResults per session, persisted under ~/.mulmoterminal/toolresults so
@@ -154,18 +169,24 @@ export function createToolStores({ publish, root = MULMOTERMINAL_HOME }: ToolSto
     toolResultsStore.save(sessionId);
   }
 
-  // Per-session tool-call history, fed by Claude's PreToolUse/PostToolUse hooks so
-  // it captures EVERY tool call — built-ins (Bash, Read, …), the user's MCP tools,
-  // AND our GUI plugin tools — not just the GUI ones the broker sees. Published on a
-  // per-session channel the tools pane subscribes to. (The broker's toolResults
-  // store above is separate; it only drives rendering of GUI views.)
+  // Per-session tool-call history, published on a per-session channel the tools pane
+  // subscribes to. (The broker's toolResults store above is separate; it only drives
+  // rendering of GUI views.) It has two writers, and which one a session gets decides
+  // how complete its history is:
+  //
+  //   claude          — its PreToolUse/PostToolUse hooks, matcher "", so EVERY tool call:
+  //                     built-ins (Bash, Read, …), the user's MCP tools, and ours.
+  //   codex / agy     — the MCP broker, since neither has a hook mechanism. GUI tools only.
+  //
+  // Never both for one session — see mcp/gui-call-history.ts for why that would double
+  // rather than dedupe.
   //
   // Persisted under ~/.mulmoterminal/toolcalls via the same disk-backed store as
   // the toolResults, so the history survives a server reboot.
   const toolCallsStore = createSessionStore<ToolCall>("toolcalls", root);
   const TOOLCALLS_LIMIT = 200;
   // PreToolUse: a tool started. Append a "running" entry (deduped by tool_use_id).
-  async function recordToolCallStart(sessionId: string, { toolUseId, toolName, toolInput }: { toolUseId?: string; toolName?: string; toolInput?: unknown }) {
+  async function recordToolCallStart(sessionId: string, { toolUseId, toolName, toolInput }: ToolCallStartRecord) {
     const list = await toolCallsStore.get(sessionId);
     if (toolUseId && list.some((c) => c.toolUseId === toolUseId)) return;
     const call = { toolUseId, toolName, toolInput, status: "running", at: Date.now() };
@@ -179,24 +200,7 @@ export function createToolStores({ publish, root = MULMOTERMINAL_HOME }: ToolSto
   // complete the matching entry by tool_use_id (or add one if we never saw the
   // start). A failed tool fires PostToolUseFailure, NOT PostToolUse, so both route
   // here — otherwise the entry would be stuck on "running".
-  async function recordToolCallEnd(
-    sessionId: string,
-    {
-      toolUseId,
-      toolName,
-      toolInput,
-      toolOutput,
-      durationMs,
-      status,
-    }: {
-      toolUseId?: string;
-      toolName?: string;
-      toolInput?: unknown;
-      toolOutput?: unknown;
-      durationMs?: number;
-      status: string;
-    },
-  ) {
+  async function recordToolCallEnd(sessionId: string, { toolUseId, toolName, toolInput, toolOutput, durationMs, status }: ToolCallEndRecord) {
     const list = await toolCallsStore.get(sessionId);
     const output = capToolOutput(toolOutput);
     let call = toolUseId ? list.find((c) => c.toolUseId === toolUseId) : undefined;

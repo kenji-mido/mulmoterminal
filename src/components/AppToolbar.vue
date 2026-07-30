@@ -13,6 +13,8 @@ import { useAccountingView, accountingViewOpen } from "../composables/useAccount
 import { useWikiBrowse, wikiGotoIndex, wikiGotoTag } from "../composables/useWikiBrowse";
 import { usePrsView, prsGotoIndex } from "../composables/usePrsView";
 import { useSoundEnabled } from "../composables/useSoundEnabled";
+import { audioBlocked } from "../composables/audioUnlockState";
+import { soundButtonState } from "./soundButtonState";
 import { useUpdateStatus } from "../composables/useUpdateStatus";
 import { useGithubStar } from "../composables/useGithubStar";
 import { useDropdownMenu } from "../composables/useDropdownMenu";
@@ -52,6 +54,7 @@ const { isOpen: accountingOpen } = useAccountingView();
 const { isOpen: wikiOpen } = useWikiBrowse();
 const { isOpen: prsOpen } = usePrsView();
 const { enabled: soundEnabled, toggle: toggleSound } = useSoundEnabled();
+const soundButton = computed(() => soundButtonState(soundEnabled.value, audioBlocked.value));
 const { badge: updateBadge } = useUpdateStatus();
 const { visible: starVisible, confirming: starConfirming, title: starTitle, activate: activateStar } = useGithubStar();
 
@@ -239,10 +242,11 @@ function showPrs(): void {
          user has opened the repo page), so it is a one-time ask rather than a fixture. -->
     <LauncherButton v-if="inGrid && starVisible" icon="star" :title="starTitle" :label="starTitle" :active="starConfirming" @click="activateStar" />
     <LauncherButton
-      :icon="soundEnabled ? 'notifications_active' : 'notifications_off'"
-      :title="soundEnabled ? 'Attention sound on' : 'Attention sound off'"
-      :label="soundEnabled ? 'Attention sound on' : 'Attention sound off'"
-      :active="soundEnabled"
+      :icon="soundButton.icon"
+      :title="soundButton.label"
+      :label="soundButton.label"
+      :active="soundButton.active"
+      :tone="soundButton.tone"
       :aria-pressed="soundEnabled"
       @click="toggleSound"
     />

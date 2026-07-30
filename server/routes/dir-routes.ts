@@ -5,8 +5,8 @@
 // injected; the mount only needs the app.
 import type { Express, Request, Response } from "express";
 import { SESSION_ID_RE } from "../config/env.js";
-import { workspaceFromQuery, existingWorkspaceFromQuery } from "../config/workspace.js";
-import { normalizeAgent } from "./routeParams.js";
+import { existingWorkspaceFromQuery } from "../config/workspace.js";
+import { normalizeAgent, workspaceForRoute } from "./routeParams.js";
 import { getHeaderConfig, getIssueWorkComments } from "../config/config-routes.js";
 import { publicDirConfig, dirSoundFor, loadDirConfig, dirConfigDetail, MISSING_DIR_CONFIG_DETAIL } from "../config/dir-config.js";
 import { readSoundPreset } from "../config/sound-presets.js";
@@ -64,16 +64,28 @@ async function workCommentHandler(req: Request, res: Response): Promise<void> {
   res.json(result);
 }
 
+async function prPhaseHandler(req: Request, res: Response): Promise<void> {
+  const cwd = workspaceForRoute(req.query.cwd, res);
+  if (cwd === null) return;
+  const status = await gitStatus(cwd);
+  const repo = status.repo && status.branch ? repoFromWebUrl(await resolveGithubUrl(cwd)) : null;
+  // The same shape as the resolved path, not a two-field subset: a dir with no GitHub remote
+  // is a normal answer, and a route that changes its response shape by branch is a trap for
+  // the next reader of the contract (Codex review).
+  res.json(!repo || !status.branch ? { ...EMPTY_WORK_ITEM } : await phaseForRepoBranch(repo, status.branch));
+}
+
 const positiveInt = (v: unknown): number | null => (typeof v === "number" && Number.isSafeInteger(v) && v > 0 ? v : null);
 
 export function mountDirRoutes(app: Express): void {
   // GRID-ONLY (dev_tool): the `script.json` entries a cell's launcher offers for its
-  // chosen directory (?cwd=<dir>, falling back to CLAUDE_CWD). The browser shows
+  // chosen directory (?cwd=<dir>, the default workspace when none is named). The browser shows
   // these and sends back only an INDEX + the cwd (see /ws/run), so the file is the
   // allowlist of what can run. The resolved `cwd` is returned so the cell runs the
   // script in the same dir it listed scripts for.
   app.get("/api/scripts", (req, res) => {
-    const cwd = workspaceFromQuery(req.query.cwd);
+    const cwd = workspaceForRoute(req.query.cwd, res);
+    if (cwd === null) return;
     res.json({ cwd, scripts: loadScripts(cwd).map((s, index) => ({ index, label: s.label, command: s.command, cwd: s.cwd })) });
   });
 
@@ -84,7 +96,8 @@ export function mountDirRoutes(app: Express): void {
   // A per-dir `.mulmoterminal.json` `skills` allowlist narrows/orders the list;
   // absent => show all.
   app.get("/api/skills", async (req, res) => {
-    const cwd = workspaceFromQuery(req.query.cwd);
+    const cwd = workspaceForRoute(req.query.cwd, res);
+    if (cwd === null) return;
     const skills = applySkillFilter(await discoverSkills({ workspaceRoot: cwd }), loadDirConfig(cwd).skills);
     res.json({ cwd, skills });
   });
@@ -93,7 +106,8 @@ export function mountDirRoutes(app: Express): void {
   // terminal opened in this directory should use. cwd is validated like every other
   // cwd-scoped route; the raw sound path stays server-side (see /api/dir-sound).
   app.get("/api/dir-config", (req, res) => {
-    const cwd = workspaceFromQuery(req.query.cwd);
+    const cwd = workspaceForRoute(req.query.cwd, res);
+    if (cwd === null) return;
     res.json(publicDirConfig(cwd));
   });
 
@@ -101,9 +115,9 @@ export function mountDirRoutes(app: Express): void {
   // how each fared (applied / dropped in validation / not a key we read). Its own route rather
   // than fields on /api/dir-config, which every cell fetches — this re-reads the file and is
   // only wanted while the modal is open.
-  // NOT workspaceFromQuery: this route reports ON the directory it is asked about, so falling
-  // back to the default workspace would answer about a DIFFERENT directory under the requested
-  // one's name — and a preset that outlived its project is exactly when that happens.
+  // Answers about an unusable directory with the "unknown" payload rather than the 404 the
+  // routes above give it: the settings modal renders that payload as "no config here", and it
+  // asks about a directory the user is still typing.
   app.get("/api/dir-config-detail", (req, res) => {
     const cwd = existingWorkspaceFromQuery(req.query.cwd);
     res.json(cwd ? dirConfigDetail(cwd) : MISSING_DIR_CONFIG_DETAIL);
@@ -113,7 +127,8 @@ export function mountDirRoutes(app: Express): void {
   // header can show it without the user typing `git status`. A non-git dir is
   // `repo:false`, not an error.
   app.get("/api/git-status", async (req, res) => {
-    const cwd = workspaceFromQuery(req.query.cwd);
+    const cwd = workspaceForRoute(req.query.cwd, res);
+    if (cwd === null) return;
     res.json(await gitStatus(cwd));
   });
 
@@ -121,16 +136,7 @@ export function mountDirRoutes(app: Express): void {
   // to merge / merged (server/git/prPhase.ts). The cockpit roster shows it alongside the agent
   // status. Resolves the branch's repo here (same as the header's PR button); a non-repo dir,
   // detached HEAD, or non-GitHub remote yields `none`. Read-only; the gh call is cached.
-  app.get("/api/pr-phase", async (req, res) => {
-    const cwd = workspaceFromQuery(req.query.cwd);
-    const status = await gitStatus(cwd);
-    const repo = status.repo && status.branch ? repoFromWebUrl(await resolveGithubUrl(cwd)) : null;
-    // The same shape as the resolved path, not a two-field subset: a dir with no GitHub remote
-    // is a normal answer, and a route that changes its response shape by branch is a trap for
-    // the next reader of the contract (Codex review).
-    if (!repo || !status.branch) return res.json({ ...EMPTY_WORK_ITEM });
-    res.json(await phaseForRepoBranch(repo, status.branch));
-  });
+  app.get("/api/pr-phase", prPhaseHandler);
 
   app.post("/api/work-comment", workCommentHandler);
 
@@ -138,7 +144,8 @@ export function mountDirRoutes(app: Express): void {
   // dir's, with `when` evaluated and ${vars} substituted for this session's live context. `chips:null`
   // means unconfigured, so the client keeps its default header (see plans/feat-header-toolbar-config.md).
   app.get("/api/header", async (req, res) => {
-    const cwd = workspaceFromQuery(req.query.cwd);
+    const cwd = workspaceForRoute(req.query.cwd, res);
+    if (cwd === null) return;
     const session = typeof req.query.session === "string" && SESSION_ID_RE.test(req.query.session) ? req.query.session : null;
     const agent = normalizeAgent(req.query.agent);
     const model = typeof req.query.model === "string" ? req.query.model : null;
@@ -157,7 +164,8 @@ export function mountDirRoutes(app: Express): void {
   // so there's no traversal surface. 404 when unset/missing (the client falls back to
   // the global sound, then the built-in chime).
   app.get("/api/dir-sound", async (req, res) => {
-    const cwd = workspaceFromQuery(req.query.cwd);
+    const cwd = workspaceForRoute(req.query.cwd, res);
+    if (cwd === null) return;
     // An unknown/absent `kind` asks for the directory's all-kind sound, which is also what a
     // client from before #873 sends. The value only ever selects a map entry — never a path.
     const kind = isNotifyKind(req.query.kind) ? req.query.kind : null;

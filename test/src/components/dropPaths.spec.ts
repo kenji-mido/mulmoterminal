@@ -58,7 +58,12 @@ describe("toShellArg", () => {
 
 describe("toInsertText", () => {
   it("joins quoted paths with spaces", () => {
-    expect(toInsertText(["/a.txt", "/My Dir/b.txt"])).toBe("/a.txt '/My Dir/b.txt'");
+    expect(toInsertText(["/a.txt", "/My Dir/b.txt"])).toBe("/a.txt '/My Dir/b.txt' ");
+  });
+  // Two gestures in a row insert at the cursor the previous one left behind, so the separator
+  // has to be part of the insertion: pasting two screenshots (#938) otherwise reads as one name.
+  it("ends in a space, so a second insertion does not run into the first", () => {
+    expect(toInsertText(["/a.png"]) + toInsertText(["/b.png"])).toBe("/a.png /b.png ");
   });
   it("returns empty string for no paths", () => {
     expect(toInsertText([])).toBe("");
@@ -67,7 +72,7 @@ describe("toInsertText", () => {
 
 describe("dropTextFromUriList", () => {
   it("joins quoted paths with spaces", () => {
-    expect(dropTextFromUriList("file:///a.txt\nfile:///My%20Dir/b.txt")).toBe("/a.txt '/My Dir/b.txt'");
+    expect(dropTextFromUriList("file:///a.txt\nfile:///My%20Dir/b.txt")).toBe("/a.txt '/My Dir/b.txt' ");
   });
 
   it("returns empty string when no file path is present", () => {

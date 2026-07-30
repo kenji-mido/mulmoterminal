@@ -10,10 +10,6 @@ import { isRecord } from "../../common/isRecord.js";
 export interface LastTurn {
   prompt: string | null;
   reply: string | null;
-  // Set when the transcript was refused for its size rather than read (see
-  // sessionLastTurn). Absent means "read it, and this is what was in it" — including the
-  // ordinary empty result, which a caller must not report as a failure.
-  tooLarge?: true;
 }
 
 export const EMPTY_TURN: LastTurn = { prompt: null, reply: null };

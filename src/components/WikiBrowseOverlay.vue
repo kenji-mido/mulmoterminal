@@ -11,19 +11,18 @@ import { ref, watch } from "vue";
 import type { WikiGraph } from "@mulmoclaude/core/wiki";
 import { useWikiBrowse, wikiGotoIndex, wikiGotoGraph, wikiGotoLint, type WikiView } from "../composables/useWikiBrowse";
 import { useEscapeToClose } from "../composables/useEscapeToClose";
-import { fetchWikiIndex, fetchWikiGraph, fetchWikiPage, fetchWikiLint, type WikiIndex, type WikiPage, type WikiLint } from "../wikiApi";
-import { renderWikiHtml } from "../wikiMarkdown";
+import { fetchWikiIndex, fetchWikiGraph, fetchWikiPage, fetchWikiLint, type WikiIndex, type WikiPage } from "../wikiApi";
 import WikiIndexView from "./WikiIndexView.vue";
 import WikiPageView from "./WikiPageView.vue";
 import WikiGraphView from "./WikiGraphView.vue";
+import WikiProse from "./WikiProse.vue";
 
 const { view, isOpen, close } = useWikiBrowse();
 
 const index = ref<WikiIndex | null>(null);
 const graph = ref<WikiGraph | null>(null);
 const page = ref<WikiPage | null>(null);
-const lint = ref<WikiLint | null>(null);
-const lintHtml = ref("");
+const lintReport = ref("");
 const loading = ref(false);
 const error = ref<string | null>(null);
 
@@ -51,11 +50,14 @@ async function loadGraph(): Promise<Commit> {
   const g = await fetchWikiGraph();
   return () => (graph.value = g);
 }
+// The graph comes along for the ride because the report's `[[broken link]]` mentions are
+// live links here too: without it a target that only resolves by title would navigate to a
+// slug that does not exist, so a link would behave differently than in the page body.
 async function loadLint(): Promise<Commit> {
-  const l = await fetchWikiLint();
+  const [l, g] = await Promise.all([fetchWikiLint(), fetchWikiGraph()]);
   return () => {
-    lint.value = l;
-    lintHtml.value = renderWikiHtml(l.report);
+    lintReport.value = l.report;
+    graph.value = g;
   };
 }
 
@@ -152,24 +154,10 @@ useEscapeToClose(isOpen, close);
         <WikiIndexView v-if="view.mode === 'index' && index" :entries="index.entries" />
         <WikiPageView v-else-if="view.mode === 'page' && page" :slug="view.slug" :page="page" :graph="graph" />
         <WikiGraphView v-else-if="view.mode === 'graph' && graph" :graph="graph" />
-        <!-- eslint-disable-next-line vue/no-v-html -- sanitized in renderWikiHtml -->
-        <div v-else-if="view.mode === 'lint'" class="wiki-lint mx-auto max-w-[820px] px-7 pt-6 pb-16 text-[14px] leading-[1.6] text-fg" v-html="lintHtml"></div>
+        <div v-else-if="view.mode === 'lint'" class="mx-auto max-w-[820px] px-7 pt-6 pb-16 text-fg">
+          <WikiProse :markdown="lintReport" :graph="graph" />
+        </div>
       </template>
     </div>
   </div>
 </template>
-
-<!-- Only the lint markdown body stays scoped: it's v-html, so its elements
-     can't carry utilities and must be reached via :deep. -->
-<style scoped>
-.wiki-lint :deep(h1),
-.wiki-lint :deep(h2) {
-  font-weight: 650;
-  margin: 1.2em 0 0.4em;
-}
-.wiki-lint :deep(code) {
-  background: var(--bg-subtle);
-  padding: 0.1em 0.35em;
-  border-radius: 4px;
-}
-</style>

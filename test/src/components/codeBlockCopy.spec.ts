@@ -20,12 +20,6 @@ describe("copyOutcomeFor", () => {
     expect(copyOutcomeFor({ reply: "I changed three files and pushed." })).toEqual({ kind: "no-code" });
   });
 
-  // The size refusal rides on the same response as the turn, and the reply it comes with is
-  // necessarily empty — so it has to be read FIRST or it reads as "no completed turn".
-  it("reports too-large ahead of the empty reply that comes with it", () => {
-    expect(copyOutcomeFor({ reply: null, tooLarge: true })).toEqual({ kind: "too-large" });
-  });
-
   it.each([
     ["a session with nothing on disk yet", null],
     ["an empty reply", ""],
@@ -37,15 +31,12 @@ describe("copyOutcomeFor", () => {
 describe("copyOutcomeMessage", () => {
   // Every outcome must say something. A missing case would surface as an empty toast, which is
   // exactly the "the button does nothing" complaint this feature is meant to avoid.
-  it.each<CopyOutcome>([{ kind: "ok", text: "x", lang: null }, { kind: "no-code" }, { kind: "too-large" }, { kind: "no-turn" }])(
-    "has a message for %o",
-    (outcome) => {
-      expect(copyOutcomeMessage(outcome).length).toBeGreaterThan(0);
-    },
-  );
+  it.each<CopyOutcome>([{ kind: "ok", text: "x", lang: null }, { kind: "no-code" }, { kind: "no-turn" }])("has a message for %o", (outcome) => {
+    expect(copyOutcomeMessage(outcome).length).toBeGreaterThan(0);
+  });
 
   it("does not call any of them a failure — none is something a retry fixes", () => {
-    const messages = (["no-code", "too-large", "no-turn"] as const).map((kind) => copyOutcomeMessage({ kind }));
+    const messages = (["no-code", "no-turn"] as const).map((kind) => copyOutcomeMessage({ kind }));
     messages.forEach((m) => expect(m.toLowerCase()).not.toContain("error"));
   });
 });
@@ -69,7 +60,7 @@ describe("the manual-copy dialog", () => {
   const withoutClipboard = async () => {
     vi.stubGlobal("navigator", { ...navigator, clipboard: undefined });
     vi.doMock("../../../src/composables/useHandoff", () => ({
-      fetchLastTurn: async () => ({ prompt: null, reply: REPLY, text: "", tooLarge: false }),
+      fetchLastTurn: async () => ({ prompt: null, reply: REPLY, text: "" }),
     }));
     const { default: CopyCodeBlock } = await import("../../../src/components/CopyCodeBlock.vue");
     const w = mount(CopyCodeBlock, { props: { sessionId: "s", cwd: "/x", agent: "claude" as const } });

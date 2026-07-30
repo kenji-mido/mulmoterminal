@@ -89,14 +89,18 @@ function makeRes(): FakeRes {
 }
 
 type RouteHandler = (req: { headers: { origin?: string }; body: unknown }, res: FakeRes) => unknown;
+type MountedHandler = (req: { headers: { origin?: string }; body: unknown; method: string; path: string }, res: FakeRes) => unknown;
 
 // Capture the route's handler so it can be invoked with mock req/res — no HTTP
 // server needed (mirrors how the other server specs exercise units directly).
+// The captured handler is wrapped to carry the method and path Express would have set: the
+// origin guard reads both, since it is the same rule the central gate applies (a safe method
+// is never judged by origin).
 function captureHandler(isAllowedOrigin: (o?: string) => boolean): RouteHandler {
   let handler: RouteHandler | undefined;
   const app = {
-    post(_path: string, h: RouteHandler) {
-      handler = h;
+    post(routePath: string, h: MountedHandler) {
+      handler = (req, res) => h({ ...req, method: "POST", path: routePath }, res);
     },
   } as unknown as Express;
   mountGitRemoteRoute(app, { isAllowedOrigin });

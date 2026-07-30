@@ -697,7 +697,9 @@ describe("submitText / pasteAndSubmit — delayed submit follows terminalSubmit 
       setTerminalSubmitMode("esc-cr");
       const ws = openCell("cell-st", target(null));
       expect(conn.submitText("cell-st", "/compact")).toBe(true);
-      expect(ws.sent).toEqual([JSON.stringify({ type: "input", data: "/compact" })]); // submit not yet
+      // The trailing space is the #1142 guard: `/compact` alone leaves Claude's command menu
+      // open, and while it is open the ESC of the ESC+CR submit is eaten as the menu's dismiss.
+      expect(ws.sent).toEqual([JSON.stringify({ type: "input", data: "/compact " })]); // submit not yet
       vi.advanceTimersByTime(60);
       expect(ws.sent).toContain(JSON.stringify({ type: "input", data: submitSequence("esc-cr") }));
       conn.release("cell-st");
@@ -747,6 +749,72 @@ describe("submitText / pasteAndSubmit — delayed submit follows terminalSubmit 
       vi.useRealTimers();
     }
   });
+
+  // #1142: the Skill menu types `/<slug>` through submitText, so this path has the same dead end
+  // as the phone's — Claude keeps the command menu open on a bare `/slug` and eats the ESC of an
+  // ESC+CR submit. The guard space is mode-independent: a cr host submits the same line either
+  // way, so both modes send it rather than the guard depending on a setting.
+  it.each(["cr", "esc-cr"] as const)("submitText: the skill seed carries the completion guard in %s mode", (mode) => {
+    vi.useFakeTimers();
+    try {
+      setTerminalSubmitMode(mode);
+      const ws = openCell(`cell-guard-${mode}`, target(null));
+      conn.submitText(`cell-guard-${mode}`, "/mulmoterminal-decisions");
+      expect(ws.sent[0]).toBe(JSON.stringify({ type: "input", data: "/mulmoterminal-decisions " }));
+      conn.release(`cell-guard-${mode}`);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The guard is Claude Code's behaviour, so a shell cell's bytes stay exactly what was asked for:
+  // measured in a live zsh, `echo foo\` + CR waits at a continuation prompt while `echo foo\ ` + CR
+  // runs and prints `foo`. Same scoping as the submit bytes above (isClaudeTarget).
+  it("submitText: a shell cell's line end is left untouched", () => {
+    vi.useFakeTimers();
+    try {
+      const ws = openCell("cell-sh-guard", { ...target(null), launcher: { shell: true as const } });
+      conn.submitText("cell-sh-guard", "echo foo\\");
+      expect(ws.sent[0]).toBe(JSON.stringify({ type: "input", data: "echo foo\\" }));
+      conn.release("cell-sh-guard");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("pasteAndSubmit: a shell cell's paste is byte-exact too", () => {
+    vi.useFakeTimers();
+    try {
+      const ws = openCell("cell-sh-ps", { ...target(null), launcher: { shell: true as const } });
+      conn.pasteAndSubmit("cell-sh-ps", "echo foo\\");
+      expect(ws.sent[0]).toBe(JSON.stringify({ type: "input", data: "\x1b[200~echo foo\\\x1b[201~" }));
+      conn.release("cell-sh-ps");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("pasteAndSubmit: the guard rides inside the bracketed paste, not after the terminator", () => {
+    vi.useFakeTimers();
+    try {
+      const ws = openCell("cell-ps2", target(null));
+      conn.pasteAndSubmit("cell-ps2", "read @common/terminalSubmit.ts");
+      expect(ws.sent[0]).toBe(JSON.stringify({ type: "input", data: "\x1b[200~read @common/terminalSubmit.ts \x1b[201~" }));
+      conn.release("cell-ps2");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // insertText / pasteText hand the user a draft to read and send themselves, so they must keep
+  // exactly what was handed over — a guard space belongs only where WE press Enter.
+  it("insertText and pasteText leave the text untouched", () => {
+    const ws = openCell("cell-ins", target(null));
+    conn.insertText("cell-ins", "/compact");
+    conn.pasteText("cell-ins", "line1\nline2");
+    expect(ws.sent).toEqual([JSON.stringify({ type: "input", data: "/compact" }), JSON.stringify({ type: "input", data: "\x1b[200~line1\nline2\x1b[201~" })]);
+    conn.release("cell-ins");
+  });
 });
 
 // terminalSubmit is Claude's binding, so it must apply only to Claude cells — a shell /
@@ -763,7 +831,8 @@ describe("isClaudeTarget", () => {
   it("is false for shell / codex / command / dev-terminal cells", () => {
     expect(conn.isClaudeTarget({ ...base, launcher: { shell: true } })).toBe(false);
     expect(conn.isClaudeTarget({ ...base, launcher: { index: 0 } })).toBe(false);
-    expect(conn.isClaudeTarget({ ...base, codex: true })).toBe(false);
+    expect(conn.isClaudeTarget({ ...base, agent: "codex" })).toBe(false);
+    expect(conn.isClaudeTarget({ ...base, agent: "antigravity" })).toBe(false);
     expect(conn.isClaudeTarget({ ...base, command: { source: "script", index: 0, label: "dev", cwd: null } })).toBe(false);
     expect(conn.isClaudeTarget({ ...base, devTerminal: true })).toBe(false);
   });

@@ -1,6 +1,11 @@
-import { describe, it, expect, vi } from "vitest";
-import { startRateLimitProbe } from "./rate-limit-probe";
+import { describe, it, expect, vi, afterEach } from "vitest";
+import { startRateLimitProbe, PROBE_PROMPT } from "./rate-limit-probe";
 import { createRateLimitStore } from "./rate-limit-store";
+
+const CR = "\r";
+const ESC_CR = "\x1b\r";
+// Past BOOT_MS + TYPE_TO_SUBMIT_MS (4000 + 800), well short of PROBE_TIMEOUT_MS.
+const PAST_SUBMIT_MS = 5000;
 
 const deps = (over: Partial<Parameters<typeof startRateLimitProbe>[0]> = {}) => ({
   spawn: () => ({ write: () => {}, kill: () => {} }),
@@ -9,6 +14,7 @@ const deps = (over: Partial<Parameters<typeof startRateLimitProbe>[0]> = {}) => 
   cwd: "/tmp",
   sessionId: "s",
   onSettled: () => {},
+  submitSequence: () => CR,
   ...over,
 });
 
@@ -63,6 +69,53 @@ describe("startRateLimitProbe", () => {
     );
     expect(() => stop()).not.toThrow();
     expect(onSettled).toHaveBeenCalledTimes(1);
+  });
+});
+
+// The probe drives a real `claude` TUI, so it has to submit the way THAT host's Claude submits: on
+// an `esc-cr` host a bare CR is the newline, and the question would be typed but never asked — the
+// probe could then only time out, leaving the gauge stale with nothing on screen to say why (#1148).
+describe("submitting the probe's question", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  const askWith = (submitSequence: () => string) => {
+    vi.useFakeTimers();
+    const writes: string[] = [];
+    const stop = startRateLimitProbe(deps({ spawn: () => ({ write: (data: string) => writes.push(data), kill: () => {} }), submitSequence }));
+    vi.advanceTimersByTime(PAST_SUBMIT_MS);
+    stop();
+    return writes;
+  };
+
+  it("submits with the host's ESC+CR", () => {
+    expect(askWith(() => ESC_CR)).toEqual([PROBE_PROMPT, ESC_CR]);
+  });
+
+  it("submits with a plain CR on a default host", () => {
+    expect(askWith(() => CR)).toEqual([PROBE_PROMPT, CR]);
+  });
+
+  // Read per probe, so a `terminalSubmit` edit applies to the next refresh without a restart.
+  it("resolves the sequence when it submits, not when the probe starts", () => {
+    vi.useFakeTimers();
+    const writes: string[] = [];
+    let mode = CR;
+    const stop = startRateLimitProbe(deps({ spawn: () => ({ write: (data: string) => writes.push(data), kill: () => {} }), submitSequence: () => mode }));
+    mode = ESC_CR;
+    vi.advanceTimersByTime(PAST_SUBMIT_MS);
+    stop();
+    expect(writes[1]).toBe(ESC_CR);
+  });
+
+  it("neither types nor submits once the probe has been stopped", () => {
+    vi.useFakeTimers();
+    const writes: string[] = [];
+    const stop = startRateLimitProbe(deps({ spawn: () => ({ write: (data: string) => writes.push(data), kill: () => {} }), submitSequence: () => ESC_CR }));
+    stop();
+    vi.advanceTimersByTime(PAST_SUBMIT_MS);
+    expect(writes).toEqual([]);
   });
 });
 

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { nextTick } from "vue";
 import { flushPromises } from "@vue/test-utils";
-import { mergeStable, isUnread, useSessions, type Session } from "../../../src/composables/useSessions";
+import { mergeStable, isBackground, isUnread, matchesFilter, useSessions, type Session } from "../../../src/composables/useSessions";
 
 function row(id: string): Session {
   return { id, title: id, mtime: 1, working: false, waiting: false };
@@ -18,6 +18,51 @@ describe("isUnread", () => {
 
   it("is false for a hidden background worker even when waiting (the bug fix)", () => {
     expect(isUnread({ ...row("a"), waiting: true, hidden: true })).toBe(false);
+  });
+});
+
+describe("isBackground", () => {
+  it("is true for a hidden worker", () => {
+    expect(isBackground({ ...row("a"), hidden: true })).toBe(true);
+  });
+
+  it("is false for a session the user started", () => {
+    expect(isBackground(row("a"))).toBe(false);
+  });
+});
+
+describe("matchesFilter", () => {
+  const chat = row("chat");
+  const worker = { ...row("worker"), hidden: true };
+  const waitingChat = { ...row("waiting"), waiting: true };
+  const waitingWorker = { ...row("waiting-worker"), waiting: true, hidden: true };
+
+  // The point of the feature: the default chip is the user's own chats, so a collection
+  // refreshing on a schedule stops filling the history (#1060).
+  it("excludes background workers from the default chip", () => {
+    expect(matchesFilter(chat, "all")).toBe(true);
+    expect(matchesFilter(worker, "all")).toBe(false);
+  });
+
+  it("shows only background workers under the background chip", () => {
+    expect(matchesFilter(worker, "background")).toBe(true);
+    expect(matchesFilter(chat, "background")).toBe(false);
+  });
+
+  // A background worker sitting at a permission prompt is `waiting`; it is still not
+  // something to read, so unread stays what isUnread says.
+  it("keeps unread free of background workers", () => {
+    expect(matchesFilter(waitingChat, "unread")).toBe(true);
+    expect(matchesFilter(waitingWorker, "unread")).toBe(false);
+    expect(matchesFilter(chat, "unread")).toBe(false);
+  });
+
+  // Every row the server sends is reachable from some chip — otherwise a session exists
+  // that cannot be opened, and a MulmoTerminal session is a live terminal.
+  it("matches every row under exactly one of all/background", () => {
+    for (const s of [chat, worker, waitingChat, waitingWorker]) {
+      expect(matchesFilter(s, "all")).not.toBe(matchesFilter(s, "background"));
+    }
   });
 });
 

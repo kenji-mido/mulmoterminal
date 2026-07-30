@@ -1,34 +1,14 @@
 <script setup lang="ts">
-import { computed, ref, toRef, watch } from "vue";
-import DirBadge from "./DirBadge.vue";
-import { useCellChrome } from "../composables/useCellChrome";
+import { ref, watch } from "vue";
 import TerminalView from "./Terminal.vue";
-import CellChromeButtons from "./CellChromeButtons.vue";
+import CellShell from "./CellShell.vue";
+import { cellShellEvents } from "./cellChromeBinding";
 import type { RunCommand } from "./runCommand";
-import { formatCwd } from "./cwdDisplay";
-import { shouldZoomOnHeaderClick } from "./cellHeaderZoom";
 import type { GridCellEmits, GridCellProps } from "./gridCell";
 import { browserLocale } from "../utils/browserLocale";
 import { isRecord } from "../../common/isRecord";
 import { commandExitKind, notifySound } from "../composables/notifySound";
-import {
-  CELL_ACTIONS,
-  CELL_BTN,
-  CELL_BTN_BOX,
-  CELL_BTN_INK,
-  CELL_BTN_SIZE,
-  CELL_CMD,
-  CELL_DIR,
-  CELL_DIR_PATH,
-  CELL_DOT,
-  CELL_DOT_IDLE,
-  CELL_DOT_WORKING,
-  CELL_FRAME,
-  CELL_INNER,
-  CELL_HEADER,
-  CELL_HEADER_ZOOMABLE,
-  CELL_TERM,
-} from "./cellChromeClasses";
+import { CELL_BTN, CELL_BTN_BOX, CELL_BTN_INK, CELL_BTN_SIZE, CELL_TERM } from "./cellChromeClasses";
 
 // The summarize button's own colours, and the smaller close button on the summary panel. One complete
 // string per state rather than a base plus an override: two utilities for the same property
@@ -50,16 +30,12 @@ const props = defineProps<
 >();
 const emit = defineEmits<GridCellEmits>();
 
+const shellEvents = cellShellEvents(emit);
+
 // connectKey forces Terminal.vue to (re)connect — bumped to re-run after exit.
 const connectKey = ref(0);
 const finished = ref(false);
 const termRef = ref<InstanceType<typeof TerminalView>>();
-
-// Same as LauncherCell (#914): the badge belongs to this cell's header, so it reads the config
-// here. A getter ref because the cwd lives inside the `command` object.
-const { config: dirConfig, cellStyle, headerStyle } = useCellChrome(toRef(() => props.command.cwd));
-
-const dirDisplay = computed(() => formatCwd(props.command.cwd, props.home));
 
 // A running command counts as "working"; once it exits it's idle (never "waiting").
 watch(finished, (done) => emit("status", done ? "idle" : "working"), { immediate: true });
@@ -156,117 +132,94 @@ function copyPrompt() {
       // clipboard blocked (no focus / permission) — leave the button label unchanged
     });
 }
-
-// Clicking the header background zooms (switches to) this cell, except the already-
-// expanded one. Buttons keep their action.
-function onHeaderClick(event: MouseEvent) {
-  if (shouldZoomOnHeaderClick(event.target, props.expanded)) emit("toggle-expand");
-}
 </script>
 
 <template>
-  <div class="cell" :class="CELL_FRAME" :style="cellStyle">
-    <div :class="CELL_INNER">
-      <div class="cell-header" :class="[CELL_HEADER, expanded ? '' : `is-zoomable ${CELL_HEADER_ZOOMABLE}`]" :style="headerStyle" @click="onHeaderClick">
-        <span
-          class="cell-dot"
-          :class="[CELL_DOT, finished ? `is-idle ${CELL_DOT_IDLE}` : `is-working ${CELL_DOT_WORKING}`]"
-          :title="finished ? 'Finished' : 'Running…'"
-        />
-        <span v-if="dirDisplay" class="cell-dir" :class="CELL_DIR" :title="command.cwd ?? ''"
-          ><span class="cell-dir-path" :class="CELL_DIR_PATH">{{ dirDisplay }}</span></span
+  <CellShell
+    :expanded="expanded"
+    :files-open="filesOpen"
+    :right-pane="rightPane"
+    :canvas-available="canvasAvailable"
+    :home="home"
+    :cwd="command.cwd"
+    :finished="finished"
+    idle-title="Finished"
+    icon="play_arrow"
+    :label="command.label"
+    move-noun="command"
+    :reorderable="reorderable"
+    v-on="shellEvents"
+  >
+    <template #actions>
+      <button v-if="finished" class="cell-btn" :class="CELL_BTN" title="Re-run" aria-label="Re-run command" @click="rerun">
+        <span class="material-symbols-outlined" aria-hidden="true">refresh</span>
+      </button>
+      <button
+        class="cell-btn cell-summarize"
+        :class="summaryState === 'loading' ? `is-busy ${SUMMARIZE_BUSY}` : SUMMARIZE_READY"
+        title="Summarize output (AI)"
+        aria-label="Summarize command output"
+        :disabled="summaryState === 'loading'"
+        @click="summarize"
+      >
+        <span class="material-symbols-outlined" aria-hidden="true">{{ summaryState === "loading" ? "more_horiz" : "auto_awesome" }}</span>
+      </button>
+    </template>
+    <TerminalView
+      ref="termRef"
+      class="cell-term"
+      :class="CELL_TERM"
+      :session-id="null"
+      :connect-key="connectKey"
+      :cwd="command.cwd"
+      :command="command"
+      :expanded="expanded"
+      :zoomed="zoomed"
+      @exit="onExit"
+    />
+    <div v-if="showSummary" data-testid="cell-summary" class="flex max-h-[40%] min-h-0 flex-none flex-col border-t border-t-[#2a2a4e] bg-[#141b33]">
+      <div class="flex flex-none items-center justify-between border-b border-b-[#232a48] py-0.5 pl-2.5 pr-1.5">
+        <span class="inline-flex items-center gap-1 font-sans text-[11px] font-semibold text-[#9db4ff]"
+          ><span class="material-symbols-outlined" aria-hidden="true">auto_awesome</span> Summary</span
         >
-        <DirBadge :name="dirConfig.name" :color="dirConfig.badgeColor" />
-        <span class="cell-cmd" :class="CELL_CMD"><span class="material-symbols-outlined" aria-hidden="true">play_arrow</span> {{ command.label }}</span>
-        <span class="cell-actions" :class="CELL_ACTIONS">
-          <button v-if="reorderable" class="cell-btn" :class="CELL_BTN" title="Move left" aria-label="Move command left" @click="emit('move', -1)">
-            <span class="material-symbols-outlined" aria-hidden="true">chevron_left</span>
-          </button>
-          <button v-if="reorderable" class="cell-btn" :class="CELL_BTN" title="Move right" aria-label="Move command right" @click="emit('move', 1)">
-            <span class="material-symbols-outlined" aria-hidden="true">chevron_right</span>
-          </button>
-          <button v-if="finished" class="cell-btn" :class="CELL_BTN" title="Re-run" aria-label="Re-run command" @click="rerun">
-            <span class="material-symbols-outlined" aria-hidden="true">refresh</span>
-          </button>
-          <button
-            class="cell-btn cell-summarize"
-            :class="summaryState === 'loading' ? `is-busy ${SUMMARIZE_BUSY}` : SUMMARIZE_READY"
-            title="Summarize output (AI)"
-            aria-label="Summarize command output"
-            :disabled="summaryState === 'loading'"
-            @click="summarize"
-          >
-            <span class="material-symbols-outlined" aria-hidden="true">{{ summaryState === "loading" ? "more_horiz" : "auto_awesome" }}</span>
-          </button>
-          <CellChromeButtons
-            :expanded="expanded"
-            :files-open="filesOpen"
-            :right-pane="rightPane"
-            :canvas-available="canvasAvailable"
-            @toggle-expand="emit('toggle-expand')"
-            @toggle-files="emit('toggle-files')"
-            @toggle-canvas="emit('toggle-canvas')"
-            @toggle-tools="emit('toggle-tools')"
-            @close="emit('close')"
-          />
-        </span>
+        <button class="cell-btn cell-summary-close" :class="SUMMARY_CLOSE_BTN" title="Dismiss summary" aria-label="Dismiss summary" @click="closeSummary">
+          <span class="material-symbols-outlined" aria-hidden="true">close</span>
+        </button>
       </div>
-      <TerminalView
-        ref="termRef"
-        class="cell-term"
-        :class="CELL_TERM"
-        :session-id="null"
-        :connect-key="connectKey"
-        :cwd="command.cwd"
-        :command="command"
-        :expanded="expanded"
-        :zoomed="zoomed"
-        @exit="onExit"
-      />
-      <div v-if="showSummary" data-testid="cell-summary" class="flex max-h-[40%] min-h-0 flex-none flex-col border-t border-t-[#2a2a4e] bg-[#141b33]">
-        <div class="flex flex-none items-center justify-between border-b border-b-[#232a48] py-0.5 pl-2.5 pr-1.5">
-          <span class="inline-flex items-center gap-1 font-sans text-[11px] font-semibold text-[#9db4ff]"
-            ><span class="material-symbols-outlined" aria-hidden="true">auto_awesome</span> Summary</span
-          >
-          <button class="cell-btn cell-summary-close" :class="SUMMARY_CLOSE_BTN" title="Dismiss summary" aria-label="Dismiss summary" @click="closeSummary">
-            <span class="material-symbols-outlined" aria-hidden="true">close</span>
-          </button>
-        </div>
-        <div class="min-h-0 flex-auto overflow-auto px-2.5 pb-2 pt-1.5">
-          <span v-if="summaryState === 'loading'" class="font-sans text-[12px] text-[#7f88ad]">Summarizing…</span>
-          <p
-            v-else-if="summaryState === 'error'"
-            data-testid="cell-summary-error"
-            class="m-0 font-mono text-[12px] text-[#ff8a8a] whitespace-pre-wrap [word-break:break-word]"
-          >
-            {{ summaryError }}
-          </p>
-          <template v-else>
-            <!-- v-text (not {{ }}): keeps the summary's exact bytes and is immune to a
+      <div class="min-h-0 flex-auto overflow-auto px-2.5 pb-2 pt-1.5">
+        <span v-if="summaryState === 'loading'" class="font-sans text-[12px] text-[#7f88ad]">Summarizing…</span>
+        <p
+          v-else-if="summaryState === 'error'"
+          data-testid="cell-summary-error"
+          class="m-0 font-mono text-[12px] text-[#ff8a8a] whitespace-pre-wrap [word-break:break-word]"
+        >
+          {{ summaryError }}
+        </p>
+        <template v-else>
+          <!-- v-text (not {{ }}): keeps the summary's exact bytes and is immune to a
                formatter wrapping the interpolation onto its own indented line inside <pre>. -->
-            <pre
-              data-testid="cell-summary-text"
-              class="m-0 font-mono text-[12px] leading-[1.5] text-[#d6dcf5] whitespace-pre-wrap [word-break:break-word]"
-              v-text="summaryText"
-            ></pre>
-            <p v-if="summaryTruncated" data-testid="cell-summary-note" class="mt-1.5 font-sans text-[11px] text-[#7f88ad]">
-              (long output — summarized the tail only)
-            </p>
-            <div class="mt-2 flex justify-end">
-              <button
-                type="button"
-                data-testid="cell-summary-continue"
-                class="inline-flex cursor-pointer items-center gap-1 rounded-md border border-[#3b4a7a] bg-[#232a45] px-2.5 py-1 font-sans text-[12px] text-[#cdd6ff] hover:bg-[#2c355a]"
-                title="Copy this as a prompt to paste into a Claude session"
-                @click="copyPrompt"
-              >
-                <span class="material-symbols-outlined" aria-hidden="true">{{ copied ? "check" : "content_copy" }}</span>
-                {{ copied ? "Copied" : "Copy as prompt" }}
-              </button>
-            </div>
-          </template>
-        </div>
+          <pre
+            data-testid="cell-summary-text"
+            class="m-0 font-mono text-[12px] leading-[1.5] text-[#d6dcf5] whitespace-pre-wrap [word-break:break-word]"
+            v-text="summaryText"
+          ></pre>
+          <p v-if="summaryTruncated" data-testid="cell-summary-note" class="mt-1.5 font-sans text-[11px] text-[#7f88ad]">
+            (long output — summarized the tail only)
+          </p>
+          <div class="mt-2 flex justify-end">
+            <button
+              type="button"
+              data-testid="cell-summary-continue"
+              class="inline-flex cursor-pointer items-center gap-1 rounded-md border border-[#3b4a7a] bg-[#232a45] px-2.5 py-1 font-sans text-[12px] text-[#cdd6ff] hover:bg-[#2c355a]"
+              title="Copy this as a prompt to paste into a Claude session"
+              @click="copyPrompt"
+            >
+              <span class="material-symbols-outlined" aria-hidden="true">{{ copied ? "check" : "content_copy" }}</span>
+              {{ copied ? "Copied" : "Copy as prompt" }}
+            </button>
+          </div>
+        </template>
       </div>
     </div>
-  </div>
+  </CellShell>
 </template>

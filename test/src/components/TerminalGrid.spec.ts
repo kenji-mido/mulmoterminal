@@ -77,6 +77,7 @@ const rosterRow = (uid: number, over: Partial<CockpitRow> = {}): CockpitRow => (
   cwd: "/work",
   agent: "claude",
   status: "idle",
+  memo: null,
   summary: null,
   prompt: null,
   response: null,
@@ -270,6 +271,27 @@ describe("grid cockpit (list view)", () => {
     for (const row of w.findAll('[data-testid="cockpit-row"]')) expect(row.classes()).toContain("shrink-0");
   });
 
+  // #1131: the row's status used to live only in an 8px dot and a 10px badge, on a bar painted with
+  // the DIRECTORY's colour — so it was invisible at the scale you scan the list at. Asserting on the
+  // row itself, and asserting that the row you are IN stays out of it: that edge already means
+  // "you are here".
+  it("marks a waiting row on the row itself, and leaves the expanded row alone", async () => {
+    const w = mountCockpit([cell(0, "s0"), cell(1, "s1"), cell(2, "s2")], 0, [
+      rosterRow(0, { status: "blocked" }), // expanded AND blocked — the expanded rule wins
+      rosterRow(1, { status: "blocked" }),
+      rosterRow(2, { status: "done" }),
+    ]);
+    await nextTick();
+    const rows = w.findAll('[data-testid="cockpit-row"]');
+    expect(rows[0].classes()).toContain("border-l-[#4a9eff]");
+    expect(rows[0].classes()).not.toContain("animate-roster-alert");
+    expect(rows[1].classes()).toContain("animate-roster-alert");
+    expect(rows[1].classes()).toContain("border-l-[#f59e0b]");
+    // The weak half of the split: finished is coloured, but it does not move.
+    expect(rows[2].classes()).toContain("border-l-[#22c55e]");
+    expect(rows[2].classes()).not.toContain("animate-roster-alert");
+  });
+
   it("emits toggle-expand when a NON-active row is clicked, and not for the active one", async () => {
     const w = mountCockpit([cell(0, "s0"), cell(1, "s1")], 0, [rosterRow(0), rosterRow(1)]);
     await nextTick();
@@ -286,6 +308,41 @@ describe("grid cockpit (list view)", () => {
     const lines = w.findAll('[data-testid="cockpit-line"]').map((l) => l.text());
     expect(lines.some((t) => t.includes("summary"))).toBe(false); // no summary line
     expect(lines.some((t) => t.includes("prompt") && t.includes("bash"))).toBe(true); // fallback in the prompt line
+  });
+
+  // The memo is the one line in a row the USER wrote; everything below it is what the agent said.
+  // Asserting the ORDER, not just presence: reading it first is the whole point of the feature
+  // (#1105), and a row that buries it under the agent's summary answers the wrong question.
+  it("puts the user's memo above the summary, and omits the line when there is none", async () => {
+    const w = mountCockpit([cell(0, "s0")], 0, [rosterRow(0, { memo: "ship before the demo", summary: "Login fix", prompt: "fix login" })]);
+    await nextTick();
+    expect(w.get('[data-testid="cockpit-memo"]').text()).toContain("ship before the demo");
+    const texts = w
+      .get('[data-testid="cockpit-row"]')
+      .findAll("span")
+      .map((s) => s.text());
+    const indexOf = (needle: string) => texts.findIndex((t) => t.includes(needle));
+    expect(indexOf("ship before the demo")).toBeLessThan(indexOf("Login fix"));
+
+    const bare = mountCockpit([cell(0, "s0")], 0, [rosterRow(0, { summary: "Login fix" })]);
+    await nextTick();
+    expect(bare.find('[data-testid="cockpit-memo"]').exists()).toBe(false);
+  });
+
+  // The memo must stay OUT of the clamped set: normalizeMemo already caps it at one line of 200
+  // code points, and `cockpitLines` is the knob for agent text of no bounded length. A memo that
+  // joined the clamped lines would also shift what the three configured counts land on.
+  it("leaves the memo unclamped, so the configured counts still land on summary / prompt / reply", async () => {
+    setCockpitLines({ summary: 6, prompt: 1, response: 9 });
+    const w = mountCockpit([cell(0, "s0")], 0, [rosterRow(0, { memo: "mine", summary: "s", prompt: "p", response: "r" })]);
+    await nextTick();
+    expect(w.findAll('[data-testid="cockpit-line"]').map((l) => l.attributes("style"))).toEqual([
+      "--cockpit-lines: 6;",
+      "--cockpit-lines: 1;",
+      "--cockpit-lines: 9;",
+    ]);
+    expect(w.get('[data-testid="cockpit-memo"]').classes()).not.toContain("line-clamp-[var(--cockpit-lines)]");
+    setCockpitLines(undefined); // leave the singleton as the next test expects to find it
   });
 
   // The clamp is a runtime value, so it reaches the DOM as a CSS variable the Tailwind utility
@@ -674,12 +731,27 @@ describe("file pane beside the enlarged cell", () => {
 // window, or the other zoom mode. Without a clamp at open time it is applied as-is, and a
 // remembered 900px against a 1000px row leaves the terminal 100px wide (xterm reflow garbage).
 describe("file pane width restored from storage", () => {
-  const ROW = 1000;
+  // The roster splits the STAGE and the pane splits the row inside it (#1077), so the two widths
+  // have to agree the way the real layout makes them agree: one stubbed width for every element
+  // would have the roster and the pane dividing the same pixels, and the pane's numbers would be
+  // measuring the roster's clamp instead of its own.
+  const STAGE = 1400;
+  const SEPARATOR = 5;
+  const ROSTER = 360; // the width the roster starts at
+  const ROW = STAGE - SEPARATOR - ROSTER;
+  // A separator is flex-none and the pane keeps a 1px border even when squeezed to nothing, so
+  // neither is the terminal's to spend.
+  const PANE_ROOM = ROW - (SEPARATOR + 1);
   let clientWidth: PropertyDescriptor | undefined;
   beforeEach(() => {
     localStorage.clear();
     clientWidth = Object.getOwnPropertyDescriptor(window.HTMLElement.prototype, "clientWidth");
-    Object.defineProperty(window.HTMLElement.prototype, "clientWidth", { configurable: true, get: () => ROW });
+    Object.defineProperty(window.HTMLElement.prototype, "clientWidth", {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.classList.contains("stage") ? STAGE : ROW;
+      },
+    });
   });
   afterEach(() => {
     if (clientWidth) Object.defineProperty(window.HTMLElement.prototype, "clientWidth", clientWidth);
@@ -690,8 +762,9 @@ describe("file pane width restored from storage", () => {
     localStorage.setItem("files_pane_width", "900");
     const w = mountCockpit([cell(1, "s1", "/proj"), cell(2)], 1, []);
     await flushPromises();
-    // 1000 wide, terminal keeps MIN_TERMINAL (320) → the pane gets the remaining 680.
-    expect(w.findComponent({ name: "FilesPane" }).attributes("style")).toContain("680px");
+    // 1000 wide, terminal keeps MIN_TERMINAL (320), the separator and border take PANE_CHROME →
+    // the pane gets what is left.
+    expect(w.findComponent({ name: "FilesPane" }).attributes("style")).toContain(`${PANE_ROOM - 320}px`);
   });
 
   // The single view's splitter announces its range; a screen-reader user resizing this one gets
@@ -704,7 +777,7 @@ describe("file pane width restored from storage", () => {
     const sep = w.find('[role="separator"][aria-label="Resize side pane"]');
     expect(sep.attributes("aria-valuenow")).toBe("400");
     expect(sep.attributes("aria-valuemin")).toBe("360"); // MIN_GUI, there being room for it
-    expect(sep.attributes("aria-valuemax")).toBe(String(ROW - 320)); // the terminal keeps MIN_TERMINAL
+    expect(sep.attributes("aria-valuemax")).toBe(String(PANE_ROOM - 320)); // the terminal keeps MIN_TERMINAL
   });
 
   it("leaves a width that already fits alone", async () => {

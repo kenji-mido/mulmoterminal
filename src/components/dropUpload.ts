@@ -19,12 +19,16 @@ export const dropUploadUrl = (sessionId: string): string => `/api/session/${enco
 
 /** The sentence to show when an upload did not happen. Keyed on status because the four cases
  *  need different actions from the user, and "it failed" tells them none of them. English —
- *  the caller runs it through the UI translator like the other terminal hints. */
+ *  the caller runs it through the UI translator like the other terminal hints.
+ *
+ *  None of them names the GESTURE: a pasted screenshot travels this same upload (#938), and
+ *  telling someone their "dropped file" failed when they pasted describes something they did
+ *  not do. */
 export function dropUploadErrorMessage(status: number | null): string {
   if (status === 413) return "That file is too large to send to the terminal.";
   if (status === 404) return "This terminal is no longer running, so the file could not be sent.";
   if (status === 403) return "The server refused the upload because the page's origin is not allowed.";
-  return "Could not send the dropped file to the terminal.";
+  return "Could not send the file to the terminal.";
 }
 
 /** True when the file is over the cap. Checked here rather than left to the server's 413 so a

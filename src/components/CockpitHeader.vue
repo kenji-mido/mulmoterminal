@@ -9,11 +9,12 @@ import { formatCwd } from "./cwdDisplay";
 import { CELL_DIR_PATH, DIR_TRUNCATE_FRONT } from "./cellChromeClasses";
 import { headerStyleFor } from "./cellHeaderStyle";
 import { phaseDisplay, WORK_WORD, type PrPhase, type WorkPhase } from "./rosterPhase";
-import type { CellStatus } from "./gridTabs";
+import type { AttentionStatus } from "./attentionStatus";
+import { agentBadge } from "../../common/sessionAgent";
 
 const props = withDefaults(
   defineProps<{
-    status: CellStatus;
+    status: AttentionStatus;
     agent: string;
     cwd: string | null;
     home: string | null;
@@ -26,10 +27,10 @@ const props = withDefaults(
   { workPhase: null, phase: "none", dirLength: 44 },
 );
 
-const STATUS_WORD: Record<CellStatus, string> = { working: "running", blocked: "waiting", done: "done", idle: "idle" };
+const STATUS_WORD: Record<AttentionStatus, string> = { working: "running", blocked: "waiting", done: "done", idle: "idle" };
 // Hardcoded, token-less roster hues — come through as arbitrary utilities; fill + text paired.
-const DOT_CLASS: Record<CellStatus, string> = { working: "bg-[#4a9eff]", done: "bg-[#22c55e]", blocked: "bg-[#f59e0b]", idle: "bg-[#666]" };
-const BADGE_CLASS: Record<CellStatus, string> = {
+const DOT_CLASS: Record<AttentionStatus, string> = { working: "bg-[#4a9eff]", done: "bg-[#22c55e]", blocked: "bg-[#f59e0b]", idle: "bg-[#666]" };
+const BADGE_CLASS: Record<AttentionStatus, string> = {
   working: "bg-[#4a9eff] text-[#04121f]",
   done: "bg-[#22c55e] text-[#04120a]",
   blocked: "bg-[#f59e0b] text-[#1f1300]",
@@ -47,6 +48,8 @@ const PHASE_CLASS: Record<string, string> = {
 // A working cell shows what it's doing (planning / editing) when known, else the plain word.
 const badgeWord = computed(() => (props.status === "working" && props.workPhase ? WORK_WORD[props.workPhase] : STATUS_WORD[props.status]));
 const phaseInfo = computed(() => phaseDisplay(props.phase ?? "none"));
+// Null for claude (the default, so nearly every row) and for a shell, which is not an agent.
+const badge = computed(() => agentBadge(props.agent));
 const phaseColor = computed(() => PHASE_CLASS[props.phase ?? "none"] ?? "text-[#9aa4b2]");
 const dirText = computed(() => formatCwd(props.cwd, props.home, props.dirLength ?? 44) || "—");
 const barStyle = computed(() => headerStyleFor(props.headerColor, props.headerTextColor));
@@ -68,7 +71,7 @@ const barStyle = computed(() => headerStyleFor(props.headerColor, props.headerTe
       :title="phaseInfo.title"
       >{{ phaseInfo.label }}</span
     >
-    <span v-if="agent === 'codex'" class="flex-none rounded-[4px] border border-border px-1 text-[10px] text-[#9ab]">codex</span>
+    <span v-if="badge" class="flex-none rounded-[4px] border border-border px-1 text-[10px] text-[#9ab]">{{ badge.full }}</span>
     <span
       data-testid="cockpit-dir"
       class="min-w-0 flex-auto text-[11px] text-[var(--cell-header-fg,var(--text-dim))]"

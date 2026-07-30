@@ -1,36 +1,37 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, onUnmounted, useTemplateRef } from "vue";
+import { ref, computed, nextTick, watch, onMounted, onUnmounted, useTemplateRef } from "vue";
 import TerminalView from "./Terminal.vue";
 import { usePubSub } from "../composables/usePubSub";
-import { useDirColors } from "../composables/useDirConfig";
 import { useCellChrome } from "../composables/useCellChrome";
-import { dirChipTint } from "./dirChipColor";
 import { useGitStatus } from "../composables/useGitStatus";
 import { useWorkItem } from "../composables/useWorkItem";
 import { formatCwd, worktreeLabel } from "./cwdDisplay";
 import DirBadge from "./DirBadge.vue";
 import { isCellContext, isCellUsage, type CellContext, type CellUsage } from "./cellPayload";
-import { CANVAS_TOOL_GROUPS, toolGroupServerId, toolsInGroup, type ToolGroup } from "../../common/toolGroups";
-import { queueCanvasWrite } from "./canvasWriteQueue";
+import { asTerminalAgent, type TerminalAgent } from "../../common/sessionAgent";
+import type { LaunchAgent } from "../../common/launchAgent";
 import { unsavedWork } from "./unsavedWork";
-import { relativeTime as relativeTimeFrom, usageBadge } from "./cellDisplay";
+import { usageBadge } from "./cellDisplay";
 import { applyActivityPush, cellHeaderText } from "./cellActivity";
+import { MEMO_MAX_LENGTH, normalizeMemo } from "../../common/sessionMemo";
 import { preferredLaunchDir, shouldSyncLaunchDir } from "./launchDir";
+import CellLaunchForm from "./CellLaunchForm.vue";
 import GitBranchChip from "./GitBranchChip.vue";
 import WorkItemChip from "./WorkItemChip.vue";
 import ModelContextBadge from "./ModelContextBadge.vue";
-import ModelPicker from "./ModelPicker.vue";
 import type { LaunchChoice } from "./wsUrl";
 import type { RunCommand } from "./runCommand";
 import { useHeaderButtons } from "../composables/useHeaderButtons";
 import TimelineOverlay from "./TimelineOverlay.vue";
-import DirPickerModal from "./DirPickerModal.vue";
 import CopyCodeBlock from "./CopyCodeBlock.vue";
 import CockpitHeader from "./CockpitHeader.vue";
 import CellChromeButtons from "./CellChromeButtons.vue";
+import { cellChromeBinding } from "./cellChromeBinding";
 import type { CwdPreset } from "./presets";
 import type { Launcher, LaunchPick } from "./launchers";
-import { activityStatus, type CellStatus } from "./gridTabs";
+import { shellLauncher } from "./gridTabs";
+import { activityStatus, type AttentionStatus } from "./attentionStatus";
+import { useMissedAttention } from "../composables/useMissedAttention";
 import type { GridCellEmits, GridCellProps } from "./gridCell";
 import { shouldZoomOnHeaderClick } from "./cellHeaderZoom";
 import {
@@ -74,9 +75,8 @@ const props = defineProps<
     uid: number;
     initialSessionId: string | null;
     initialCwd: string | null;
-    // The persisted agent for this cell: "codex" reconnects via /ws/codex on reload; absent
-    // (or "claude") resumes as a normal Claude session.
-    initialAgent?: "codex" | null;
+    // The persisted agent for this cell; absent (or "claude") resumes as a normal Claude session.
+    initialAgent?: TerminalAgent | null | undefined;
     defaultCwd: string | null;
     presets: CwdPreset[];
     // Configured launch commands (shell/codex/…) offered next to Claude in this launcher.
@@ -103,18 +103,28 @@ const emit = defineEmits<
     (e: "run" | "runSpare", value: RunCommand): void;
     // The user picked a configured launcher (shell/codex/…) to run in this empty cell.
     (e: "launch", value: LaunchPick): void;
-    // The agent chosen (Claude/Codex) for this fresh launch, so the grid persists it.
-    (e: "agent", value: "claude" | "codex"): void;
+    // The agent chosen for this fresh launch, so the grid persists it.
+    (e: "agent", value: TerminalAgent): void;
   }
 >();
+
+// `close` rather than a plain forward: this cell's may hold a live session, so it confirms first.
+const { chromeProps, chromeEvents } = cellChromeBinding(props, emit, () => void close());
 
 // A cell with a persisted session relaunches (resumes) on mount; otherwise it
 // starts empty and lazy-launches when the user picks a dir and clicks Start.
 const launched = ref(props.initialSessionId !== null);
 const sessionId = ref<string | null>(props.initialSessionId);
+// What the launch form's selector will start here. "shell" is the OS default shell, which is a
+// LAUNCHER, not an agent: the parent replaces this cell with a launcher cell, so it never becomes
+// the `agent` below.
+const launchTarget = ref<LaunchAgent>(asTerminalAgent(props.initialAgent));
 // The agent this cell runs (Claude by default). Fixed once launched; restored from the
-// persisted cell on reload so a codex cell reconnects to /ws/codex.
-const agent = ref<"claude" | "codex">(props.initialAgent === "codex" ? "codex" : "claude");
+// persisted cell on reload so a codex / antigravity cell reconnects to its WS endpoint.
+// Derived from the selector so ONE pick drives both — two refs holding the same choice is the
+// kind of pair that drifts. asTerminalAgent maps "shell" to claude, which nothing reads: a shell
+// launch leaves this cell instead of running in it.
+const agent = computed<TerminalAgent>(() => asTerminalAgent(launchTarget.value));
 const connectKey = ref(0);
 
 // The directory this terminal runs in (shown in the header, sent to the server).
@@ -139,11 +149,12 @@ const filmstrip = computed(() => !!props.zoomed && !props.expanded);
 // load (cold-load / open-before-config) — it never clobbers the user's own edit.
 const dirInput = ref(preferredLaunchDir(props));
 const dirTouched = ref(false); // true once the user types in / picks a dir
-// Each recent-dir chip wears its directory's configured colour, so picking one is the same
-// visual decision as finding its cell in the grid. Dropped once this cell launches: the chips
-// are gone, and their subscriptions would keep fetching for the rest of the session.
-const presetPaths = computed(() => (launched.value ? [] : props.presets.map((p) => p.path)));
-const { colors: presetColors } = useDirColors(presetPaths);
+// Typing, a preset chip and the folder picker all report the dir the same way, so the "the user
+// chose this one" flag is set in one place.
+function onLaunchDir(dir: string) {
+  dirInput.value = dir;
+  dirTouched.value = true;
+}
 watch([() => props.presets, () => props.defaultCwd], () => {
   if (cwd.value === null && props.defaultCwd) cwd.value = props.defaultCwd;
   if (!shouldSyncLaunchDir({ hasInitialCwd: !!props.initialCwd, touched: dirTouched.value, launched: launched.value })) return;
@@ -162,6 +173,12 @@ const lastPrompt = ref<string | null>(null);
 // the header because a raw follow-up prompt goes stale ("ok") or context-dependent once
 // the session is a back-and-forth. Null until the server generates/pushes one.
 const aiTitle = ref<string | null>(null);
+// The user's own one-line note on this session (#1084). It outranks both of the above in the
+// header: they say what the agent said, this says what the cell is FOR — the question six open
+// cells stop answering. Null until the server pushes one.
+const memo = ref<string | null>(null);
+const memoEditing = ref(false);
+const memoDraft = ref("");
 
 // Cumulative token usage for this session (from /api/session/:id, refreshed when a
 // turn finishes). Null until first fetched.
@@ -207,6 +224,7 @@ interface ActivityMsg {
   event?: string | null;
   lastPrompt?: string | null;
   aiTitle?: string | null;
+  memo?: string | null;
 }
 const isActivityMsg = (d: unknown): d is ActivityMsg => typeof d === "object" && d !== null && "id" in d;
 
@@ -225,7 +243,14 @@ let latestBadgeReq = 0;
 function applyActivity(d: ActivityMsg) {
   activityGen++;
   const next = applyActivityPush(
-    { working: working.value, waiting: waiting.value, event: activityEvent.value, lastPrompt: lastPrompt.value, aiTitle: aiTitle.value },
+    {
+      working: working.value,
+      waiting: waiting.value,
+      event: activityEvent.value,
+      lastPrompt: lastPrompt.value,
+      aiTitle: aiTitle.value,
+      memo: memo.value,
+    },
     d,
   );
   working.value = next.working;
@@ -233,6 +258,9 @@ function applyActivity(d: ActivityMsg) {
   activityEvent.value = next.event;
   lastPrompt.value = next.lastPrompt;
   aiTitle.value = next.aiTitle;
+  // Not while the box is open: the push that lands as another tab saves would otherwise
+  // overwrite the sentence being typed here, mid-word.
+  if (!memoEditing.value) memo.value = next.memo;
 }
 
 // This session's detail, or nothing to apply. Nothing covers three cases the callers all
@@ -264,6 +292,36 @@ function applyBadges(data: SessionDetail) {
   usage.value = isCellUsage(data.usage) ? data.usage : null;
   context.value = isCellContext(data.context) ? data.context : null;
 }
+
+// Grid live-sync can REASSIGN this cell to a different session (adoptGrid replaces the cells;
+// component instances are keyed by uid and reused). Internal state was seeded from the props
+// once at mount, so without this watch the cell would keep showing — and, via onSession's
+// emit, write back into the grid — its OLD session: two cells then converge on one session id
+// and show identical summary/prompt/reply in the roster. Adopting means: take the new
+// session's identity, drop every per-session badge (they belong to the old one), and bump
+// connectKey so the terminal slot retargets. The equality guard skips the echo of our own
+// launch (GridView writes the id this cell just emitted straight back into the prop).
+watch(
+  () => props.initialSessionId,
+  (next) => {
+    if (!next || next === sessionId.value) return;
+    sessionId.value = next;
+    launched.value = true;
+    // `agent` is derived from launchTarget, so the identity is adopted by setting the target.
+    launchTarget.value = asTerminalAgent(props.initialAgent);
+    cwd.value = props.initialCwd ?? props.defaultCwd;
+    working.value = false;
+    waiting.value = false;
+    activityEvent.value = null;
+    lastPrompt.value = null;
+    aiTitle.value = null;
+    usage.value = null;
+    context.value = null;
+    diff.value = null;
+    connectKey.value++;
+    loadInitial(next);
+  },
+);
 
 async function loadInitial(id: string) {
   const seedId = ++latestSeed;
@@ -339,18 +397,12 @@ onMounted(() => {
   if (sessionId.value) {
     loadInitial(sessionId.value);
     loadDiff(); // a resumed worktree cell shows its diff on restore
-  } else {
-    loadResumable();
-    loadScripts();
-    loadWorktrees();
-    loadCanvasEnabled();
   }
 });
 onUnmounted(() => {
   unsubscribe?.();
   unsubscribeCanvas?.();
   offReconnect?.();
-  if (resumableTimer) clearTimeout(resumableTimer);
 });
 
 // Set when the user starts a FRESH session from the launcher, so the next server
@@ -375,389 +427,24 @@ function launchIn(dir: string | null) {
 // life of the cell so a relaunch in the same cell repeats the choice.
 const launchChoice = ref<LaunchChoice | null>(null);
 
-function launch() {
-  launchIn(dirInput.value.trim() || props.defaultCwd);
+// Start what the selector picked, in `dir`. EVERY launch in the form goes through here: the
+// selector decides for the dir field, for a preset chip, and for a worktree alike, and a rule
+// that has to hold at three call sites belongs in one of them.
+function startTarget(dir: string | null) {
+  if (launchTarget.value === "shell") emit("launch", { launcher: shellLauncher(), cwd: dir });
+  else launchIn(dir);
 }
 
-// Launch a configured program (shell/codex/…) in this cell's chosen dir. The parent
-// turns the empty cell into a persistent launcher cell (index is the server allowlist
-// position); this cell is then replaced by a LauncherCell.
-function launchProgram(index: number, l: Launcher) {
-  emit("launch", { index, label: l.label, cwd: dirInput.value.trim() || props.defaultCwd });
-}
-
-// The chip's launch button: a one-click quick launch — fill the field and jump straight
-// into a fresh session in that dir.
-function selectPreset(p: CwdPreset) {
-  dirInput.value = p.path;
-  launchIn(p.path);
-}
-
-// A programmatic dir change (fillDir) loads the lists immediately, so the dirInput watch
-// below must skip the debounced reload it would otherwise ALSO fire — or every preset
-// click / folder pick would fetch the lists twice.
-let skipDirWatch = false;
-
-// The chip's main click (and the folder picker): fill the field WITHOUT launching,
-// and refresh the resume / script / worktree lists for that dir so the user can pick a
-// session to resume — or start fresh — instead of launching immediately.
-function fillDir(path: string) {
-  dirTouched.value = true;
-  // Set the skip only when the value actually changes (so the watch will fire and consume
-  // it) — a same-value click doesn't fire the watch and would leave a stale flag that
-  // swallows the next real reload.
-  if (dirInput.value !== path) skipDirWatch = true;
-  dirInput.value = path;
-  loadResumable();
-  loadScripts();
-  loadWorktrees();
-  loadCanvasEnabled();
-}
-
-// The 📁 button always opens the in-browser folder picker (DirPickerModal). The native OS
-// chooser (POST /api/pick-file) pops up on the SERVER's display, which is unreachable from a
-// remote browser — and "remote" cannot be told apart from "local" client-side (an SSH
-// port-forward makes a phone look like localhost too), so the native path is never safe to
-// prefer. The in-browser picker works the same everywhere. The chosen path fills the
-// Working-directory field WITHOUT launching.
-const showDirPicker = ref(false);
-function pickDir() {
-  showDirPicker.value = true;
-}
-
-// The in-browser picker returned a path: fill the field (no launch) and close the modal.
-function onDirPicked(dir: string) {
-  fillDir(dir);
-  showDirPicker.value = false;
-}
-
-// Existing sessions for the dir in the form, so an empty cell can resume one
-// instead of starting fresh.
-interface ResumableSession {
-  id: string;
-  title: string;
-  mtime: number;
-}
-const resumable = ref<ResumableSession[]>([]);
-// The resolved cwd the listed sessions belong to (the server may resolve/fallback
-// the requested dir). resume() uses THIS — not the live input — so the session id
-// and cwd always match the row that was clicked.
-const resumableCwd = ref<string | null>(null);
-let resumableTimer: ReturnType<typeof setTimeout> | null = null;
-let resumableReq = 0; // request token: drop out-of-order responses
-
-async function loadResumable() {
-  const dir = dirInput.value.trim() || props.defaultCwd;
-  const reqId = ++resumableReq;
-  if (launched.value || !dir) {
-    resumable.value = [];
-    resumableCwd.value = null;
-    return;
-  }
-  try {
-    const res = await fetch(`/api/sessions?cwd=${encodeURIComponent(dir)}`);
-    if (reqId !== resumableReq) return; // a newer request superseded this one
-    const data = res.ok ? await res.json() : { sessions: [], cwd: dir };
-    if (reqId !== resumableReq) return; // re-check after awaiting the body
-    resumable.value = data.sessions ?? [];
-    resumableCwd.value = data.cwd ?? dir;
-  } catch {
-    if (reqId === resumableReq) {
-      resumable.value = [];
-      resumableCwd.value = null;
-    }
-  }
-}
-
-// The runnable scripts (script.json) for the dir in the form, so an empty cell can
-// run one in that directory instead of starting a Claude session.
-interface RunnableScript {
-  index: number;
-  label: string;
-  command: string;
-  cwd?: string;
-}
-const scripts = ref<RunnableScript[]>([]);
-// The resolved cwd the listed scripts belong to (the server may resolve/fallback the
-// requested dir). runScript() uses THIS so the command runs in the dir the list was
-// fetched for.
-const scriptsCwd = ref<string | null>(null);
-let scriptsReq = 0; // request token: drop out-of-order responses
-
-async function loadScripts() {
-  const dir = dirInput.value.trim() || props.defaultCwd;
-  const reqId = ++scriptsReq;
-  if (launched.value || !dir) {
-    scripts.value = [];
-    scriptsCwd.value = null;
-    return;
-  }
-  try {
-    const res = await fetch(`/api/scripts?cwd=${encodeURIComponent(dir)}`);
-    if (reqId !== scriptsReq) return;
-    const data = res.ok ? await res.json() : { scripts: [], cwd: dir };
-    if (reqId !== scriptsReq) return;
-    scripts.value = Array.isArray(data.scripts) ? data.scripts : [];
-    scriptsCwd.value = data.cwd ?? dir;
-  } catch {
-    if (reqId === scriptsReq) {
-      scripts.value = [];
-      scriptsCwd.value = null;
-    }
-  }
-}
-
-function runScript(s: RunnableScript) {
-  emit("run", { source: "script", index: s.index, label: s.label, cwd: scriptsCwd.value ?? (dirInput.value.trim() || props.defaultCwd) });
-}
-
-// Per-agent isolation: when the dir is a git repo, the launcher can start claude in
-// its own throwaway worktree (separate working tree, shared .git) so several agents
-// work the repo without clobbering each other. Managed by the server (/api/worktrees).
-interface Worktree {
-  path: string;
-  branch: string | null;
-  task: string;
-  dirty: boolean;
-}
-const isGitRepo = ref(false);
-const worktrees = ref<Worktree[]>([]);
-const worktreeTask = ref("");
-let worktreesReq = 0;
-
-// Whether this directory lets its agents draw into the Canvas panel, per Canvas GROUP (render,
-// media). NOT MulmoTerminal state: each is an MCP server registered in Claude Code's own
-// local-scope config for this directory, so the switches read and write through
-// /api/gui-mcp-groups and `claude mcp list` stays the one place they can be seen. Read per
-// directory, like the worktree list above.
-//
-// One record per group rather than a flag per group: the two switches differ only in the group
-// they name, so adding a third to CANVAS_TOOL_GROUPS should not mean a third copy of this block.
-const byCanvasGroup = <T,>(value: T): Record<ToolGroup, T> => Object.fromEntries(CANVAS_TOOL_GROUPS.map((group) => [group, value])) as Record<ToolGroup, T>;
-
-const canvasDir = ref<string | null>(null);
-const canvasEnabled = ref(byCanvasGroup(false));
-const canvasBusy = ref(byCanvasGroup(false));
-const canvasError = ref(byCanvasGroup<string | null>(null));
-let canvasReq = 0;
-
-// What the switch actually does, spelled out for the hover: the MCP SERVER ID it registers and
-// the tools that id brings with it. The row's visible label can only name the group, and the
-// group name alone ("render", "media") does not say which server appears in `claude mcp list`
-// nor what the agent gains — that is exactly what a user checking the box wants to know.
-// Derived from toolGroups.ts rather than written out, so a tool added to a group shows up here
-// without a second edit (the Canvas empty state names them the same way).
-const canvasTitle = (group: ToolGroup): string =>
-  `Registers the MCP server "${toolGroupServerId(group)}" for this directory — tools: ${toolsInGroup(group).join(", ")}`;
-
-async function loadCanvasEnabled() {
-  const dir = dirInput.value.trim() || props.defaultCwd;
-  const reqId = ++canvasReq;
-  if (launched.value || !dir) {
-    canvasDir.value = null;
-    return;
-  }
-  try {
-    const res = await fetch(`/api/gui-mcp-groups?cwd=${encodeURIComponent(dir)}`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    // A slower reply for a directory the user has since moved off would show its answer under
-    // the new directory's name.
-    if (reqId !== canvasReq) return;
-    canvasDir.value = dir;
-    const registered: unknown[] = Array.isArray(data.groups) ? data.groups : [];
-    canvasEnabled.value = byCanvasGroup(false);
-    for (const group of CANVAS_TOOL_GROUPS) canvasEnabled.value[group] = registered.includes(group);
-    canvasError.value = byCanvasGroup(null);
-  } catch {
-    // No switch rather than one whose position is a guess — flipping a wrong "off" would run
-    // `claude mcp remove` on a registration the user may actually have.
-    if (reqId === canvasReq) canvasDir.value = null;
-  }
-}
-
-// Writes into the user's Claude Code config, so a failure is surfaced and the checkbox is put
-// back — a switch that shows "on" for a registration that was never written is the worst state.
-//
-// Busy is set HERE, when the write is queued, not when it starts running. Marking it at the
-// front of the queued callback would leave the checkbox live while it waits behind another
-// group's save: a second flip would queue a second write, and since a failed write puts its
-// checkbox back, the earlier failure's rollback would land on top of the later intent — flip on,
-// flip off, end up on. Disabled from the flip until the write settles, there is only ever one.
-// The DIRECTORY is captured here too, for the same reason: a queued write can run long after the
-// flip, and the launcher's directory field is editable the whole time. Read at execution time, a
-// switch ticked for A would register the MCP server against whatever B the user had typed by
-// then — a silent write to a folder they never touched the switch in.
-function applyCanvas(group: ToolGroup): Promise<void> {
-  const dir = canvasDir.value;
-  if (!dir) return Promise.resolve();
-  const wanted = canvasEnabled.value[group];
-  canvasBusy.value[group] = true;
-  canvasError.value[group] = null;
-  return queueCanvasWrite(() => writeCanvasGroup(group, dir, wanted));
-}
-
-async function writeCanvasGroup(group: ToolGroup, dir: string, wanted: boolean) {
-  try {
-    const res = await fetch("/api/gui-mcp-groups", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ cwd: dir, group, enabled: wanted }),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    if (!data.ok) throw new Error(data.message || "claude mcp failed");
-  } catch (e) {
-    // Only if the switches still belong to the directory this write was for. Moved on, they are
-    // showing what the NEW directory has registered, and putting one back would report another
-    // folder's failure as that directory's state.
-    if (canvasDir.value === dir) {
-      canvasEnabled.value[group] = !wanted;
-      canvasError.value[group] = e instanceof Error ? e.message : String(e);
-    }
-  } finally {
-    canvasBusy.value[group] = false;
-  }
-}
-
-async function loadWorktrees() {
-  const dir = dirInput.value.trim() || props.defaultCwd;
-  const reqId = ++worktreesReq;
-  if (launched.value || !dir) {
-    isGitRepo.value = false;
-    worktrees.value = [];
-    return;
-  }
-  try {
-    const res = await fetch(`/api/worktrees?cwd=${encodeURIComponent(dir)}`);
-    if (reqId !== worktreesReq) return;
-    const data = res.ok ? await res.json() : { isGit: false, worktrees: [] };
-    if (reqId !== worktreesReq) return;
-    isGitRepo.value = !!data.isGit;
-    worktrees.value = Array.isArray(data.worktrees) ? data.worktrees : [];
-  } catch {
-    if (reqId === worktreesReq) {
-      isGitRepo.value = false;
-      worktrees.value = [];
-    }
-  }
-}
-
-// Create a fresh worktree for the typed task and launch claude in it.
-async function createWorktreeAndLaunch() {
-  const repoDir = dirInput.value.trim() || props.defaultCwd;
-  const task = worktreeTask.value.trim();
-  if (!repoDir || !task) return;
-  try {
-    const res = await fetch("/api/worktrees/create", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ repoDir, task }),
-    });
-    if (!res.ok) return;
-    const wt = await res.json();
-    if (typeof wt.path === "string") {
-      worktreeTask.value = "";
-      await carryCanvasInto(wt.path);
-      launchIn(wt.path);
-    }
-  } catch {
-    // best-effort — the launcher stays open so the user can retry
-  }
-}
-
-const reuseWorktree = async (w: Worktree) => {
-  await carryCanvasInto(w.path);
-  launchIn(w.path);
-};
-
-// Claude Code keys local-scope MCP config by the CLI's working directory, and a worktree launch
-// starts claude in the WORKTREE — not in the repository the switches above were set for. Without
-// this the session gets no render tools even though the launcher plainly says Canvas is on.
-//
-// Every group that is on, not just render: a worktree that inherited half the switches would be
-// a launcher telling the truth about the repo and a lie about the room it just opened.
-//
-// Copied rather than moved: the repository keeps its own registration, and a worktree is a
-// throwaway room that should start out like the repo it came from. Failures are swallowed —
-// the launch itself is what the user asked for, and the Canvas button will report the truth.
-async function carryCanvasInto(worktreePath: string) {
-  if (!canvasDir.value || worktreePath === canvasDir.value) return;
-  const enabled = CANVAS_TOOL_GROUPS.filter((group) => canvasEnabled.value[group]);
-  // Through the same queue as the switches, one group at a time: a launch that fires while a
-  // checkbox is still saving would otherwise be the very concurrent write the queue exists for.
-  for (const group of enabled) {
-    await queueCanvasWrite(async () => {
-      try {
-        await fetch("/api/gui-mcp-groups", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ cwd: worktreePath, group, enabled: true }),
-        });
-      } catch {
-        // best-effort — a worktree without the registration still launches, just without Canvas
-      }
-    });
-  }
-}
-
-// Remove a managed worktree (＋ its branch). A dirty one is confirmed first so work
-// is never discarded silently.
-async function removeWorktree(w: Worktree) {
-  const repoDir = dirInput.value.trim() || props.defaultCwd;
-  if (w.dirty && !window.confirm(`"${w.task}" has uncommitted changes. Discard and remove it?`)) return;
-  try {
-    await fetch("/api/worktrees/remove", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ repoDir, path: w.path, deleteBranch: true, force: w.dirty }),
-    });
-    loadWorktrees();
-  } catch {
-    // best-effort
-  }
-}
-
-// Refresh the resume list and the runnable scripts when the target dir changes.
-watch([dirInput, () => props.defaultCwd], () => {
-  // Cancel any pending debounced reload FIRST — whether we skip (a fillDir just loaded
-  // immediately) or reschedule (typing), a stale timer from a prior change (e.g. a type
-  // then a preset click) must not fire a duplicate load afterwards.
-  if (resumableTimer) clearTimeout(resumableTimer);
-  if (skipDirWatch) {
-    skipDirWatch = false; // a fillDir() already loaded these immediately — don't schedule another
-    return;
-  }
-  resumableTimer = setTimeout(() => {
-    loadResumable();
-    loadScripts();
-    loadWorktrees();
-    loadCanvasEnabled();
-  }, 300);
-});
-
-// A session already live in another grid cell. Resuming it here detaches that
-// cell (the server supersedes the prior socket), so we warn before doing so.
-const sessionOpenElsewhere = (id: string): boolean => id !== sessionId.value && (props.openSessionIds ?? []).includes(id);
-
-// A preset dir that already has a running session in another cell — the launcher
-// tints its chip so the user can tell it's in use before double-launching there.
-const runningCwds = computed(() => new Set(props.openCwds ?? []));
-const isCwdRunning = (path: string): boolean => runningCwds.value.has(path);
-
-function resume(s: ResumableSession) {
-  if (sessionOpenElsewhere(s.id) && !window.confirm(`"${s.title}" is already open in another terminal. Opening it here will detach that one. Continue?`))
-    return;
-  // Use the cwd those rows were fetched for, not the (possibly-changed) input.
-  cwd.value = resumableCwd.value ?? (dirInput.value.trim() || props.defaultCwd);
-  sessionId.value = s.id;
+// Attach to a session the form listed, in the cwd those rows were fetched for (not the
+// possibly-changed input).
+function resumeSession({ id, cwd: dir }: { id: string; cwd: string | null }) {
+  cwd.value = dir;
+  sessionId.value = id;
   connectKey.value++;
   launched.value = true;
   recordNextCwd = false; // resuming isn't a fresh launch — don't record its cwd
   loadDiff(); // an already-idle worktree session shows its badge right away
 }
-
-const relativeTime = (ms: number): string => relativeTimeFrom(ms, Date.now());
 
 // Reveal this cell's working directory in the OS file manager. The browser can't
 // open a folder, but the local server can (POST /api/open-dir).
@@ -919,6 +606,10 @@ function teardown() {
   activityEvent.value = null;
   lastPrompt.value = null;
   aiTitle.value = null;
+  // The memo belongs to the SESSION, not to the cell — it stays on disk and comes back when that
+  // session is resumed. What must not survive is showing it against whatever this cell runs next.
+  memo.value = null;
+  memoEditing.value = false;
   usage.value = null;
   context.value = null;
   cwd.value = props.defaultCwd;
@@ -929,10 +620,8 @@ function teardown() {
   closeConfirm.value = false;
   prMsg.value = null;
   emit("close");
-  loadResumable();
-  loadScripts();
-  loadWorktrees();
-  loadCanvasEnabled();
+  // The launch form is mounted fresh by the `v-else` this just switched back to, and reads its
+  // own lists for the directory above on the way in.
 }
 
 // Closing a WORKTREE cell offers to keep or remove the room first (never silently
@@ -1003,35 +692,6 @@ function onSession(id: string) {
   loadInitial(id);
 }
 
-// Grid live-sync can REASSIGN this cell to a different session (adoptGrid replaces the cells;
-// component instances are keyed by uid and reused). Internal state was seeded from the props
-// once at mount, so without this watch the cell would keep showing — and, via onSession's
-// emit, write back into the grid — its OLD session: two cells then converge on one session id
-// and show identical summary/prompt/reply in the roster. Adopting means: take the new
-// session's identity, drop every per-session badge (they belong to the old one), and bump
-// connectKey so the terminal slot retargets. The equality guard skips the echo of our own
-// launch (GridView writes the id this cell just emitted straight back into the prop).
-watch(
-  () => props.initialSessionId,
-  (next) => {
-    if (!next || next === sessionId.value) return;
-    sessionId.value = next;
-    launched.value = true;
-    agent.value = props.initialAgent === "codex" ? "codex" : "claude";
-    cwd.value = props.initialCwd ?? props.defaultCwd;
-    working.value = false;
-    waiting.value = false;
-    activityEvent.value = null;
-    lastPrompt.value = null;
-    aiTitle.value = null;
-    usage.value = null;
-    context.value = null;
-    diff.value = null;
-    connectKey.value++;
-    loadInitial(next);
-  },
-);
-
 // ~-anchored, front-truncated path for the header (keeps the tail). For a managed
 // worktree cell, show "⎇ <repo> (<task>)" instead — the managed path is just noise.
 const dirDisplay = computed(() => formatCwd(cwd.value, props.home));
@@ -1042,7 +702,7 @@ const headerDir = computed(() => {
 
 // blocked (needs input) / done (finished, unreviewed) / working / idle — split from
 // the server's working+waiting+event (see activityStatus).
-const status = computed<CellStatus>(() => activityStatus(working.value, waiting.value, activityEvent.value));
+const status = computed<AttentionStatus>(() => activityStatus(working.value, waiting.value, activityEvent.value));
 const STATUS_CLASS = { blocked: "is-blocked", done: "is-done", working: "is-working", idle: "is-idle" } as const;
 const STATUS_LABEL = { blocked: "Needs input", done: "Done — review", working: "Working…", idle: "Idle" } as const;
 const statusClass = computed(() => STATUS_CLASS[status.value]);
@@ -1070,10 +730,75 @@ const DOT_STATUS = { idle: CELL_DOT_IDLE, working: CELL_DOT_WORKING, done: "bg-a
 const cellStatusClass = computed(() => CELL_STATUS[status.value]);
 const headerStatusClass = computed(() => HEADER_STATUS[status.value]);
 const dotStatusClass = computed(() => DOT_STATUS[status.value]);
-const statusLabel = computed(() => STATUS_LABEL[status.value]);
+// This session raised a notification nothing announced — the audio was still locked, or the row
+// arrived as the page's first sighting and was swallowed as baseline (#1152). A ring on the dot
+// rather than a new element: it has to be legible in a filmstrip thumbnail, and the header track
+// is already full.
+const { isMissed, acknowledge: acknowledgeMissed } = useMissedAttention();
+const missedNotify = computed(() => isMissed(sessionId.value));
+const dotMissedClass = computed(() => (missedNotify.value ? "ring-2 ring-amber ring-offset-2 ring-offset-[var(--cell-header-bg,var(--bg-panel))]" : ""));
+const statusLabel = computed(() => (missedNotify.value ? `${STATUS_LABEL[status.value]} (missed while sound was unavailable)` : STATUS_LABEL[status.value]));
+// Enlarging the cell IS the acknowledgement — the user is now looking at the session the mark
+// was pointing them to. All three inputs are watched, not just the expand edge: a cell that is
+// ALREADY enlarged can connect (or relaunch into) its session afterwards, and a notification can
+// be suppressed for the session the user is currently staring at. Either would otherwise leave a
+// ring pointing at the pane already on screen.
+watch(
+  () => [props.expanded, sessionId.value, missedNotify.value] as const,
+  ([expanded, id, missed]) => {
+    if (expanded && missed) acknowledgeMissed(id);
+  },
+  { immediate: true },
+);
 watch(status, (s) => emit("status", s), { immediate: true });
 
-const headerText = computed(() => cellHeaderText(aiTitle.value, lastPrompt.value, sessionId.value));
+const headerText = computed(() => cellHeaderText(memo.value, aiTitle.value, lastPrompt.value, sessionId.value));
+// A memo displaces the AI title from the line, so the tooltip is where that title goes — losing
+// it entirely would make the note cost information rather than add it. With no memo the tooltip
+// is what it always was: the raw prompt, which the header abbreviates.
+const headerTitleAttr = computed(() => (memo.value ? aiTitle.value || lastPrompt.value || "" : lastPrompt.value || aiTitle.value || ""));
+
+const memoInput = useTemplateRef<HTMLInputElement>("memoInput");
+
+function startMemoEdit() {
+  if (!sessionId.value) return; // a launcher cell has no session to hang a note on yet
+  memoDraft.value = memo.value ?? "";
+  memoEditing.value = true;
+  void nextTick(() => memoInput.value?.select());
+}
+
+function cancelMemoEdit() {
+  memoEditing.value = false;
+}
+
+// Save, then let the server's answer win: it normalizes and caps, so what is shown here after a
+// save is what a reload will show. Blur saves too — closing the box by clicking away is the
+// ordinary way to leave a text field, and losing the sentence to it would be the bug.
+async function saveMemo() {
+  if (!memoEditing.value) return; // Enter or Escape already closed it; the blur that follows is not a second save
+  const id = sessionId.value;
+  memoEditing.value = false;
+  if (!id) return;
+  const text = normalizeMemo(memoDraft.value);
+  if (text === (memo.value ?? "")) return; // unchanged — an append log should not grow for a no-op
+  const previous = memo.value;
+  memo.value = text || null;
+  try {
+    const res = await fetch(`/api/session/${encodeURIComponent(id)}/memo`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    });
+    if (!res.ok) throw new Error(`memo save failed: ${res.status}`);
+    const data: unknown = await res.json();
+    const saved = typeof data === "object" && data !== null && "memo" in data ? (data as { memo: unknown }).memo : null;
+    if (sessionId.value === id && typeof saved === "string") memo.value = saved || null;
+  } catch {
+    // Put back what the server still has, rather than leaving a note on screen that no other
+    // tab — and no reload — will ever show.
+    if (sessionId.value === id) memo.value = previous;
+  }
+}
 
 // Per-cell token usage badge: ⇡ total input (fresh + cache) · ⇣ output generated.
 const usageView = computed(() => usageBadge(usage.value));
@@ -1235,17 +960,7 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
           @click="onHeaderClick"
         >
           <span class="cell-actions" :class="CELL_ACTIONS">
-            <CellChromeButtons
-              :expanded="expanded"
-              :files-open="filesOpen"
-              :right-pane="rightPane"
-              :canvas-available="canvasAvailable"
-              @toggle-expand="emit('toggle-expand')"
-              @toggle-files="emit('toggle-files')"
-              @toggle-canvas="emit('toggle-canvas')"
-              @toggle-tools="emit('toggle-tools')"
-              @close="close"
-            />
+            <CellChromeButtons v-bind="chromeProps" v-on="chromeEvents" />
           </span>
         </CockpitHeader>
         <!-- Row 1 — INFO only (normal grid / expanded): dir + git + model/token + what it's doing.
@@ -1262,14 +977,14 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
              push the actions past the cell's `overflow: hidden` edge — the buttons must
              stay reachable no matter how much a dir's config crams in here. -->
           <div data-testid="cell-header-main" class="flex min-w-0 flex-auto items-center gap-2 overflow-hidden">
-            <span class="cell-dot" :class="[CELL_DOT, statusClass, dotStatusClass]" :title="statusLabel" />
+            <span class="cell-dot" :class="[CELL_DOT, statusClass, dotStatusClass, dotMissedClass]" :title="statusLabel" />
             <!-- Normal grid: the dir is a button that opens it. As a filmstrip thumbnail the
                header's job is to zoom (switch to this terminal), so the dir is inert text
                and a click on it falls through to the header's zoom gesture. -->
             <button
               v-if="headerDir && !filmstrip"
               type="button"
-              class="cell-dir min-w-0 max-w-[60%] flex-initial cursor-pointer truncate border-none bg-transparent p-0 text-left font-mono text-[11px] text-[var(--cell-header-fg,var(--text-dim))] [direction:rtl] hover:text-muted hover:underline sm:min-w-[16ch]"
+              class="cell-dir flex-initial min-w-0 sm:min-w-[16ch] max-w-[60%] cursor-pointer truncate border-none bg-transparent p-0 text-left font-mono text-[11px] text-[var(--cell-header-fg,var(--text-dim))] [direction:rtl] hover:text-muted hover:underline"
               :title="cwd ? `Open ${cwd}` : ''"
               @click="openDir"
             >
@@ -1277,7 +992,7 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
             </button>
             <span
               v-else-if="headerDir"
-              class="cell-dir min-w-0 max-w-[60%] flex-initial cursor-pointer truncate border-none bg-transparent p-0 text-left font-mono text-[11px] text-[var(--cell-header-fg,var(--text-dim))] [direction:rtl] hover:text-muted hover:underline sm:min-w-[16ch]"
+              class="cell-dir flex-initial min-w-0 sm:min-w-[16ch] max-w-[60%] cursor-pointer truncate border-none bg-transparent p-0 text-left font-mono text-[11px] text-[var(--cell-header-fg,var(--text-dim))] [direction:rtl] hover:text-muted hover:underline"
               :title="cwd ?? ''"
             >
               <span class="cell-dir-path [unicode-bidi:plaintext]">{{ headerDir }}</span>
@@ -1336,28 +1051,52 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
                 >
               </template>
             </template>
+            <!-- The user's note REPLACES the AI title here rather than adding a row: the header
+               keeps one height whatever a cell is doing, and the title it displaced is still in
+               the tooltip. -->
+            <input
+              v-if="memoEditing"
+              ref="memoInput"
+              v-model="memoDraft"
+              data-testid="cell-memo-input"
+              class="min-w-0 flex-auto rounded border border-accent bg-input px-1 py-px font-sans text-[12px] text-fg focus:outline-none"
+              type="text"
+              :maxlength="MEMO_MAX_LENGTH"
+              placeholder="What is this session for?"
+              aria-label="Note for this session"
+              spellcheck="false"
+              @click.stop
+              @keydown.enter.prevent="saveMemo"
+              @keydown.escape.prevent="cancelMemoEdit"
+              @blur="saveMemo"
+            />
             <span
+              v-else
               data-testid="cell-prompt"
               class="min-w-0 flex-auto truncate font-sans text-[12px] text-[var(--cell-header-fg,var(--text-secondary))]"
-              :title="lastPrompt || aiTitle || ''"
+              :title="headerTitleAttr"
               >{{ headerText }}</span
             >
+            <!-- Sized like the chips beside it rather than like a header action, so a cell with
+               a note is exactly as tall as one without. -->
+            <button
+              v-if="sessionId && !memoEditing"
+              type="button"
+              data-testid="cell-memo-edit"
+              class="inline-flex flex-none cursor-pointer items-center rounded-[10px] px-1 py-px hover:bg-hover"
+              :class="memo ? 'text-accent' : 'text-dim'"
+              :title="memo ? 'Edit this session\'s note' : 'Add a note to this session'"
+              :aria-label="memo ? 'Edit this session\'s note' : 'Add a note to this session'"
+              @click.stop="startMemoEdit"
+            >
+              <span class="material-symbols-outlined text-[14px]" aria-hidden="true">edit_note</span>
+            </button>
           </div>
           <!-- Expand/restore + close stay on row 1 (the info row) and OUTSIDE the info
              track, so they're always pinned top-right. `.stop` so they don't trigger the
              header's click-to-zoom. -->
           <span class="cell-actions" :class="CELL_ACTIONS">
-            <CellChromeButtons
-              :expanded="expanded"
-              :files-open="filesOpen"
-              :right-pane="rightPane"
-              :canvas-available="canvasAvailable"
-              @toggle-expand="emit('toggle-expand')"
-              @toggle-files="emit('toggle-files')"
-              @toggle-canvas="emit('toggle-canvas')"
-              @toggle-tools="emit('toggle-tools')"
-              @close="close"
-            />
+            <CellChromeButtons v-bind="chromeProps" v-on="chromeEvents" />
           </span>
         </div>
         <TimelineOverlay :session-id="sessionId" :cwd="cwd" :open="timelineOpen" @close="timelineOpen = false" />
@@ -1369,7 +1108,7 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
           :session-id="sessionId"
           :connect-key="connectKey"
           :cwd="cwd"
-          :codex="agent === 'codex'"
+          :agent="agent"
           :launch="launchChoice"
           :hide-header="filmstrip"
           :expanded="expanded"
@@ -1495,9 +1234,9 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
                 {{ askMsg }}
               </p>
             </span>
-            <CopyCodeBlock v-if="sessionId" :class="CELL_BTN" :session-id="sessionId" :cwd="cwd" :agent="agent === 'codex' ? 'codex' : 'claude'" />
+            <CopyCodeBlock v-if="sessionId" :class="CELL_BTN" :session-id="sessionId" :cwd="cwd" :agent="agent" />
             <button
-              v-if="sessionId && agent !== 'codex'"
+              v-if="sessionId && agent === 'claude'"
               class="cell-btn"
               :class="CELL_BTN"
               title="Activity timeline"
@@ -1637,286 +1376,27 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
           </div>
         </div>
       </template>
-      <div v-else data-testid="cell-launch" class="flex min-h-0 flex-1 flex-col items-center justify-start gap-2 overflow-y-auto p-4">
-        <button
-          v-if="cancellable"
-          type="button"
-          data-testid="cell-launch-cancel"
-          class="absolute right-1.5 top-1.5 inline-flex h-[26px] w-7 cursor-pointer items-center justify-center rounded-md border-none bg-transparent text-[16px] leading-none text-secondary hover:bg-[var(--err-hover-bg)] hover:text-err-text"
-          title="Cancel new terminal"
-          aria-label="Cancel new terminal"
-          @click="emit('close')"
-        >
-          <span class="material-symbols-outlined" aria-hidden="true">close</span>
-        </button>
-        <div v-if="presets.length" class="flex max-w-[360px] flex-wrap justify-center gap-1.5">
-          <span
-            v-for="p in presets"
-            :key="p.label + p.path"
-            data-testid="cell-chip"
-            class="inline-flex items-stretch overflow-hidden rounded-[14px] border"
-            :class="[
-              { 'is-running': isCwdRunning(p.path) },
-              isCwdRunning(p.path)
-                ? 'border-[color-mix(in_srgb,#3b82f6_55%,var(--border))] bg-[color-mix(in_srgb,#3b82f6_14%,var(--bg-elevated))]'
-                : 'border-border bg-elevated',
-            ]"
-            :style="dirChipTint(presetColors[p.path] ?? null, isCwdRunning(p.path))"
-          >
-            <!-- The directory's colour: a solid stripe down the leading edge, plus a wash over the
-               chip when nothing is running there (dirChipTint). Not a wash while running — that
-               background already means "a session is here", and a dir that configured no colour
-               has to keep looking exactly as it did. -->
-            <span
-              v-if="presetColors[p.path]"
-              data-testid="cell-chip-color"
-              class="w-[6px] flex-none"
-              :style="{ background: presetColors[p.path] }"
-              aria-hidden="true"
-            />
-            <button
-              type="button"
-              data-testid="cell-chip-main"
-              class="cursor-pointer border-none bg-transparent px-2.5 py-1 font-sans text-[12px] hover:bg-hover hover:text-fg"
-              :class="isCwdRunning(p.path) ? 'text-fg' : 'text-secondary'"
-              :title="p.path"
-              :aria-label="`Use ${p.label} — fill the field to browse / resume here (without launching)`"
-              @click="fillDir(p.path)"
-            >
-              <span
-                v-if="isCwdRunning(p.path)"
-                data-testid="cell-chip-dot"
-                class="mr-[5px] inline-block h-1.5 w-1.5 rounded-full bg-[#3b82f6] align-middle"
-                aria-hidden="true"
-              />{{ p.label }}
-            </button>
-            <button
-              type="button"
-              data-testid="cell-chip-launch"
-              class="inline-flex cursor-pointer items-center border-0 border-l border-l-border bg-transparent px-[5px] text-secondary hover:bg-hover hover:text-fg"
-              :title="isCwdRunning(p.path) ? `${p.path} — a session is already running here in another terminal` : `Launch a new terminal in ${p.path} now`"
-              :aria-label="
-                isCwdRunning(p.path) ? `${p.label} — a session is already running here in another terminal` : `Launch a new terminal in ${p.label} now`
-              "
-              @click="selectPreset(p)"
-            >
-              <span class="material-symbols-outlined text-[14px]" aria-hidden="true">play_arrow</span>
-            </button>
-            <button
-              type="button"
-              data-testid="cell-chip-del"
-              class="cursor-pointer border-0 border-l border-l-border bg-transparent px-[7px] text-[11px] text-secondary hover:bg-hover hover:text-[var(--danger,#e5484d)]"
-              :title="`Remove ${p.path} from the list`"
-              :aria-label="`Remove ${p.path} from the list`"
-              @click="emit('remove-preset', p.path)"
-            >
-              <span class="material-symbols-outlined" aria-hidden="true">close</span>
-            </button>
-          </span>
-        </div>
-        <div class="inline-flex gap-0.5 self-start rounded-[7px] border border-border bg-deep p-0.5" role="radiogroup" aria-label="Agent">
-          <button
-            type="button"
-            class="cursor-pointer rounded-[5px] border-none px-3.5 py-1 font-sans text-[12px] font-medium"
-            :class="agent === 'claude' ? 'bg-elevated text-fg' : 'bg-transparent text-dim hover:text-fg'"
-            role="radio"
-            :aria-checked="agent === 'claude'"
-            @click="agent = 'claude'"
-          >
-            Claude
-          </button>
-          <button
-            type="button"
-            class="cursor-pointer rounded-[5px] border-none px-3.5 py-1 font-sans text-[12px] font-medium"
-            :class="agent === 'codex' ? 'bg-elevated text-fg' : 'bg-transparent text-dim hover:text-fg'"
-            role="radio"
-            :aria-checked="agent === 'codex'"
-            @click="agent = 'codex'"
-          >
-            Codex
-          </button>
-        </div>
-        <label class="flex w-full max-w-[360px] flex-col items-center gap-1.5">
-          <span class="font-sans text-[11px] uppercase tracking-[0.05em] text-dim">Working directory</span>
-          <span class="flex w-full items-stretch gap-1.5">
-            <input
-              v-model="dirInput"
-              data-testid="cell-dir-input"
-              class="box-border w-full rounded-md border border-border bg-input px-2.5 py-[7px] font-mono text-[12px] text-fg focus:border-accent focus:outline-none min-w-0 flex-auto"
-              type="text"
-              placeholder="/path/to/project"
-              spellcheck="false"
-              @input="dirTouched = true"
-              @keydown.enter="launch"
-            />
-            <button
-              type="button"
-              class="flex-none inline-flex items-center justify-center px-2 rounded-md border border-border bg-elevated text-secondary cursor-pointer hover:bg-hover hover:text-fg hover:border-accent"
-              title="Choose a folder…"
-              aria-label="Choose the working directory"
-              @click="pickDir"
-            >
-              <span class="material-symbols-outlined text-[18px]" aria-hidden="true">folder_open</span>
-            </button>
-            <button
-              type="button"
-              data-testid="cell-dir-go"
-              class="inline-flex flex-none cursor-pointer items-center justify-center rounded-md border border-border bg-elevated px-2 text-secondary enabled:hover:border-accent enabled:hover:bg-hover enabled:hover:text-fg disabled:cursor-default disabled:opacity-40"
-              :disabled="!dirInput.trim()"
-              title="Start a new terminal here (or press Enter)"
-              aria-label="Start a new terminal here"
-              @click="launch"
-            >
-              <span class="material-symbols-outlined text-[18px]" aria-hidden="true">play_arrow</span>
-            </button>
-          </span>
-        </label>
-        <!-- Codex has its own model configuration and doesn't read this one. -->
-        <ModelPicker v-if="agent === 'claude'" v-model="launchChoice" />
-        <!-- Canvas is a per-DIRECTORY registration in Claude Code's own MCP config, not a
-             per-launch choice — but it only takes effect when a session starts, so this is
-             where it belongs: decided before the thing it configures exists.
-             BOTH agents: claude reads that config itself, and a codex cell is handed the same
-             groups as resolved URLs at spawn (server/session/spawn-codex.ts), so one switch
-             answers for both. It is still Claude Code's file — writing it needs the `claude`
-             CLI on PATH, which is why a failure here says so rather than silently doing nothing.
-             One row per Canvas group: both draw into the same pane, and they are separate
-             switches because a media call is slow, paid and writes files where a render call
-             stops at the pane (see common/toolGroups.ts). -->
-        <template v-if="canvasDir">
-          <!-- The hover names the server id and its tools (canvasTitle); it sits on the ROW so
-               the text is reachable from the label as well as the box. -->
-          <label
-            v-for="group in CANVAS_TOOL_GROUPS"
-            :key="group"
-            class="flex w-full max-w-[360px] items-center justify-between gap-2"
-            :title="canvasTitle(group)"
-          >
-            <!-- The group is named, not just the feature: each switch registers ONE MCP server
-               (`mulmoterminal-<group>`) and the remaining groups are added with `claude mcp
-               add`, so a label reading only "Canvas" would suggest it covers all of them.
-               `normal-case` on the suffix — the section labels around it are uppercased by
-               class, and "(RENDER MCPS)" reads as a different thing than the server it names. -->
-            <span class="font-sans text-[11px] uppercase tracking-[0.05em] text-dim"
-              >Canvas <span class="normal-case">({{ group }} MCPs)</span></span
-            >
-            <span class="flex items-center gap-2">
-              <span v-if="canvasBusy[group]" class="font-sans text-[11px] text-dim">saving…</span>
-              <span v-else-if="canvasError[group]" class="font-sans text-[11px] text-err-text" :title="canvasError[group]!">failed</span>
-              <input
-                v-model="canvasEnabled[group]"
-                :data-testid="`cell-canvas-toggle-${group}`"
-                type="checkbox"
-                class="h-3.5 w-3.5 cursor-pointer accent-accent"
-                :disabled="canvasBusy[group]"
-                :title="canvasTitle(group)"
-                :aria-label="`Register the MCP server ${toolGroupServerId(group)} (${toolsInGroup(group).join(', ')}) so the agent can draw in ${canvasDir}`"
-                @change="applyCanvas(group)"
-              />
-            </span>
-          </label>
-        </template>
-        <div v-if="isGitRepo" data-testid="cell-worktrees" class="flex w-full max-w-[360px] flex-col items-stretch gap-1.5">
-          <span class="font-sans text-[11px] uppercase tracking-[0.05em] text-dim">or isolate in a worktree (git repo)</span>
-          <div class="flex gap-1.5">
-            <input
-              v-model="worktreeTask"
-              data-testid="wt-task"
-              class="box-border w-full rounded-md border border-border bg-input px-2.5 py-[7px] font-mono text-[12px] text-fg focus:border-accent focus:outline-none w-auto min-w-0 flex-auto"
-              type="text"
-              placeholder="task name (e.g. fix-login)"
-              aria-label="Worktree task name"
-              spellcheck="false"
-              @keydown.enter="createWorktreeAndLaunch"
-            />
-            <button
-              data-testid="wt-start"
-              class="inline-flex cursor-pointer items-center gap-1 rounded-md border border-border bg-elevated px-4 py-[7px] font-sans text-[14px] font-medium text-secondary flex-none whitespace-nowrap hover:bg-hover hover:text-fg"
-              :disabled="!worktreeTask.trim()"
-              @click="createWorktreeAndLaunch"
-            >
-              <span class="material-symbols-outlined" aria-hidden="true">add</span> New worktree
-            </button>
-          </div>
-          <div v-for="w in worktrees" :key="w.path" class="flex items-center gap-1.5">
-            <button
-              class="flex-auto min-w-0 text-left rounded-md border border-border bg-elevated text-secondary cursor-pointer font-mono text-[12px] py-[5px] px-2.5 truncate hover:bg-hover hover:text-fg"
-              data-testid="worktree-reuse"
-              :title="w.branch ?? w.path"
-              @click="reuseWorktree(w)"
-            >
-              ⎇ {{ w.task }}<span v-if="w.dirty" data-testid="wt-dirty" class="ml-1.5 text-[var(--warn-text,#e0a030)]" title="uncommitted changes">●</span>
-            </button>
-            <button
-              data-testid="wt-del"
-              class="flex-none cursor-pointer rounded-md border-none bg-transparent px-1.5 py-1 text-[13px] hover:bg-[var(--err-hover-bg)]"
-              title="Remove worktree"
-              aria-label="Remove worktree"
-              @click="removeWorktree(w)"
-            >
-              <span class="material-symbols-outlined" aria-hidden="true">delete</span>
-            </button>
-          </div>
-        </div>
-        <div v-if="scripts.length" class="flex w-full max-w-[360px] flex-col items-center gap-1.5">
-          <span class="font-sans text-[11px] uppercase tracking-[0.05em] text-dim">or run a script</span>
-          <div class="flex w-full flex-wrap justify-center gap-1.5">
-            <button
-              v-for="s in scripts"
-              :key="s.index"
-              data-testid="cell-script-item"
-              class="inline-flex cursor-pointer items-center gap-1 rounded-[14px] border border-[#2a4e3a] bg-[#16271d] px-2.5 py-1 font-sans text-[12px] text-[#b6e3c7] hover:border-[#3fae6b] hover:bg-[#1f3a2a] hover:text-white"
-              :title="s.command"
-              @click="runScript(s)"
-            >
-              <span class="material-symbols-outlined" aria-hidden="true">play_arrow</span> {{ s.label }}
-            </button>
-          </div>
-        </div>
-        <div v-if="launchers && launchers.length" class="flex w-full max-w-[360px] flex-col items-center gap-1.5">
-          <span class="font-sans text-[11px] uppercase tracking-[0.05em] text-dim">or launch</span>
-          <div class="flex w-full flex-wrap justify-center gap-1.5">
-            <button
-              v-for="(l, i) in launchers"
-              :key="l.label"
-              data-testid="cell-script-item"
-              class="inline-flex cursor-pointer items-center gap-1 rounded-[14px] border border-[#2a4e3a] bg-[#16271d] px-2.5 py-1 font-sans text-[12px] text-[#b6e3c7] hover:border-[#3fae6b] hover:bg-[#1f3a2a] hover:text-white"
-              :title="l.command"
-              @click="launchProgram(i, l)"
-            >
-              <span class="material-symbols-outlined" aria-hidden="true">rocket_launch</span> {{ l.label }}
-            </button>
-          </div>
-        </div>
-        <div v-if="resumable.length" data-testid="cell-resume" class="flex min-h-0 w-full max-w-[360px] flex-col items-center gap-1.5">
-          <span class="font-sans text-[11px] uppercase tracking-[0.05em] text-dim">or resume here</span>
-          <div class="flex w-full flex-col gap-1">
-            <button
-              v-for="s in resumable"
-              :key="s.id"
-              data-testid="cell-resume-item"
-              class="flex cursor-pointer items-baseline justify-between gap-2 rounded-md border bg-deep px-2.5 py-[5px] text-left font-sans text-[12px] text-secondary hover:border-accent hover:bg-elevated"
-              :class="[{ 'is-open': sessionOpenElsewhere(s.id) }, sessionOpenElsewhere(s.id) ? 'border-amber' : 'border-border']"
-              :title="sessionOpenElsewhere(s.id) ? `${s.title} — already open in another terminal` : s.title"
-              @click="resume(s)"
-            >
-              <span data-testid="ri-title" class="truncate">{{ s.title }}</span>
-              <span
-                v-if="sessionOpenElsewhere(s.id)"
-                data-testid="ri-open"
-                class="flex-none whitespace-nowrap text-[11px] text-amber"
-                title="Already open in another terminal"
-                >● open</span
-              >
-              <span class="flex-none text-[11px] text-dim">{{ relativeTime(s.mtime) }}</span>
-            </button>
-          </div>
-        </div>
-      </div>
+      <CellLaunchForm
+        v-else
+        :dir="dirInput"
+        :target="launchTarget"
+        :choice="launchChoice"
+        :default-cwd="defaultCwd"
+        :presets="presets"
+        :launchers="launchers"
+        :open-session-ids="openSessionIds"
+        :open-cwds="openCwds"
+        :cancellable="cancellable"
+        @update:dir="onLaunchDir"
+        @update:target="(value) => (launchTarget = value)"
+        @update:choice="(value) => (launchChoice = value)"
+        @start="startTarget"
+        @resume="resumeSession"
+        @run="(cmd) => emit('run', cmd)"
+        @launch="(pick) => emit('launch', pick)"
+        @remove-preset="(path) => emit('remove-preset', path)"
+        @close="emit('close')"
+      />
     </div>
-
-    <!-- The in-browser folder picker for the Working-directory field. Rendered here rather than
-         behind the native dialog, which opens on the server's display (see pickDir). -->
-    <DirPickerModal v-if="showDirPicker" :start="dirInput.trim() || defaultCwd" @select="onDirPicked" @close="showDirPicker = false" />
   </div>
 </template>

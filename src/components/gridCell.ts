@@ -7,7 +7,7 @@
 //
 // Named once so a fourth cell type gets it by construction rather than by copying, and so a
 // change to what the grid needs cannot land in two of the three.
-import type { CellStatus } from "./gridTabs";
+import type { AttentionStatus } from "./attentionStatus";
 
 // The pane showing beside the ENLARGED cell. One slot, three possible occupants, never two at
 // once — the row is already `roster | terminal | pane`, and a fourth column leaves the terminal
@@ -42,5 +42,5 @@ export interface GridCellEmits {
   // Swap this cell left (-1) or right (+1) in manual sort mode.
   (e: "move", dir: -1 | 1): void;
   // Report activity up so the grid can attention-sort in auto mode.
-  (e: "status", value: CellStatus): void;
+  (e: "status", value: AttentionStatus): void;
 }

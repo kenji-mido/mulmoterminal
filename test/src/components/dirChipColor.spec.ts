@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { dirChipColor, dirChipTint } from "../../../src/components/dirChipColor";
+import { dirChipColor, CHIP_IDLE, CHIP_RUNNING, CHIP_DOT_RUNNING } from "../../../src/components/dirChipColor";
 
 const chrome = (over: Partial<Parameters<typeof dirChipColor>[0]> = {}) => ({
   headerColor: null,
@@ -34,21 +34,30 @@ describe("dirChipColor", () => {
   });
 });
 
-describe("dirChipTint", () => {
-  it("washes the chip and warms its border in the directory's colour", () => {
-    const style = dirChipTint("#112233", false);
-    expect(style.background).toContain("#112233");
-    expect(style.background).toContain("var(--bg-elevated)"); // a wash, not the raw colour
-    expect(style.borderColor).toContain("#112233");
+// The chip draws two independent facts, and the bug was that they shared a channel: a
+// colour-coded directory tinted the background exactly the way "running" did, so an idle chip
+// read as running (#1106). These pin the split rather than the exact colours — a redesign may
+// change the hue, but the background must never go back to meaning two things.
+describe("chip class strings", () => {
+  it("gives the idle chip no colour of its own — the stripe carries the directory", () => {
+    expect(CHIP_IDLE).not.toContain("color-mix");
+    expect(CHIP_IDLE).not.toContain("#");
   });
 
-  // The running chip's blue means "a session is already here". A second meaning on the same
-  // background is how both stop being readable — the stripe still carries the dir's colour.
-  it("leaves the background alone while a session is running there", () => {
-    expect(dirChipTint("#112233", true)).toEqual({});
+  it("puts the running state on the background and border", () => {
+    expect(CHIP_RUNNING).toContain("bg-[");
+    expect(CHIP_RUNNING).toContain("border-[");
   });
 
-  it("leaves a directory that configured no colour exactly as it was", () => {
-    expect(dirChipTint(null, false)).toEqual({});
+  // Motion is the one channel a directory's hue cannot imitate, which is what makes a running
+  // chip readable even when its directory colour is the same blue.
+  it("pulses the running dot, and stops for reduced motion", () => {
+    expect(CHIP_DOT_RUNNING).toContain("animate-cell-pulse");
+    expect(CHIP_DOT_RUNNING).toContain("motion-reduce:animate-none");
+  });
+
+  // Two states that render identically are the bug, whatever each one is made of.
+  it("cannot render an idle chip the same as a running one", () => {
+    expect(CHIP_IDLE).not.toBe(CHIP_RUNNING);
   });
 });

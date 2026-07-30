@@ -21,6 +21,8 @@ import { deleteSessionTranscripts } from "../session/transcript-delete.js";
 import { mountHookRoute } from "../routes/hook-routes.js";
 import { mountPluginRoutes } from "../routes/plugin-routes.js";
 import { mountMcpRoutes } from "../routes/mcp-routes.js";
+import { guiCallRecorderFor, historyIsGuiOnly } from "../mcp/gui-call-history.js";
+import type { SessionAgent } from "../../common/sessionAgent.js";
 import { mountSessionRoutes } from "../routes/session-routes.js";
 import { mountToolRoutes } from "../routes/tool-routes.js";
 import { mountRepoRoutes } from "../routes/repo-routes.js";
@@ -46,18 +48,18 @@ import { mountNotificationRoutes } from "../backends/notifier.js";
 import { mountWhisperRoutes } from "../backends/whisper.js";
 import { mountSchedulerRoutes } from "../backends/scheduler.js";
 import { mountFilesRoutes } from "../backends/files.js";
-import { ptys, sessionToolGroups, sessionToolGroupsHydrated, devTerminalSessions, devTerminalSessionsHydrated } from "../session/registry.js";
+import { hookedSessions, ptys, sessionToolGroups, sessionToolGroupsHydrated, devTerminalSessions, devTerminalSessionsHydrated } from "../session/registry.js";
 import { mountShortcutsRoutes } from "../backends/shortcuts.js";
 import { mountDecisionRoutes } from "./decision-routes.js";
 import { mountTranslationRoutes } from "../backends/translation.js";
-import { mountHtmlDispatchRoute, mountHtmlPreviewRoute } from "../backends/html.js";
+import { mountHtmlDispatchRoute, mountHtmlFileRoute, mountHtmlPreviewRoute } from "../backends/html.js";
 import { mountMulmoScriptDispatchRoute, mountMulmoScriptMediaRoute } from "../backends/mulmoscript.js";
 import { CLAUDE_CWD, MULMOTERMINAL_HOME, PORT, SESSION_ID_RE } from "../config/env.js";
-import { FILE_WRITE_CHANNEL } from "../../common/fileWriteChannel.js";
-import { resolveWorkspace } from "../config/workspace.js";
+import { FILE_WRITE_CHANNEL, type FileWriteEvent } from "../../common/fileWriteChannel.js";
 import type { createToolStores } from "../session/tool-store.js";
 import type { createClaudeSpawner } from "../session/spawn-claude.js";
 import type { createCodexSpawner } from "../session/spawn-codex.js";
+import type { createAntigravitySpawner } from "../session/spawn-antigravity.js";
 import type { createTranslationWorker } from "../session/translation-worker.js";
 import type { createTitleManager } from "../session/session-title.js";
 import { tmuxHasSession, tmuxKillSession, tmuxListSessionIds, tmuxAttachedClientCount } from "../infra/tmux.js";
@@ -65,6 +67,7 @@ import { resumableSessionPredicate } from "../session/resumable-sessions.js";
 import type { SessionActivityDeps } from "../session/session-activity-deps.js";
 import { mountSpaFallback } from "../infra/spa-fallback.js";
 import { mountRateLimitRoutes, type RateLimitRouteDeps } from "../agents/rate-limit-routes.js";
+import { workspaceForRoute } from "./routeParams.js";
 
 export interface AppRouteDeps extends SessionActivityDeps {
   clientDir: string;
@@ -73,16 +76,30 @@ export interface AppRouteDeps extends SessionActivityDeps {
   publish: (channel: string, data: unknown) => void;
   sessionChannel: (id: string) => string;
   toolStores: ReturnType<typeof createToolStores>;
+  /** What a session is running, or null when the host cannot tell. Gates the broker's own
+   *  tool-call history — see mcp/gui-call-history.ts. */
+  agentOfSession: (id: string) => SessionAgent | null;
   toolSummaries: Parameters<typeof mountToolRoutes>[1]["toolSummaries"];
   spawnClaudePty: ReturnType<typeof createClaudeSpawner>["spawnClaudePty"];
   spawnCodexPty: ReturnType<typeof createCodexSpawner>["spawnCodexPty"];
+  spawnAntigravityPty: ReturnType<typeof createAntigravitySpawner>["spawnAntigravityPty"];
   translateViaHiddenChat: ReturnType<typeof createTranslationWorker>["translateViaHiddenChat"];
   freshenRosterTitle: ReturnType<typeof createTitleManager>["freshenRosterTitle"];
   reap: (id: string) => void;
+  registerBackgroundSession: (id: string) => void;
 }
 
 // The channel a directory-config change is announced on.
 const DIR_CONFIG_CHANNEL = "dir-config";
+
+// The two signals behind both halves of the broker-fed history: whether it is written at all, and
+// whether the pane tells the user it holds the GUI tools alone. Read here so the two answers are
+// built from one reading of the session — they are not the same question (the claim is stricter,
+// see historyIsGuiOnly), but they must never be built from different facts.
+const sessionCallReporting = (deps: AppRouteDeps, sessionId: string) => ({
+  agent: deps.agentOfSession(sessionId),
+  reportsOwnCalls: hookedSessions.has(sessionId),
+});
 
 export function mountAppRoutes(app: Express, deps: AppRouteDeps): void {
   const clientDir = deps.clientDir;
@@ -103,7 +120,12 @@ export function mountAppRoutes(app: Express, deps: AppRouteDeps): void {
   // The GUI-plugin tool routes this server answers itself: spawnBackgroundChat,
   // manageAccounting, manageCollection (routes/plugin-routes.ts). ALL of them must precede
   // mountAllRoutes' /api/plugin/:toolName catch-all below, which would otherwise take them.
-  mountPluginRoutes(app, { spawnClaudePty: deps.spawnClaudePty, spawnCodexPty: deps.spawnCodexPty });
+  mountPluginRoutes(app, {
+    spawnClaudePty: deps.spawnClaudePty,
+    spawnCodexPty: deps.spawnCodexPty,
+    spawnAntigravityPty: deps.spawnAntigravityPty,
+    registerBackgroundSession: deps.registerBackgroundSession,
+  });
 
   // presentHtml View's source-editor dispatch (loadHtml/saveHtml) on
   // /api/plugin/presentHtml. MUST precede mountAllRoutes' /api/plugin/:toolName
@@ -167,6 +189,10 @@ export function mountAppRoutes(app: Express, deps: AppRouteDeps): void {
   // HTML preview CSP. The View navigates the iframe to this URL (htmlArtifactPreviewUrl).
   mountHtmlPreviewRoute(app, { workspace: CLAUDE_CWD });
 
+  // The same, for a page presentHtml was POINTED at rather than wrote (GET
+  // /htmlfile/<scope>/…, built by htmlFileUrl). No containment root — see the route.
+  mountHtmlFileRoute(app);
+
   // Shared launcher favorites (GET/PUT /api/shortcuts) over the same
   // <workspace>/config/shortcuts.json MulmoClaude uses — backs the collections toolbar.
   mountShortcutsRoutes(app, { workspace: CLAUDE_CWD });
@@ -190,7 +216,13 @@ export function mountAppRoutes(app: Express, deps: AppRouteDeps): void {
 
   // The agent-facing MCP surface (routes/mcp-routes.ts): the in-process GUI MCP server over
   // Streamable HTTP, and the worker-only landing point the hidden translation worker reports to.
-  mountMcpRoutes(app, { publish: (c, d) => deps.publish(c, d) });
+  mountMcpRoutes(app, {
+    publish: (c, d) => deps.publish(c, d),
+    // codex and agy have no hooks, so the broker is the only place their tool calls can reach
+    // the tools pane's history. Claude's do NOT come through here — it would double every entry
+    // its own PreToolUse/PostToolUse already writes.
+    guiCallHistory: (sessionId) => guiCallRecorderFor(sessionId, sessionCallReporting(deps, sessionId), deps.toolStores),
+  });
 
   // Serve Vite build output
   app.use(express.static(path.join(clientDir, "../dist")));
@@ -222,7 +254,7 @@ function mountSessionFacingRoutes(app: Express, deps: AppRouteDeps): void {
     recordToolCallStart: deps.toolStores.recordToolCallStart,
     recordToolCallEnd: deps.toolStores.recordToolCallEnd,
     publishDirConfig: (cwd) => deps.publish(DIR_CONFIG_CHANNEL, { cwd }),
-    publishFileWrite: (file) => deps.publish(FILE_WRITE_CHANNEL, { file }),
+    publishFileWrite: (file) => deps.publish(FILE_WRITE_CHANNEL, { file } satisfies FileWriteEvent),
     // Express serves the built SPA on PORT; under `yarn dev` the UI is Vite's own server,
     // whose port the backend only knows when CLIENT_PORT is set in its environment.
     uiPort: String(process.env.CLIENT_PORT || PORT),
@@ -237,6 +269,10 @@ function mountSessionFacingRoutes(app: Express, deps: AppRouteDeps): void {
     sessionToolGroupsHydrated,
     isGridSession: (id) => devTerminalSessions.has(id),
     devTerminalSessionsHydrated,
+    // Built from the same two signals as the broker's recorder, but with the stricter rule the
+    // user-facing claim needs — see historyIsGuiOnly for why the pane must not answer this the
+    // moment a session id exists.
+    guiOnlyHistory: (id) => historyIsGuiOnly(sessionCallReporting(deps, id)),
     publish: (c, d) => deps.publish(c, d),
     sessionChannel: deps.sessionChannel,
   });
@@ -293,7 +329,7 @@ function mountSessionFacingRoutes(app: Express, deps: AppRouteDeps): void {
 
   // GET /api/cost — estimated $ cost (session + today/month roll-up) for a project's
   // sessions, from public per-model pricing. Read-only; shown in the Settings modal (#245).
-  mountCostRoute(app, { resolveCwd: resolveWorkspace });
+  mountCostRoute(app, { resolveCwd: workspaceForRoute });
 
   // POST /api/remote-host/connect|disconnect + GET /status — start/stop the
   // Firestore host loop from the toolbar Connect control. Same-origin guarded like
@@ -308,7 +344,7 @@ function mountSessionFacingRoutes(app: Express, deps: AppRouteDeps): void {
 
   // Sidebar listing, one session's detail, the grid's attention poll, the tool timeline and
   // codex's own sessions (see routes/session-routes.ts).
-  mountSessionRoutes(app, { freshenRosterTitle: deps.freshenRosterTitle });
+  mountSessionRoutes(app, { freshenRosterTitle: deps.freshenRosterTitle, publishActivity: deps.publishActivity });
 
   // Explicit close (reliable deps.reap over HTTP) + one-shot orphan cleanup. Extracted to a
   // module so the origin guard / id validation / orphan-selection boundary are testable.

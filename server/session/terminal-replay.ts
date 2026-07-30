@@ -23,6 +23,21 @@ export function stripTerminalQueries(data: string): string {
   return QUERY_PATTERNS.reduce((out, re) => out.replace(re, ""), data);
 }
 
+// The DECSETs that put a reattaching browser back into the screen buffer and mouse modes the app
+// set once and never repeated (#1073) — read from tmux, sent AHEAD of the replay so the tail
+// renders where it was written.
+//
+// ONE SEQUENCE PER MODE, never `CSI ? 1049 ; 1003 h`. The client only swallows a sequence whose
+// parameters are ALL mouse modes (src/composables/mouseTrackingModes.ts); a combined one would
+// reach xterm, which would then do the mouse tracking itself and turn every drag into coordinate
+// reports instead of a text selection — the regression #729 exists to prevent.
+//
+// Order within the prefix doesn't matter (the client records modes into a Set, and xterm's mouse
+// state survives the buffer switch). Preceding the replay is what matters.
+export function terminalModePrefix(modes: readonly number[]): string {
+  return modes.map((mode) => `${ESC}[?${mode}h`).join("");
+}
+
 // A CSI sequence closes with a final byte in 0x40-0x7E; an OSC string closes with BEL
 // or ST. Neither can appear inside the sequence before its terminator, so the first
 // occurrence IS the end.
@@ -86,58 +101,4 @@ export function appendBoundedOutput(buffer: string, data: string, limit: number)
   const cutAt = combined.length - limit;
   const cut = combined.slice(cutAt);
   return cut.slice(splitSequenceLength(combined, cutAt, cut));
-}
-
-// The terminal MODES the replay tail can no longer restore. An app sets its private modes
-// (DECSET: alt screen ?1049, mouse tracking ?1000/?1006, cursor keys ?1, bracketed paste
-// ?2004…) ONCE, at startup — tmux emits them when the pty is born. A long session's output
-// pushes those bytes out of the bounded tail, so a browser that reattaches later rebuilds the
-// screen but not the STATE: xterm sits in the normal buffer with no mouse modes, and
-// wheel/touch scrolling and arrow-key encoding quietly break (only on old, chatty sessions —
-// which is exactly what makes it confusing). Track the currently-SET modes from the output
-// stream instead, and let reattach re-assert them ahead of the replayed tail.
-const DECSET = new RegExp(ESC + "\\[\\?([0-9;]+)([hl])", "g");
-// A suffix that might be the OPENING of a DECSET split across chunk boundaries — carried into
-// the next feed() so the sequence is still recognized when its final byte arrives.
-const DECSET_OPEN = new RegExp(ESC + "(\\[(\\?[0-9;]*)?)?$");
-
-// The buffer-switching modes must be re-asserted FIRST: the replayed tail is alt-screen
-// drawing, so the switch has to happen before it, and the others are order-independent.
-const ALT_SCREEN_MODES = [1049, 1047, 47];
-
-export class PrivateModeTracker {
-  private readonly active = new Set<number>();
-  private tail = "";
-
-  /** Scan a PTY output chunk for DECSET/DECRST and update the live mode set. */
-  feed(data: string): void {
-    const scan = this.tail + data;
-    for (const m of scan.matchAll(DECSET)) {
-      for (const param of m[1].split(";")) {
-        const mode = Number(param);
-        if (!Number.isInteger(mode)) continue;
-        if (m[2] === "h") this.active.add(mode);
-        else this.active.delete(mode);
-      }
-    }
-    this.tail = DECSET_OPEN.exec(scan)?.[0] ?? "";
-  }
-
-  /** The DECSET string that restores the live modes on a fresh emulator ("" when none). */
-  preamble(): string {
-    if (this.active.size === 0) return "";
-    const alt = ALT_SCREEN_MODES.filter((m) => this.active.has(m));
-    const rest = [...this.active].filter((m) => !ALT_SCREEN_MODES.includes(m)).sort((a, b) => a - b);
-    return [...alt, ...rest].map((m) => `${ESC}[?${m}h`).join("");
-  }
-}
-
-// Everything a PTY chunk has to be recorded into, in one call. Kept together because they are
-// two halves of the SAME promise — that a browser attaching later can rebuild the session — and
-// splitting them across every spawner is how one of them ends up forgotten at a new call site:
-// the tail would still replay, the modes would silently not, and the failure only shows up on a
-// long-lived session where scrolling stops working.
-export function recordPtyOutput(entry: { buffer: string; modes: PrivateModeTracker }, data: string, limit: number): void {
-  entry.buffer = appendBoundedOutput(entry.buffer, data, limit);
-  entry.modes.feed(data);
 }

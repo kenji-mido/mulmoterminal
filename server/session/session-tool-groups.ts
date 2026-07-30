@@ -11,7 +11,7 @@
 // running in tmux — already past its ListTools and with no reason to call again. The panel
 // would then decide the cell has no Canvas and hide it on a session that is still drawing.
 //
-// Same APPEND LOG shape as dev-terminal-sessions.ts, for the same reason: MULMOTERMINAL_HOME
+// Same APPEND LOG shape as session-id-log.ts, for the same reason: MULMOTERMINAL_HOME
 // is shared by every server on the machine, so a read-merge-write loses whichever of two
 // instances finishes first. Nothing is ever removed, so appending needs no read.
 
@@ -71,7 +71,7 @@ export function parseSessionToolGroups(contents: string, isValidId: (id: string)
 
 /**
  * What to append for a newly learned pair. The newline leads rather than trails for the same
- * reason it does in dev-terminal-sessions.ts: whatever the file ended with, an appended entry
+ * reason it does in session-id-log.ts: whatever the file ended with, an appended entry
  * starts its own line, so a file that was cut off mid-write costs one entry and not the rest.
  */
 export function sessionToolGroupLine(sessionId: string, group: ToolGroup | typeof TOOL_GROUP_RESET): string {

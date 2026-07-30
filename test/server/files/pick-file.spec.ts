@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { pickFileCommand, parsePickerOutput } from "../../../server/files/pick-file.js";
+import { PS_UTF8_STDOUT } from "../../../server/files/win-powershell-utf8.js";
 
 describe("pickFileCommand", () => {
   it("uses osascript on macOS", () => {
@@ -56,6 +57,33 @@ describe("pickFileCommand (directory mode)", () => {
   });
 });
 
+// #1146: PowerShell 5.1 pipes stdout in the OEM code page, so a path's non-ASCII part reaches Node
+// mangled while `C:\` survives — an absolute-looking path that does not exist, which the launcher
+// then quietly replaces with the default workspace. Both dialogs read stdout, so both need this.
+describe("Windows picker output encoding", () => {
+  it("forces UTF-8 stdout in the folder picker, before the dialog is shown", () => {
+    const script = pickFileCommand("win32", true).args[3];
+    expect(script).toContain(PS_UTF8_STDOUT);
+    expect(script.indexOf(PS_UTF8_STDOUT)).toBeLessThan(script.indexOf("Folder]::Pick"));
+  });
+  it("forces UTF-8 stdout in the file picker too", () => {
+    const script = pickFileCommand("win32", false).args[3];
+    expect(script).toContain(PS_UTF8_STDOUT);
+    expect(script.indexOf(PS_UTF8_STDOUT)).toBeLessThan(script.indexOf("OpenFileDialog"));
+  });
+  // `[System.Text.Encoding]::UTF8` carries a BOM preamble, which turns the first path into
+  // "\uFEFFC:\..." — not absolute, so every pick would look like a cancel, on every locale.
+  it("uses the BOM-less UTF8Encoding, not [System.Text.Encoding]::UTF8", () => {
+    expect(PS_UTF8_STDOUT).toContain("UTF8Encoding $false");
+    expect(PS_UTF8_STDOUT).not.toContain("[System.Text.Encoding]::UTF8");
+  });
+  // SetConsoleOutputCP can fail where no console is attached. Mangled output is the old behaviour;
+  // a terminating error would cost the user the dialog itself.
+  it("cannot kill the script when the console has no code page to set", () => {
+    expect(PS_UTF8_STDOUT).toMatch(/^try \{.*\} catch \{ \}$/);
+  });
+});
+
 describe("parsePickerOutput", () => {
   it("splits newline-separated absolute paths", () => {
     expect(parsePickerOutput("/a/b.txt\n/c/d.txt")).toEqual(["/a/b.txt", "/c/d.txt"]);
@@ -71,5 +99,15 @@ describe("parsePickerOutput", () => {
   });
   it("returns empty for empty output (user canceled)", () => {
     expect(parsePickerOutput("")).toEqual([]);
+  });
+  // Not CJK-specific: the bug is a code page, so every non-ASCII script travels the same path.
+  it("keeps non-ASCII paths byte-for-byte, in any script", () => {
+    const paths = ["/proj/日本語フォルダ", "/proj/中文目录", "/proj/한국어폴더", "/proj/café", "/proj/Кириллица", "/proj/📁"];
+    expect(parsePickerOutput(paths.join("\n"))).toEqual(paths);
+  });
+  // A console host may print a UTF-8 BOM ahead of the first line; `trim` drops it because U+FEFF is
+  // ECMAScript WhiteSpace. Pinned so a "tidier" line filter cannot turn a pick into a cancel.
+  it("tolerates a UTF-8 BOM ahead of the first path", () => {
+    expect(parsePickerOutput("\uFEFF/proj/日本語\n/proj/b")).toEqual(["/proj/日本語", "/proj/b"]);
   });
 });

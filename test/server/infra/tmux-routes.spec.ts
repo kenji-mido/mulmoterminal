@@ -24,12 +24,17 @@ function makeRes(): FakeRes {
 }
 
 type Handler = (req: { headers: { origin?: string }; params: { id?: string } }, res: FakeRes) => unknown;
+type MountedHandler = (req: { headers: { origin?: string }; params: { id?: string }; method: string; path: string }, res: FakeRes) => unknown;
 
 // Mount with the given deps and hand back the two handlers by path — no HTTP server
-// needed (mirrors gitRemote.spec's capture pattern).
+// needed (mirrors gitRemote.spec's capture pattern). The captured handler is wrapped to
+// carry the method and path Express would have set: the origin guard reads both, since it
+// is the same rule the central gate applies (a safe method is never judged by origin).
 function mountAndCapture(deps: TmuxRouteDeps): { terminate: Handler; cleanup: Handler; hide: Handler; del: Handler } {
   const handlers = new Map<string, Handler>();
-  const app = { post: (p: string, h: Handler) => handlers.set(p, h) } as unknown as Express;
+  const app = {
+    post: (p: string, h: MountedHandler) => handlers.set(p, (req, res) => h({ ...req, method: "POST", path: p }, res)),
+  } as unknown as Express;
   mountTmuxRoutes(app, deps);
   const terminate = handlers.get("/api/session/:id/terminate");
   const cleanup = handlers.get("/api/tmux/cleanup-orphans");

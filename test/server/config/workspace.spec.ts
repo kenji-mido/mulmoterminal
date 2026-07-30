@@ -2,12 +2,16 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { makeTempDirAsync } from "../../support/tempDir.js";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { resolveWorkspace, workspaceFromQuery, existingWorkspace, existingWorkspaceFromQuery } from "../../../server/config/workspace.js";
+import { workspaceRequest, existingWorkspace, existingWorkspaceFromQuery } from "../../../server/config/workspace.js";
 import { CLAUDE_CWD } from "../../../server/config/env.js";
+import { cwdProblemMessage } from "../../../server/infra/spawn-cwd.js";
 
-// resolveWorkspace guards what becomes a PTY's cwd, so every rejection matters: anything
-// it lets through unchecked is a path the client chose.
-describe("resolveWorkspace", () => {
+// workspaceRequest guards what becomes a PTY's cwd, so every rejection matters: anything it lets
+// through unchecked is a path the client chose. It also decides what a rejection MEANS — #1151:
+// a directory that was named and cannot be used is not the same request as one that named none,
+// and answering both with the default workspace is how a terminal opened somewhere else in
+// silence.
+describe("workspaceRequest", () => {
   let dir = "";
   let file = "";
 
@@ -22,49 +26,53 @@ describe("resolveWorkspace", () => {
   });
 
   it("accepts an absolute path to an existing directory", () => {
-    expect(resolveWorkspace(dir)).toBe(dir);
+    expect(workspaceRequest(dir)).toEqual({ kind: "resolved", cwd: dir });
   });
 
-  it("falls back for a relative path, however real it is", () => {
-    expect(resolveWorkspace("server")).toBe(CLAUDE_CWD);
-    expect(resolveWorkspace("./server")).toBe(CLAUDE_CWD);
-    expect(resolveWorkspace("../mulmoterminal")).toBe(CLAUDE_CWD);
+  // No directory was asked for, so the default IS the answer — the case the fallback was right
+  // for, and the only one that keeps it. An empty param is how a browser spells the same thing.
+  it("answers the default workspace when no directory is named", () => {
+    expect(workspaceRequest(undefined)).toEqual({ kind: "default", cwd: CLAUDE_CWD });
+    expect(workspaceRequest(null)).toEqual({ kind: "default", cwd: CLAUDE_CWD });
+    expect(workspaceRequest("")).toEqual({ kind: "default", cwd: CLAUDE_CWD });
   });
 
-  it("falls back for a path that does not exist", () => {
-    expect(resolveWorkspace(path.join(dir, "no-such-dir"))).toBe(CLAUDE_CWD);
+  it("refuses a relative path, however real it is, and says it is not absolute", () => {
+    for (const relative of ["server", "./server", "../mulmoterminal"]) {
+      const request = workspaceRequest(relative);
+      expect(request.kind).toBe("unusable");
+      expect(request).toMatchObject({ requested: relative, malformed: true });
+      if (request.kind === "unusable") expect(request.problem).toContain("is not an absolute path");
+    }
   });
 
-  it("falls back for a file — a cwd has to be a directory", () => {
-    expect(resolveWorkspace(file)).toBe(CLAUDE_CWD);
+  // The #1146 shape: the path was real when it was recorded and is not any more. The wording is
+  // SpawnCwdError's own (#1078), so the reason reads the same whether the directory is refused
+  // here or by the spawn itself.
+  it("refuses a path that does not exist, in the words a refused spawn uses", () => {
+    const gone = path.join(dir, "no-such-dir");
+    const request = workspaceRequest(gone);
+    expect(request).toMatchObject({ kind: "unusable", requested: gone, malformed: false });
+    if (request.kind === "unusable") expect(request.problem).toBe(cwdProblemMessage(gone, { kind: "missing" }));
   });
 
-  it("falls back for null and for empty", () => {
-    expect(resolveWorkspace(null)).toBe(CLAUDE_CWD);
-    expect(resolveWorkspace("")).toBe(CLAUDE_CWD);
+  it("refuses a file — a cwd has to be a directory", () => {
+    const request = workspaceRequest(file);
+    expect(request).toMatchObject({ kind: "unusable", malformed: false });
+    if (request.kind === "unusable") expect(request.problem).toBe(cwdProblemMessage(file, { kind: "not-a-directory" }));
+  });
+
+  // Express hands over an array when a param repeats (?cwd=a&cwd=b). It was ASKED for, so it is
+  // refused rather than quietly swapped for the default — but as a malformed request, not a
+  // missing directory.
+  it("refuses anything that is not a string, having been given one", () => {
+    expect(workspaceRequest(["/tmp", "/etc"])).toMatchObject({ kind: "unusable", malformed: true });
+    expect(workspaceRequest(42)).toMatchObject({ kind: "unusable", malformed: true });
   });
 });
 
-describe("workspaceFromQuery", () => {
-  it("resolves a string query", async () => {
-    const dir = await makeTempDirAsync("mt-wsq-");
-    expect(workspaceFromQuery(dir)).toBe(dir);
-    await fs.rm(dir, { recursive: true, force: true });
-  });
-
-  // Express hands over an array when a param repeats (?cwd=a&cwd=b) and undefined when it
-  // is absent; neither may reach the validation as a path.
-  it("falls back for anything that is not a string", () => {
-    expect(workspaceFromQuery(undefined)).toBe(CLAUDE_CWD);
-    expect(workspaceFromQuery(["/tmp", "/etc"])).toBe(CLAUDE_CWD);
-    expect(workspaceFromQuery(42)).toBe(CLAUDE_CWD);
-    expect(workspaceFromQuery(null)).toBe(CLAUDE_CWD);
-  });
-});
-
-// The fallback in resolveWorkspace is right for a route that RUNS somewhere and wrong for one
-// that REPORTS on the directory it was asked about — that one would answer about a different
-// directory under the requested one's name (Codex, #952).
+// The raw guard behind workspaceRequest, still used directly by the routes that answer their own
+// "unknown directory" payload rather than a refusal (Codex, #952).
 describe("existingWorkspace", () => {
   it("returns a real directory unchanged", () => {
     expect(existingWorkspace(process.cwd())).toBe(process.cwd());
@@ -103,19 +111,18 @@ describe("canonical spelling of the accepted directory", () => {
   });
 
   it("drops a trailing separator — the shape tab-completion leaves behind", () => {
-    expect(resolveWorkspace(dir + path.sep)).toBe(dir);
     expect(existingWorkspace(dir + path.sep)).toBe(dir);
-    expect(workspaceFromQuery(dir + path.sep)).toBe(dir);
     expect(existingWorkspaceFromQuery(dir + path.sep)).toBe(dir);
+    expect(workspaceRequest(dir + path.sep)).toEqual({ kind: "resolved", cwd: dir });
   });
 
   it("collapses . and .. inside an absolute path", () => {
-    expect(resolveWorkspace(path.join(dir, "sub", ".."))).toBe(dir);
-    expect(resolveWorkspace(path.join(dir, "."))).toBe(dir);
+    expect(workspaceRequest(path.join(dir, "sub", ".."))).toEqual({ kind: "resolved", cwd: dir });
+    expect(workspaceRequest(path.join(dir, "."))).toEqual({ kind: "resolved", cwd: dir });
   });
 
   it("leaves an already-canonical path untouched", () => {
-    expect(resolveWorkspace(dir)).toBe(dir);
+    expect(workspaceRequest(dir)).toEqual({ kind: "resolved", cwd: dir });
   });
 
   // The guard order matters: canonicalizing BEFORE the isAbsolute check would splice a relative
@@ -156,6 +163,6 @@ describe("canonical spelling of the accepted directory", () => {
 
   it("keeps the filesystem root, whose separator is not trailing", () => {
     const root = path.parse(dir).root;
-    expect(resolveWorkspace(root)).toBe(root);
+    expect(workspaceRequest(root)).toEqual({ kind: "resolved", cwd: root });
   });
 });

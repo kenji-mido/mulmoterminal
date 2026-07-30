@@ -8,17 +8,18 @@
 //
 // useAppConfig's state is a singleton, so reading it here is the same state the shells read.
 // What genuinely differs stays a prop or an event: the chat view knows a cwd and a session,
-// and each shell configures appearance its own way.
+// and each shell opens the skill session its own way.
 import { computed } from "vue";
 import { useAppConfig } from "../composables/useAppConfig";
 import SettingsModal from "./SettingsModal.vue";
 import type { CwdPreset } from "./presets";
+import type { BundledSkillName } from "../../common/bundledSkills";
 
 // `presets` comes DOWN from the shell rather than out of useAppConfig() here: unlike the
 // sound/push/launcher state, the preset list is a per-call ref, so the copy this component
 // would get is a second, empty one — the shell that called loadConfig() has the real list.
 const props = defineProps<{ cwd?: string | null; sessionId?: string | null; presets?: CwdPreset[] }>();
-const emit = defineEmits<{ (e: "configure-appearance" | "close"): void }>();
+const emit = defineEmits<{ (e: "launch-skill", skill: BundledSkillName): void; (e: "close"): void }>();
 
 const {
   soundFile,
@@ -72,7 +73,7 @@ const dirPaths = computed(() => {
     @update-launchers="saveLaunchers"
     @update-quick-commands="saveQuickCommands"
     @update-user-mcp="saveUserMcpServers"
-    @configure-appearance="emit('configure-appearance')"
+    @launch-skill="emit('launch-skill', $event)"
     @close="emit('close')"
   />
 </template>

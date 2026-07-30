@@ -4,6 +4,7 @@
 import type { WebSocket } from "ws";
 import { PORT } from "../config/env.js";
 import { buildCodexArgs } from "../agents/codex-args.js";
+import { codexAdapter } from "../agents/codex.js";
 import type { ToolGroup } from "../../common/toolGroups.js";
 import { codexGuiMcpServers } from "./mcp-config.js";
 import { codexSessionsRoot, snapshotSessions, watchForCodexSession } from "../agents/codex-session.js";
@@ -11,9 +12,9 @@ import { codexRolloutPath } from "../agents/codex-sessions.js";
 import { trackCodexActivity } from "./codex-activity-track.js";
 import { claimedCodexRollouts, codexRolloutIds, ptys } from "./registry.js";
 import { ptySpawn } from "./pty-spawn.js";
+import { ptyStartLine } from "./pty-exit-log.js";
+import { wireAgentPtyRelay } from "./pty-relay.js";
 import { attachCodexAutoRun } from "./draft-injection.js";
-import { sendExitAndClose, sendFrame } from "./ws-frames.js";
-import { PrivateModeTracker, recordPtyOutput } from "./terminal-replay.js";
 import type { PtyEntry } from "./types.js";
 import type { SpawnDeps } from "./spawn-deps.js";
 
@@ -28,19 +29,6 @@ const activityDepsFor = (sessionId: string, entry: PtyEntry, deps: SpawnDeps) =>
 });
 
 export function createCodexSpawner(deps: SpawnDeps) {
-  function wireCodexRelay(entry: PtyEntry, sessionId: string, onOutput?: (data: string) => void): void {
-    entry.term.onData((data) => {
-      recordPtyOutput(entry, data, deps.outputBufferLimit);
-      sendFrame(entry.ws, { type: "output", data });
-      onOutput?.(data);
-    });
-    entry.term.onExit(({ exitCode, signal }) => {
-      console.log(`[pty] codex exited code=${exitCode} signal=${signal}`);
-      sendExitAndClose(entry.ws, exitCode, signal);
-      deps.reap(sessionId);
-    });
-  }
-
   // codex persists its rollout only after the first user turn, so watch a FRESH session's lifetime
   // (stop once its pty is gone) and capture the minted id so a later cold reconnect can
   // `codex resume <id>`. Attribution is unambiguous-only (see pickFreshSession).
@@ -84,11 +72,11 @@ export function createCodexSpawner(deps: SpawnDeps) {
     // A grid cell whose directory registered nothing gets no MCP at all, exactly as before.
     const guiMcpServers = codexGuiMcpServers({ sessionId, port: PORT, groups: mcpGroups, allTools: attachGuiMcp });
     const args = buildCodexArgs({ resume: resumeRolloutId, model: deps.codexModel, guiMcpServers });
-    const { term, tmux } = ptySpawn(sessionId, deps.codexBin, args, cwd, true);
-    const via = tmux ? " via tmux" : "";
-    const resumeNote = resumeRolloutId ? ` (resume ${resumeRolloutId})` : "";
-    console.log(`[pty] spawned codex (pid=${term.pid}${via}) in ${cwd}${resumeNote}`);
-    const entry: PtyEntry = { term, ws, buffer: "", modes: new PrivateModeTracker(), cwd, tmux, active: false, agent: "codex" };
+    const { term, tmux, reattached } = ptySpawn(sessionId, deps.codexBin, args, cwd, true, { binEnvVar: codexAdapter.binEnvVar });
+    const spawnedAtMs = Date.now();
+    const note = resumeRolloutId ? `resume ${resumeRolloutId}` : null;
+    console.log(ptyStartLine({ agent: "codex", pid: term.pid, cwd, tmux, reattached, sessionId, note }));
+    const entry: PtyEntry = { term, ws, buffer: "", cwd, tmux, active: false, agent: "codex" };
     ptys.set(sessionId, entry);
     if (resumeRolloutId) {
       codexRolloutIds.set(sessionId, resumeRolloutId);
@@ -102,7 +90,7 @@ export function createCodexSpawner(deps: SpawnDeps) {
     // A seed prompt is typed into codex's input box after it settles (not a CLI arg — see
     // attachCodexAutoRun), so a long collection-action prompt can't overflow tmux's command limit.
     const autoRun = initialPrompt ? attachCodexAutoRun(entry, initialPrompt) : undefined;
-    wireCodexRelay(entry, sessionId, autoRun);
+    wireAgentPtyRelay(entry, sessionId, spawnedAtMs, deps, autoRun);
     return entry;
   }
 

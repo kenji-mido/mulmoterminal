@@ -7,6 +7,8 @@ import {
   submitSequence,
   newlineSequence,
   submitSequenceForAgent,
+  submittableLine,
+  submittableLineForAgent,
   enterKeyOverride,
   type EnterKeyEvent,
   type TerminalSubmitMode,
@@ -46,6 +48,68 @@ describe("submitSequenceForAgent", () => {
   it.each(["shell", "codex", "bash", undefined])("keeps plain CR for non-Claude agent %j", (agent) => {
     expect(submitSequenceForAgent(agent, "cr")).toBe(CR);
     expect(submitSequenceForAgent(agent, "esc-cr")).toBe(CR);
+  });
+});
+
+// #1142: Claude Code holds a completion menu open while the cursor sits at the end of a
+// `/command` or `@path` token, and while it is open the ESC of an ESC+CR submit is eaten as the
+// menu's dismiss key — the line never submits, however often it is resent. One trailing space
+// ends the token. Measured against Claude Code 2.1.220 for both trigger characters.
+describe("submittableLine", () => {
+  it("ends a slash command with a space, so no command menu is holding the submit", () => {
+    expect(submittableLine("/sync-repos")).toBe("/sync-repos ");
+  });
+
+  // Not just `/`: a message whose last token is an @path leaves the FILE picker open, which is
+  // why the rule is unconditional instead of a list of Claude Code's trigger characters — one we
+  // failed to enumerate would silently restore the dead end.
+  it("ends an @path mention with a space too", () => {
+    expect(submittableLine("look at @common/terminalSubmit.ts")).toBe("look at @common/terminalSubmit.ts ");
+  });
+
+  it("ends ordinary prose the same way — no trigger detection to drift", () => {
+    expect(submittableLine("run the tests")).toBe("run the tests ");
+  });
+
+  it.each(["/help ", "already ends in a space ", "tabbed\t", ""])("adds nothing when no token can be open at the end (%j)", (text) => {
+    expect(submittableLine(text)).toBe(text);
+  });
+
+  // A multi-line block (pasteAndSubmit) already parks the cursor on a fresh line, where no
+  // completion token can be open.
+  it("leaves a block ending in a newline alone", () => {
+    expect(submittableLine("line1\nline2\n")).toBe("line1\nline2\n");
+  });
+
+  // The whole payload it may add is one space: never a control byte, never a second space, and
+  // never an edit to what the caller wrote.
+  it.each(["/x", "", "a\nb", "café 😀", "ls -la", "@", "/", "  leading kept"])("adds at most one trailing space and changes nothing else (%j)", (text) => {
+    const out = submittableLine(text);
+    expect([text, `${text} `]).toContain(out);
+    expect(out.startsWith(text)).toBe(true);
+    expect(out).not.toMatch(/ {2}$/);
+  });
+});
+
+// The guard belongs to Claude Code and to nothing else. Everywhere else the space would be REAL
+// input: measured in a live zsh, `echo foo\` + CR waits at a continuation prompt while
+// `echo foo\ ` + CR runs and prints `foo`, so a shell's bytes must stay exactly what was written.
+describe("submittableLineForAgent", () => {
+  it("guards a Claude session", () => {
+    expect(submittableLineForAgent("claude", "/sync-repos")).toBe("/sync-repos ");
+  });
+
+  it.each(["shell", "codex", "bash", undefined])("leaves a %j session byte-exact", (agent) => {
+    expect(submittableLineForAgent(agent, "/sync-repos")).toBe("/sync-repos");
+    expect(submittableLineForAgent(agent, "echo foo\\")).toBe("echo foo\\");
+  });
+
+  // Same scoping as submitSequenceForAgent, so the two cannot drift into disagreeing about which
+  // sessions follow Claude Code's behaviour.
+  it.each(["claude", "shell", "codex", undefined])("agrees with submitSequenceForAgent on who is Claude (%j)", (agent) => {
+    const guarded = submittableLineForAgent(agent, "x") !== "x";
+    const followsMapping = submitSequenceForAgent(agent, "esc-cr") !== CR;
+    expect(guarded).toBe(followsMapping);
   });
 });
 

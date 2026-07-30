@@ -47,3 +47,42 @@ describe("SessionTabBar tab background", () => {
     expect(bar.find("button[title='session b']").classes()).toContain("hover:bg-subtle");
   });
 });
+
+// #1139: the tab's unread dot was `--err-strong` red for BOTH "stopped on a prompt" and "finished,
+// unread" — and a finished turn is not an error. It now takes the hue from the shared rule.
+describe("SessionTabBar attention dot", () => {
+  const bar = (sessions: Session[], activeId: string | null = null) => mount(SessionTabBar, { props: { sessions, activeId, filter: "all" as const } });
+
+  it("is amber while stopped on a prompt and green once finished", () => {
+    const w = bar([session("a", { waiting: true, event: "Notification" }), session("b", { waiting: true, event: "Stop" })]);
+    const dots = w.findAll('[data-testid="tab-dot"]');
+    expect(dots).toHaveLength(2);
+    expect(dots[0].classes().join(" ")).toContain("bg-[#f59e0b]");
+    expect(dots[0].attributes("aria-label")).toBe("Waiting for you");
+    expect(dots[0].attributes("role")).toBe("img"); // the label is only a name with a role on it
+
+    expect(dots[1].classes().join(" ")).toContain("bg-[#22c55e]");
+    expect(dots[1].attributes("aria-label")).toBe("Finished — unread");
+  });
+
+  it("shows no dot on the tab you are already looking at, or on a quiet one", () => {
+    const w = bar([session("a", { waiting: true, event: "Notification" }), session("b")], "a");
+    expect(w.findAll('[data-testid="tab-dot"]')).toHaveLength(0);
+  });
+
+  // The red was carrying an error's weight. Nothing should reintroduce it here.
+  it("no longer uses the error colour", () => {
+    const w = bar([session("a", { waiting: true, event: "Stop" })]);
+    expect(w.get('[data-testid="tab-dot"]').classes().join(" ")).not.toContain("err-strong");
+  });
+});
+
+// Same gate as the sidebar and the bold: a background worker is never marked (isUnread excludes it).
+describe("SessionTabBar background workers", () => {
+  it("shows no dot for a hidden row, however it is waiting", () => {
+    const w = mount(SessionTabBar, {
+      props: { sessions: [session("a", { waiting: true, event: "Notification", hidden: true })], activeId: null, filter: "background" as const },
+    });
+    expect(w.findAll('[data-testid="tab-dot"]')).toHaveLength(0);
+  });
+});

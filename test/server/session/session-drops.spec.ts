@@ -1,6 +1,6 @@
 // @vitest-environment node
 import { describe, it, expect, afterEach } from "vitest";
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import os from "node:os";
@@ -133,6 +133,39 @@ describe("pruneOrphanDrops", () => {
       expect(pruneOrphanDrops(new Set([live]), root)).toEqual([dead]);
       expect(existsSync(path.join(root, live))).toBe(true);
       expect(existsSync(path.join(root, dead))).toBe(false);
+    });
+  });
+
+  // The same failure the settings sweep had (#1061), found here while resolving a merge: without
+  // tmux `liveIds` is empty even when a peer is RUNNING, so its drop directories read as leftovers.
+  // A sweep that deletes has to be gated on what it can honestly claim.
+  describe("with another instance running (#1061)", () => {
+    const PEER_STARTED = 10_000;
+    const age = (dir: string, at: number) => utimesSync(dir, new Date(at), new Date(at));
+
+    it("keeps a directory touched after a live peer started — it may be that peer's", () => {
+      withRoot((root) => {
+        const dead = randomUUID();
+        age(seed(root, dead), PEER_STARTED + 5_000);
+        expect(pruneOrphanDrops(new Set(), root, PEER_STARTED)).toEqual([]);
+        expect(existsSync(path.join(root, dead))).toBe(true);
+      });
+    });
+
+    it("still removes one last touched before every live peer", () => {
+      withRoot((root) => {
+        const dead = randomUUID();
+        age(seed(root, dead), PEER_STARTED - 5_000);
+        expect(pruneOrphanDrops(new Set(), root, PEER_STARTED)).toEqual([dead]);
+      });
+    });
+
+    it("sweeps as before when nothing else is running", () => {
+      withRoot((root) => {
+        const dead = randomUUID();
+        age(seed(root, dead), PEER_STARTED + 5_000);
+        expect(pruneOrphanDrops(new Set(), root, null)).toEqual([dead]);
+      });
     });
   });
 

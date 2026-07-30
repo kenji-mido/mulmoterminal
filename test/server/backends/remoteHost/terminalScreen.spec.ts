@@ -3,12 +3,15 @@ import { describe, it, expect, vi } from "vitest";
 
 import {
   agentFromPaneCommand,
+  buildScreenMeta,
   buildSessionList,
   captureSessionScreen,
   definedScreenMeta,
   type CaptureScreenDeps,
+  type ScreenMetaSources,
   type SessionListInput,
 } from "../../../../server/backends/remoteHost/terminalScreen.js";
+import { undefinedPaths } from "@mulmoclaude/core/remote-host/server";
 
 const ESC = String.fromCharCode(0x1b);
 
@@ -27,6 +30,24 @@ describe("agentFromPaneCommand", () => {
   it("recognises the agents the phone treats specially", () => {
     expect(agentFromPaneCommand("claude")).toBe("claude");
     expect(agentFromPaneCommand("codex")).toBe("codex");
+    // The pane runs `agy`, and the kind is "antigravity" — the one place the two names differ,
+    // which is exactly why a session that outlived a restart used to come back as a shell.
+    expect(agentFromPaneCommand("agy")).toBe("antigravity");
+  });
+
+  // A pane reports the RUNNING program's name, so an overridden binary has a different one.
+  // The default stays recognised either way, or setting the variable would un-recognise every
+  // session started before it.
+  it("also recognises a binary the user pointed *_BIN at", () => {
+    const previous = process.env.ANTIGRAVITY_BIN;
+    process.env.ANTIGRAVITY_BIN = "/opt/bin/agy-next";
+    try {
+      expect(agentFromPaneCommand("agy-next")).toBe("antigravity");
+      expect(agentFromPaneCommand("agy")).toBe("antigravity");
+    } finally {
+      if (previous === undefined) delete process.env.ANTIGRAVITY_BIN;
+      else process.env.ANTIGRAVITY_BIN = previous;
+    }
   });
 
   // Anything else is where typed commands belong, which is what "shell" means here —
@@ -203,10 +224,31 @@ describe("captureSessionScreen", () => {
     expect(metaOf).toHaveBeenCalledWith("a");
   });
 
+  // The user's own note travels BESIDE the AI summary rather than in place of it (#1110). The
+  // picker's row overwrites `title` with the memo because a row there is one line, but the
+  // header draws each field as its own labelled row — a memo shown as the AI's summary is
+  // mislabelled, so the asymmetry between the two routes is the point, not an oversight.
+  it("carries the user's memo alongside the AI summary", async () => {
+    const captured = await captureSessionScreen(
+      "a",
+      captureDeps({ metaOf: async () => ({ summary: "Adding meta to the phone view", memo: "ask Tom before merging" }) }),
+    );
+    expect(captured.memo).toBe("ask Tom before merging");
+    expect(captured.summary).toBe("Adding meta to the phone view");
+  });
+
+  // A session with no note is the common case, and it must look exactly like a host built
+  // before #1110: no `memo` key at all, so the phone draws no empty memo row.
+  it("drops the memo row for a session the user never wrote a note on", async () => {
+    const captured = await captureSessionScreen("a", captureDeps({ metaOf: async () => ({ summary: "Adding meta", memo: "" }) }));
+    expect(Object.hasOwn(captured, "memo")).toBe(false);
+    expect(captured.summary).toBe("Adding meta");
+  });
+
   // A host that answers nothing looks exactly like one built before #786 — the phone
   // renders the screen alone.
   it("sends only the screen when the host has no metadata to add", async () => {
-    const captured = await captureSessionScreen("a", captureDeps({ metaOf: async () => ({ cwd: "", branch: "", summary: "", prompt: "" }) }));
+    const captured = await captureSessionScreen("a", captureDeps({ metaOf: async () => ({ cwd: "", branch: "", memo: "", summary: "", prompt: "" }) }));
     expect(captured).toEqual({ screen: "rendered:buffered", suggestion: "", quickCommands: [] });
   });
 
@@ -250,7 +292,7 @@ describe("captureSessionScreen", () => {
 // and the phone renders one labelled row per field it receives.
 describe("definedScreenMeta", () => {
   it("keeps the fields the host could answer", () => {
-    const meta = { cwd: "/repo", branch: "main", summary: "Fix the parser", prompt: "fix it" };
+    const meta = { cwd: "/repo", branch: "main", memo: "ask Tom first", summary: "Fix the parser", prompt: "fix it" };
     expect(definedScreenMeta(meta)).toEqual(meta);
   });
 
@@ -280,5 +322,147 @@ describe("definedScreenMeta", () => {
   // a prompt's own leading spaces are the user's text, not ours to edit.
   it("passes a value with surrounding whitespace through unchanged", () => {
     expect(definedScreenMeta({ prompt: "  fix it  " })).toEqual({ prompt: "  fix it  " });
+  });
+});
+
+// The join behind the phone's header. Injected sources rather than the server's tables, so the
+// ORDER of the reads is assertable — which is the part a reader cannot verify by looking at the
+// answer (CodeRabbit asked for this on #1112).
+describe("buildScreenMeta", () => {
+  const sources = (over: Partial<ScreenMetaSources> = {}): ScreenMetaSources => ({
+    cwdOf: () => "/repo",
+    branchOf: async () => "feat/1110",
+    githubUrlOf: async () => "https://github.com/o/r",
+    memoOf: () => "ask Tom before merging",
+    summaryOf: () => "Adding meta to the phone view",
+    promptOf: () => "add the memo",
+    memosHydrated: Promise.resolve(),
+    ...over,
+  });
+
+  it("heads the screen with everything the host could answer", async () => {
+    expect(await buildScreenMeta("a", sources())).toEqual({
+      cwd: "/repo",
+      branch: "feat/1110",
+      memo: "ask Tom before merging",
+      summary: "Adding meta to the phone view",
+      prompt: "add the memo",
+      githubUrl: "https://github.com/o/r",
+    });
+  });
+
+  // THE regression this seam exists for. The memo lives only in the server's map, and that map is
+  // filled by a boot read of the append log: reading it first answers "" for every session, which
+  // the phone cannot tell apart from the user having erased the note.
+  it("reads the memo only after the memo store has hydrated", async () => {
+    const order: string[] = [];
+    let hydrate = () => {};
+    const memosHydrated = new Promise<void>((resolve) => {
+      hydrate = () => {
+        order.push("hydrated");
+        resolve();
+      };
+    });
+    const pending = buildScreenMeta(
+      "a",
+      sources({
+        memosHydrated,
+        memoOf: () => {
+          order.push("memoOf");
+          return "ask Tom before merging";
+        },
+      }),
+    );
+    // A full turn of the event loop, not one microtask: every other source here resolves
+    // immediately, so without the barrier the memo would already have been read by now — which
+    // is what makes this assertion fail if the await is ever dropped.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(order).toEqual([]);
+    hydrate();
+    expect((await pending).memo).toBe("ask Tom before merging");
+    expect(order).toEqual(["hydrated", "memoOf"]);
+  });
+
+  // The branch lookup shells out to git, and so does the GitHub remote read. Sequencing them
+  // would double the latency of a screen the phone polls.
+  it("runs the two git reads concurrently", async () => {
+    const order: string[] = [];
+    await buildScreenMeta(
+      "a",
+      sources({
+        branchOf: async () => {
+          order.push("branch:start");
+          await Promise.resolve();
+          order.push("branch:end");
+          return "main";
+        },
+        githubUrlOf: async () => {
+          order.push("github:start");
+          return null;
+        },
+      }),
+    );
+    expect(order).toEqual(["branch:start", "github:start", "branch:end"]);
+  });
+
+  // A session that outlived a restart has no PtyEntry, so the host has no dir for it. Spawning
+  // git against "" would ask about THIS process's cwd — an answer from the wrong repository.
+  it("asks git nothing when the host has no directory for the session", async () => {
+    const branchOf = vi.fn(async () => "main");
+    const githubUrlOf = vi.fn(async () => "https://github.com/o/r");
+    expect(await buildScreenMeta("a", sources({ cwdOf: () => "", branchOf, githubUrlOf }))).toEqual({
+      memo: "ask Tom before merging",
+      summary: "Adding meta to the phone view",
+      prompt: "add the memo",
+    });
+    expect(branchOf).not.toHaveBeenCalled();
+    expect(githubUrlOf).not.toHaveBeenCalled();
+  });
+
+  // A detached HEAD has no branch name, and a session with no note has no memo: both lose the
+  // key rather than arriving as "", which the phone would draw as an empty labelled row.
+  it("drops what the host could not answer, key and all", async () => {
+    const meta = await buildScreenMeta("a", sources({ branchOf: async () => null, memoOf: () => "", githubUrlOf: async () => null }));
+    expect(meta).toEqual({ cwd: "/repo", summary: "Adding meta to the phone view", prompt: "add the memo" });
+    expect(Object.hasOwn(meta, "memo")).toBe(false);
+    expect(Object.hasOwn(meta, "branch")).toBe(false);
+  });
+});
+
+// The regression itself (#1042). `expect(s.work).toBeUndefined()` passes for BOTH shapes, so it
+// has to be `Object.hasOwn` — the broken form is a present key HOLDING undefined, which Firestore
+// refuses, taking the whole reply down with it rather than just that field.
+//
+// Asserted against core's own `undefinedPaths` because core is what guards this write now (#1064):
+// the check and the shipping guard are then the same code, not two descriptions of one rule.
+describe("buildSessionList — the shape that reached Firestore (#1042)", () => {
+  const WORK = { pr: 987, issue: 979, phase: "ready" as const, headline: "hi" };
+
+  const listWith = (work: Map<string, typeof WORK>) =>
+    buildSessionList({
+      liveIds: ["with-work", "without-work"],
+      tmuxIds: [],
+      isResumable: () => true,
+      isGridSession: () => true,
+      detailOf: (id) => {
+        const summary = work.get(`/work/${id}`);
+        return { title: `session ${id}`, cwd: `/work/${id}`, agent: "claude" as const, ...(summary ? { work: summary } : {}) };
+      },
+    });
+
+  it("omits the key entirely for a session with no work item", () => {
+    const bare = listWith(new Map([["/work/with-work", WORK]])).find((session) => session.id === "without-work");
+    expect(bare).toBeDefined();
+    expect(bare && Object.hasOwn(bare, "work")).toBe(false);
+  });
+
+  it("still carries the work item for the session that has one", () => {
+    expect(listWith(new Map([["/work/with-work", WORK]])).find((session) => session.id === "with-work")?.work).toEqual(WORK);
+  });
+
+  // The end-to-end statement: whatever the mix, the reply is one Firestore will accept.
+  it("produces a list core's guard finds nothing to strip in", () => {
+    expect(undefinedPaths({ sessions: listWith(new Map([["/work/with-work", WORK]])) })).toEqual([]);
+    expect(undefinedPaths({ sessions: listWith(new Map()) })).toEqual([]);
   });
 });

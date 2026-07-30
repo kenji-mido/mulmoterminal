@@ -25,7 +25,7 @@ import {
 import { createFileCache, type FileStamp } from "./file-cache.js";
 import { classifyWorkPhase, type WorkPhase } from "./workPhase.js";
 import { sessionListTitle } from "./sessionListTitle.js";
-import { activity, aiTitles, codexRolloutIds, hiddenSessions, knownSessions } from "./registry.js";
+import { activity, aiTitles, codexRolloutIds, isBackgroundSession, knownSessions, sessionMemos } from "./registry.js";
 import { projectSessionsDir } from "./project-dir.js";
 import { lastTurnFromClaudeParsed, lastTurnFromCodexRolloutDocs, EMPTY_TURN, type LastTurn } from "./last-turn.js";
 import { forEachJsonlRecord, readTailRecords } from "../infra/jsonl-file.js";
@@ -201,15 +201,12 @@ async function codexLastTurn(sessionKey: string): Promise<LastTurn> {
 // 334-character reply — 1.9 seconds with the event loop stopped, every terminal in the app frozen.
 // Past ~512 MB the read could not complete at all (V8's maximum string length), so the button did
 // nothing. The last turn is in the last few lines either way, so the size of the file behind it
-// stopped mattering: the same read now costs 256 KB whatever the transcript weighs.
-//
-// `LAST_TURN_MAX_BYTES` / `tooLarge` are consequently dead as a limit. They stay for now because
-// `tooLarge` reaches the UI (useHandoff, codeBlockCopy) and removing a wire field is its own
-// change; nothing sets it any more.
-export const LAST_TURN_MAX_BYTES = 64 * 1024 * 1024;
+// stopped mattering: the same read now costs 256 KB whatever the transcript weighs. There is
+// consequently no size limit here at all, and no "too large" answer for a caller to handle.
 
-export async function sessionLastTurn(cwd: string, id: string, agent: "claude" | "codex"): Promise<LastTurn> {
+export async function sessionLastTurn(cwd: string, id: string, agent: "claude" | "codex" | "antigravity"): Promise<LastTurn> {
   if (agent === "codex") return codexLastTurn(id);
+  if (agent === "antigravity") return EMPTY_TURN;
   try {
     return lastTurnFromClaudeParsed(readTailRecords(path.join(projectSessionsDir(cwd), `${id}.jsonl`)));
   } catch {
@@ -241,7 +238,7 @@ export async function readSessionMeta(dir: string, file: string): Promise<Sessio
   ]);
 
   const id = path.basename(file, ".jsonl");
-  const title = sessionListTitle({ liveAiTitle: aiTitles.get(id), diskAiTitle: aiTitle, diskLastPrompt: lastPrompt, firstUserMsg });
+  const title = sessionListTitle({ memo: sessionMemos.get(id), liveAiTitle: aiTitles.get(id), diskAiTitle: aiTitle, diskLastPrompt: lastPrompt, firstUserMsg });
   const a = activity.get(id);
   return {
     id,
@@ -250,7 +247,7 @@ export async function readSessionMeta(dir: string, file: string): Promise<Sessio
     working: a?.working ?? false,
     waiting: a?.waiting ?? false,
     event: a?.event ?? null,
-    hidden: hiddenSessions.has(id),
+    hidden: isBackgroundSession(id),
   };
 }
 
@@ -278,7 +275,7 @@ export function collectPendingSessions(onDisk: Set<string>, includePending: bool
     known,
     onDisk,
     (id) => activity.get(id),
-    (id) => hiddenSessions.has(id),
+    (id) => isBackgroundSession(id),
   );
   persisted.forEach((id) => knownSessions.delete(id));
   return keep;

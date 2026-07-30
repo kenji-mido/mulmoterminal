@@ -13,15 +13,17 @@
 // prompt is auto-sent as claude's first turn (startChat / actions).
 
 import { ref, watch } from "vue";
+import { asTerminalAgent, type TerminalAgent } from "../../common/sessionAgent";
 
-export type Agent = "claude" | "codex";
+export type Agent = TerminalAgent;
 type OpenSessionFn = (sessionId: string, opts?: { draft?: boolean; agent?: Agent }) => void;
 let openSessionFn: OpenSessionFn | null = null;
 
-// Which agent a collection action / chat spawns. Bound to the Claude/Codex toggle in the collection
+// Which agent a collection action / chat spawns. Bound to the Claude/Codex/Antigravity toggle in the collection
 // browser (CollectionsBrowseOverlay); persisted in localStorage so the choice survives reloads.
 const LAUNCH_AGENT_KEY = "mt-launch-agent";
-export const launchAgent = ref<Agent>(localStorage.getItem(LAUNCH_AGENT_KEY) === "codex" ? "codex" : "claude");
+const saved = localStorage.getItem(LAUNCH_AGENT_KEY);
+export const launchAgent = ref<Agent>(asTerminalAgent(saved));
 watch(launchAgent, (agent) => localStorage.setItem(LAUNCH_AGENT_KEY, agent));
 
 /** App.vue registers how to make a session visible (close the overlay + select it).
@@ -31,11 +33,30 @@ export function registerChatOpener(fn: OpenSessionFn): void {
   openSessionFn = fn;
 }
 
+/** A session this module started. The agent travels WITH the id because a spawn is not always
+ *  Claude — `launchAgent` decides, and a caller that reads that toggle again to find out has two
+ *  sources for one fact. Anything attaching to the session needs both: the wrong agent reconnects
+ *  to the wrong endpoint. */
+export interface SpawnedChat {
+  id: string;
+  agent: Agent;
+}
+
+/** Show an ALREADY-spawned session — what a non-hidden spawn does, as its own step. A `hidden`
+ *  caller that means to place the session itself can only find out whether it managed to at the
+ *  end; without this it would have to commit to "the shell shows it" before spawning, and be wrong
+ *  by the time it knew. */
+export function showSpawnedSession(spawned: SpawnedChat): void {
+  openSessionFn?.(spawned.id, { agent: spawned.agent });
+}
+
 /** Spawn a new chat seeded with `prompt`; when not hidden, make it visible. With
- *  `draft`, the prompt is prefilled in the input box but NOT submitted. */
-export async function startCollectionChat(prompt: string, opts: { hidden?: boolean; draft?: boolean } = {}): Promise<void> {
+ *  `draft`, the prompt is prefilled in the input box but NOT submitted. Returns what was spawned
+ *  (null if nothing was) — `hidden` callers need it to put the session somewhere of their own,
+ *  since suppressing the opener otherwise leaves them no handle on what they started. */
+export async function startCollectionChat(prompt: string, opts: { hidden?: boolean; draft?: boolean } = {}): Promise<SpawnedChat | null> {
   const message = prompt.trim();
-  if (!message) return;
+  if (!message) return null;
   const agent = launchAgent.value;
   // codex has no editable-draft path (it auto-runs the seed), so a draft only applies to claude.
   const draft = agent === "claude" && opts.draft === true;
@@ -48,14 +69,17 @@ export async function startCollectionChat(prompt: string, opts: { hidden?: boole
     });
     if (!res.ok) {
       console.error(`[startChat] spawn failed: HTTP ${res.status}`);
-      return;
+      return null;
     }
     const data = (await res.json()) as { jsonData?: { chatId?: unknown } };
     chatId = typeof data?.jsonData?.chatId === "string" ? data.jsonData.chatId : undefined;
   } catch (err) {
     console.error("[startChat] spawn failed", err);
-    return;
+    return null;
   }
   // hidden=false → bring the new terminal session into view for the user (as the right agent).
   if (chatId && !opts.hidden) openSessionFn?.(chatId, { draft, agent });
+  // `agent` is what the route was ASKED for, and the route echoes it back in jsonData — so this is
+  // the agent the PTY actually runs, not a second reading of the toggle.
+  return chatId ? { id: chatId, agent } : null;
 }

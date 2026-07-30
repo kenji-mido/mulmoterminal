@@ -34,19 +34,23 @@ function makeRes(): FakeRes {
 }
 
 type Handler = (req: { headers: { origin?: string }; query?: Record<string, unknown>; body?: unknown }, res: FakeRes) => unknown;
+type MountedHandler = (
+  req: { headers: { origin?: string }; query?: Record<string, unknown>; body?: unknown; method: string; path: string },
+  res: FakeRes,
+) => unknown;
 
 // Capture the mounted handlers keyed by "METHOD path" so each can be invoked with
-// a mock req/res — no HTTP server needed (mirrors gitRemote.spec).
+// a mock req/res — no HTTP server needed (mirrors gitRemote.spec). Each is wrapped to
+// carry the method and path Express would have set: the origin guard reads both, since it
+// is the same rule the central gate applies (a safe method is never judged by origin).
 function routes(isAllowedOrigin: (o?: string) => boolean): Record<string, Handler> {
   const map: Record<string, Handler> = {};
-  const app = {
-    get(p: string, h: Handler) {
-      map[`GET ${p}`] = h;
-    },
-    post(p: string, h: Handler) {
-      map[`POST ${p}`] = h;
-    },
-  } as unknown as Express;
+  const capture =
+    (method: string) =>
+    (p: string, h: MountedHandler): void => {
+      map[`${method} ${p}`] = (req, res) => h({ ...req, method, path: p }, res);
+    };
+  const app = { get: capture("GET"), post: capture("POST") } as unknown as Express;
   mountWorktreeRoutes(app, { isAllowedOrigin });
   return map;
 }
