@@ -182,5 +182,6 @@ then seeds the launcher's directory presets from your Claude Code history.
 7. [GitHub — cross-repo PRs & Issues](github.html) (open PRs and issues from your registered repos on one screen)
 8. [Using another model via OpenRouter](providers.html) (run Kimi / DeepSeek / Gemini, with measured data)
 9. [Local models with claude-ollama](claude-ollama.html) (fully local, offline, via Ollama)
+10. [Always on](always-on.html) (run the server as a service, across logout and reboot)
 
 > The Japanese guide is here: [日本語ガイド](../ja/).

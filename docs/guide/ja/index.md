@@ -178,5 +178,6 @@ Claude Code の履歴からランチャのディレクトリプリセットを�
 7. [GitHub — PR / Issue 横断ビュー](github.html)（登録リポの未マージ PR と Issue を 1 画面で）
 8. [OpenRouter で別のモデルを使う](providers.html)（Kimi / DeepSeek / Gemini などを実測データつきで選ぶ）
 9. [claude-ollama でローカルモデルを動かす](claude-ollama.html)（Ollama で完全ローカル・オフライン）
+10. [常時起動](always-on.html)（サーバをサービスとして常駐させ、ログアウト・再起動をまたぐ）
 
 > 英語版は [English guide](../en/) にあります。
