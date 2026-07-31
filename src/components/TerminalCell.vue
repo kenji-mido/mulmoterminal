@@ -41,6 +41,7 @@ import {
   CELL_DOT,
   CELL_DOT_IDLE,
   CELL_DOT_WORKING,
+  CELL_HEADER_MAIN,
   CELL_HEADER_ZOOMABLE,
   CELL_INNER,
   CELL_TERM,
@@ -976,7 +977,7 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
              model / tokens / custom) don't shrink, so without this they would overflow and
              push the actions past the cell's `overflow: hidden` edge — the buttons must
              stay reachable no matter how much a dir's config crams in here. -->
-          <div data-testid="cell-header-main" class="flex min-w-0 flex-auto items-center gap-2 overflow-hidden">
+          <div data-testid="cell-header-main" :class="CELL_HEADER_MAIN">
             <span class="cell-dot" :class="[CELL_DOT, statusClass, dotStatusClass, dotMissedClass]" :title="statusLabel" />
             <!-- Normal grid: the dir is a button that opens it. As a filmstrip thumbnail the
                header's job is to zoom (switch to this terminal), so the dir is inert text

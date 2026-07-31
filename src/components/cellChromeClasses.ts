@@ -34,6 +34,20 @@ export const CELL_HEADER =
 // Added only while a click on the header background zooms the cell.
 export const CELL_HEADER_ZOOMABLE = "cursor-pointer hover:bg-hover";
 
+// The header's left half — dot, path, chips, title — and it must be `flex-1`, NOT `flex-auto`.
+//
+// The two differ only in flex-basis (0 against auto), and under `flex-wrap` that decides whether
+// the header is one row or two. Wrapping is settled BEFORE shrinking, using each item's basis:
+// with `auto` this group asks for its whole content width, so the moment the chips get wordy the
+// actions no longer fit beside it and drop to a second row — while the group itself then sits on
+// row one with space to spare, having never been asked to give any of it up. With a basis of 0 it
+// asks for nothing, both fit on one line, and it grows into whatever the actions leave.
+//
+// So the wrap stays as the guarantee it was added to be (the close button can still move down
+// rather than off the edge, on a width where the buttons alone do not fit), but it stops firing
+// on the ordinary case it was never meant to catch.
+export const CELL_HEADER_MAIN = "flex min-w-0 flex-1 items-center gap-2 overflow-hidden";
+
 // Shape without a colour: the caller picks one of the tints below, so an active state and the
 // idle tint never land on the same element as two competing `bg-*` utilities — which of them
 // wins is decided by Tailwind's output order, not by the order they are written in.
