@@ -149,6 +149,28 @@ describe("useTerminalConnections — detached-slot state replay", () => {
     conn.release("cell-race"); // tear the slot down so it can't leak into the next test
   });
 
+  it("does NOT replay a stale id when the slot is reattached FOR A DIFFERENT session — reconnects there instead", () => {
+    const first = { onSession: vi.fn(), onCwd: vi.fn() };
+    const el1 = document.createElement("div");
+    conn.attach("cell-race", target("sess-A"), first, el1);
+    const ws = FakeWebSocket.instances.at(-1);
+    ws?.onopen?.();
+    ws?.onmessage?.({ data: JSON.stringify({ type: "session", id: "sess-A", cwd: "/a" }) });
+    conn.detach("cell-race", el1);
+
+    // Grid live-sync renumbered cells while detached: this slot now belongs to sess-B.
+    // Replaying sess-A upward would overwrite the cell's session — one session duplicated
+    // across two cells, which then fight over it (mutual supersede) and share roster meta.
+    const second = { onSession: vi.fn(), onCwd: vi.fn() };
+    const el2 = document.createElement("div");
+    conn.attach("cell-race", target("sess-B"), second, el2);
+    expect(second.onSession).not.toHaveBeenCalledWith("sess-A");
+    const ws2 = FakeWebSocket.instances.at(-1);
+    expect(ws2).not.toBe(ws); // reconnected…
+    expect(ws2?.url).toContain("session=sess-B"); // …at the session the cell actually names
+    conn.release("cell-race");
+  });
+
   it("replays a session id learned WHILE DETACHED to the handlers bound on reattach", () => {
     const first = { onSession: vi.fn(), onCwd: vi.fn() };
     const el1 = document.createElement("div");
