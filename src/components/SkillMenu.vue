@@ -61,7 +61,9 @@ function pick(s: DiscoveredSkill) {
       title="Run a skill in the current session"
       @click="toggle"
     >
-      <span class="material-symbols-outlined" aria-hidden="true">bolt</span> Skill
+      <!-- The label is for a screen reader only: every other control on this row is an icon, and
+           the row runs out of width before it runs out of buttons. -->
+      <span class="material-symbols-outlined" aria-hidden="true">bolt</span><span class="sr-only">Skill</span>
       <span class="material-symbols-outlined" aria-hidden="true">{{ open ? "expand_less" : "expand_more" }}</span>
     </button>
     <div

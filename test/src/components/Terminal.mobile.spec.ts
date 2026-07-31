@@ -185,4 +185,25 @@ describe("Terminal.vue — mobile input aids", () => {
     expect(FakeWS.instances.at(-1)?.url).toContain("sess-elsewhere");
     expect(w.find('[data-testid="term-superseded"]').exists()).toBe(false);
   });
+
+  // The chat header runs out of width before it runs out of buttons: five configured actions plus
+  // voice and the key-bar toggle, beside a label, a status badge and the Skill menu. It wraps
+  // rather than pushing the buttons off the edge — correctly — but the row it wraps onto is a
+  // third bar above a terminal with no height to spare. So the badge now speaks only when it has
+  // something to say.
+  it("keeps the status badge off the row while the session is simply connected", async () => {
+    const w = mount(TerminalView, { props: props() });
+    await flushPromises();
+    FakeWS.instances.at(-1)?.onopen?.();
+    await flushPromises();
+    expect(w.text()).not.toContain("connected");
+  });
+
+  // …and it is there the moment it is not. A badge that is always present is one nobody reads,
+  // which is the whole reason for taking the happy path off the row.
+  it("shows the badge while the session is anything else", async () => {
+    const w = mount(TerminalView, { props: props() });
+    await flushPromises();
+    expect(w.text()).toContain("connecting");
+  });
 });

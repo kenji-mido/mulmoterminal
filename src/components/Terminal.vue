@@ -527,9 +527,11 @@ onUnmounted(() => {
       class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 bg-[var(--cell-header-bg,var(--bg-panel))] px-4 py-2 font-sans text-[14px] text-[var(--cell-header-fg,var(--text))]"
       :style="headerStyle"
     >
-      <!-- Dropped below 640px: on a phone this word is the least informative thing on the row,
-           and the space it takes is what pushes the action buttons off the right edge. -->
-      <span class="hidden shrink-0 font-semibold sm:inline">Terminal</span>
+      <!-- Kept for a screen reader and taken off the screen, at every width. It was already
+           dropped below 640px as "the least informative thing on the row" — and that is no less
+           true at 900px, where the row still cannot hold its buttons. Nothing is learned from the
+           word "Terminal" written above a terminal. -->
+      <span class="sr-only">Terminal</span>
       <span
         v-if="dirName"
         class="max-w-[16ch] truncate rounded-[10px] px-2 py-px text-[11px] font-semibold leading-[1.6]"
@@ -538,7 +540,11 @@ onUnmounted(() => {
         >{{ dirName }}</span
       >
       <GitBranchChip :status="gitStatus" />
-      <span class="rounded-[4px] px-2 py-0.5 text-[12px]" :class="statusClass">{{ status }}</span>
+      <!-- Only when it is NOT "connected". A green badge confirming that nothing is wrong is read
+           once and then never again, while it holds ~90px on every row forever — and the states
+           that matter (connecting, disconnected, superseded) are exactly the ones a permanently
+           present badge trains the eye to skip. -->
+      <span v-if="status !== 'connected'" class="rounded-[4px] px-2 py-0.5 text-[12px]" :class="statusClass">{{ status }}</span>
       <RunMenu v-if="runMenu" :cwd="serverCwd" @run="(c) => emit('run', c)" />
       <SkillMenu v-if="runMenu" :cwd="serverCwd" @skill="onSkill" />
       <!-- The row WRAPS rather than overflowing, and this group is shrink-0, so on a narrow
