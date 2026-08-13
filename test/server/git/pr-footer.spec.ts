@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { withFooter, workdirFooter } from "../../../server/git/pr-footer.js";
+import { withFooter, withIssueRef, workdirFooter } from "../../../server/git/pr-footer.js";
 
 const FOOTER = "work in mulmoclaude3";
 
@@ -67,5 +67,43 @@ describe("withFooter", () => {
     ["carries the footer above later text", `${FOOTER}\n\nmore notes added later`],
   ])("leaves the body untouched when it %s", (_case, body) => {
     expect(withFooter(body, FOOTER)).toBe(body);
+  });
+});
+
+describe("withIssueRef", () => {
+  it.each([
+    ["a plain body", "Repairs the login bug.", "Repairs the login bug."],
+    ["the trailing newline gh returns", "Repairs the login bug.\n", "Repairs the login bug."],
+    // A mention is not a closing keyword — GitHub would not close #900 for this body, so the
+    // reference we came to add is still missing.
+    ["a body that only mentions another issue", "Related to #900.", "Related to #900."],
+  ])("appends the reference after %s", (_case, body, kept) => {
+    expect(withIssueRef(body, 1171)).toBe(`${kept}\n\nFixes #1171`);
+  });
+
+  it("is the whole body when the commits produced none", () => {
+    expect(withIssueRef("", 1171)).toBe("Fixes #1171");
+  });
+
+  // Whatever keyword the body already carries is the author's statement about what this PR
+  // finishes. Adding a second one naming a different issue would close both on merge.
+  it.each([
+    ["the same issue", "Repairs it.\n\nFixes #1171"],
+    ["a different issue", "Repairs it.\n\nCloses #900"],
+    ["a keyword written mid-sentence", "This resolves #42 as a side effect."],
+    // The URL form closes the issue on GitHub exactly as the shorthand does, so appending a
+    // second keyword under it would close BOTH. `issueRefFromPrBody` ignores this form on
+    // purpose — it answers a different question — which is how it was missed (Codex review).
+    ["the same repo's issue by URL", "Repairs it.\n\nFixes https://github.com/receptron/mulmoterminal/issues/900"],
+    ["another repo's issue by URL", "Repairs it.\n\nCloses https://github.com/other/project/issues/5"],
+    ["a URL reference with a colon", "Repairs it.\n\nResolves: https://github.com/o/r/issues/7"],
+  ])("leaves a body that already declares %s alone", (_case, body) => {
+    expect(withIssueRef(body, 1171)).toBe(body);
+  });
+
+  // Not every issue URL is a closure: without a keyword in front it is a mention, and a body that
+  // only links to context still needs the reference we came to add.
+  it("still adds the reference when an issue URL is only mentioned", () => {
+    expect(withIssueRef("Background: https://github.com/o/r/issues/7", 1171)).toBe("Background: https://github.com/o/r/issues/7\n\nFixes #1171");
   });
 });

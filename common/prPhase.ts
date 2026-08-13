@@ -42,14 +42,23 @@ export function workItemHeadline(item: WorkItem): string | null {
 //
 // `[1-9]\d*` rather than `\d+`: there is no issue #0, and `#0123` is not issue 123 — both are
 // typos, and a typo that renders as a link to somebody else's issue is worse than no chip.
-const CLOSING_KEYWORD = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)[:\s]+#([1-9]\d*)/i;
+const CLOSING_VERB = "(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)";
+const CLOSING_KEYWORD = new RegExp(`\\b${CLOSING_VERB}[:\\s]+#([1-9]\\d*)`, "i");
 
-// Digits from a body or a branch name are unbounded, and `Number("9".repeat(20))` is 1e20 — which
-// would render in the chip as "#1e+20" and link nowhere. Anything past the safe-integer range is
-// not an issue number (found by Codex review).
+// The other form GitHub accepts for the same statement: the issue's full URL. Each path segment
+// is a run of non-slash characters rather than `\S+`, so there is nothing for the engine to
+// backtrack over — same reason the separator above is one character class.
+const CLOSING_URL = new RegExp(`\\b${CLOSING_VERB}[:\\s]+https?://[^\\s/]+(?:/[^\\s/]+){2}/issues/[1-9]\\d*`, "i");
+
+// An issue or PR number as anything in this app will accept it. Shared because every surface that
+// handles one applies the same rule and a divergence would show as a link to nothing: digits from
+// a body or a branch name are unbounded, and `Number("9".repeat(20))` is 1e20 — which renders in
+// the chip as "#1e+20" (found by Codex review). There is also no issue #0 and no negative one.
+export const isIssueNumber = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v > 0;
+
 function toIssueNumber(digits: string): number | null {
   const n = Number(digits);
-  return Number.isSafeInteger(n) && n > 0 ? n : null;
+  return isIssueNumber(n) ? n : null;
 }
 
 // The issue a PR body says it closes, or null. Deliberately blind to the full-URL form
@@ -59,6 +68,14 @@ export function issueRefFromPrBody(body: string | null | undefined): number | nu
   const found = typeof body === "string" ? CLOSING_KEYWORD.exec(body) : null;
   return found ? toIssueNumber(found[1]) : null;
 }
+
+// Whether the body ALREADY states what merging it closes, in either form GitHub honours. Broader
+// than issueRefFromPrBody on purpose, and the difference matters: that one answers "which issue in
+// THIS repo" and so must ignore a URL that may name another repository, while this one answers
+// "has the author already declared a closure" — where the URL form counts just as much, because
+// adding a second keyword on top of it closes BOTH issues on merge (found by Codex review).
+export const declaresClosingReference = (body: string | null | undefined): boolean =>
+  typeof body === "string" && (CLOSING_KEYWORD.test(body) || CLOSING_URL.test(body));
 
 // A branch named after its issue the way this repo names them: `fix/966-preserve-unknown-keys`.
 // Requires a type prefix and a hyphen after the digits, so `chore/dep-updates-20260728` is not
@@ -71,5 +88,21 @@ const BRANCH_ISSUE = /^[a-z][a-z-]*\/([1-9]\d*)-/;
 // somebody else's issue. Named for the doubt so a call site can't forget it.
 export function issueCandidateFromBranch(branch: string | null | undefined): number | null {
   const found = typeof branch === "string" ? BRANCH_ISSUE.exec(branch) : null;
+  return found ? toIssueNumber(found[1]) : null;
+}
+
+// The prefix this app gives a branch it creates FOR an issue (#1171). Shared because the two
+// sides must agree on the same string: worktree creation writes it, and the reader below is only
+// sound because nothing else in the app produces it.
+export const ISSUE_BRANCH_PREFIX = "issue/";
+
+const ANCHORED_ISSUE = new RegExp(`^${ISSUE_BRANCH_PREFIX}([1-9]\\d*)-`);
+
+// The issue a branch was CREATED for. Unlike the candidate above this is not a guess — the prefix
+// is one this app writes, so a match is a statement it made about its own branch. That is what
+// makes it safe to derive a PR body's `Fixes #N` from: a wrong number there closes somebody
+// else's issue the moment the PR merges, which no amount of confirming afterwards undoes.
+export function issueFromAnchoredBranch(branch: string | null | undefined): number | null {
+  const found = typeof branch === "string" ? ANCHORED_ISSUE.exec(branch) : null;
   return found ? toIssueNumber(found[1]) : null;
 }

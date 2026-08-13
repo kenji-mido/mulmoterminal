@@ -88,6 +88,15 @@ const emit = defineEmits<{
   (e: "session" | "cwd", value: string): void;
   (e: "exit", exitCode: number | null): void;
   (e: "run", command: RunCommand): void;
+  // The user typed (or pasted) into this terminal. Output the server writes back never fires it.
+  //
+  // DECLARING this one is load-bearing. xterm keeps a hidden <textarea> that fires a NATIVE
+  // `input` event on every keystroke and all through IME composition, and it bubbles to this
+  // component's root — but a declared emit is excluded from fallthrough, so a parent's `@input`
+  // binds to the component event alone. Remove the declaration and that same `@input` silently
+  // becomes a native listener, firing on composition and bypassing the pointer/focus filtering in
+  // terminalUserInput that is the entire reason this event exists. Pinned by a spec.
+  (e: "input"): void;
 }>();
 
 // The durable runtime (socket + xterm) lives in the manager, keyed by a stable slot
@@ -222,6 +231,11 @@ function voiceIcon(): string {
 }
 
 let resizeObserver: ResizeObserver;
+// The element this view attached the slot to, kept because a template ref is ALREADY null by the
+// time `unmounted` runs (#1178): passing `terminalRef.value` to detach handed it null every time,
+// which is the one argument that skips its "a newer attach already took over" guard. A slot torn
+// off by a late unmount stops fitting for good — see conn.fit.
+let attachedHost: HTMLElement | null = null;
 
 onMounted(() => {
   // Probe voice-input capability so the mic button shows only where supported.
@@ -229,6 +243,7 @@ onMounted(() => {
 
   const container = terminalRef.value;
   if (!container) return;
+  attachedHost = container;
   // Attach this view to its durable slot: creates + connects the runtime on first
   // mount, or re-parents the already-live xterm here on a remount (no cold resume).
   // session/cwd/exit are forwarded so the parent's existing wiring is unchanged.
@@ -239,6 +254,7 @@ onMounted(() => {
       onSession: (id) => emit("session", id),
       onCwd: (c) => emit("cwd", c),
       onExit: (exitCode) => emit("exit", exitCode),
+      onInput: () => emit("input"),
     },
     container,
     effectiveTermTheme(),
@@ -383,6 +399,22 @@ watch(
 );
 onUnmounted(() => clearTimeout(refocusTimer));
 
+// The same teleport changes this cell's BOX, and without an unmount nothing re-runs attach's fit —
+// the ResizeObserver is the only thing left to notice, and a slot that has lost its observer or its
+// attachment then keeps whatever size it had: a parked-width screen inside an enlarged pane (#1178).
+// Both directions need it, so this is not folded into the refocus watcher above, which deliberately
+// skips the cell that just shrank.
+let refitTimer: ReturnType<typeof setTimeout> | undefined;
+watch(
+  () => props.expanded,
+  () => {
+    clearTimeout(refitTimer);
+    nextTick(() => conn.fit(slotKey));
+    refitTimer = setTimeout(() => conn.fit(slotKey), FLIP_MS + 30);
+  },
+);
+onUnmounted(() => clearTimeout(refitTimer));
+
 // Submit a GUI-originated message into the PTY (the GUI->LLM feedback path) and the
 // explicit close-button close. Both delegate to the slot's durable runtime.
 function submitText(text: string): boolean {
@@ -515,7 +547,7 @@ onUnmounted(() => {
   // Persisted slot: detach the view but KEEP the connection alive (the whole point —
   // navigating away / off-page paging doesn't reap the PTY). Ephemeral slot (command
   // cells, whose process is unresumable): tear it down as before.
-  if (props.persistKey) conn.detach(slotKey, terminalRef.value ?? null);
+  if (props.persistKey && attachedHost) conn.detach(slotKey, attachedHost);
   else conn.release(slotKey);
 });
 </script>

@@ -36,6 +36,34 @@ export function extractRateLimits(payload: unknown): RateLimits | null {
   return fiveHour || sevenDay ? { fiveHour, sevenDay } : null;
 }
 
+/** Whether this payload was written AFTER the session's first API response — the only thing that
+ *  makes an absent `rate_limits` mean anything.
+ *
+ *  Measured against a real probe on 2.1.220, which fires the status line twice: once at
+ *  `total_api_duration_ms: 0` with no `rate_limits`, then once at 2769ms carrying both windows. So
+ *  "no windows" is an ANSWER only past this line; before it, it is the payload that is always
+ *  written first. Treating the two the same latched the gauge on the API-key-billing message
+ *  whenever a probe failed to complete, and held it there an hour at a time (#1161).
+ *
+ *  Unreadable or absent `cost` answers false: the cost of being wrong that way is a slower retry
+ *  with a vaguer message, while being wrong the other way is the bug above. */
+export function hadApiResponse(payload: unknown): boolean {
+  if (!isRecord(payload) || !isRecord(payload.cost)) return false;
+  return (finiteNumber(payload.cost.total_api_duration_ms) ?? 0) > 0;
+}
+
+/** What one Claude status line tells the store. Both halves together, from one payload, because
+ *  the store's verdict needs both and reading them separately is how they came apart. */
+export interface ClaudeStatus {
+  limits: RateLimits | null;
+  afterApiResponse: boolean;
+}
+
+export const readClaudeStatus = (payload: unknown): ClaudeStatus => ({
+  limits: extractRateLimits(payload),
+  afterApiResponse: hadApiResponse(payload),
+});
+
 // The statusLine handed to the probe: POST the payload, print nothing. Printing nothing is not a
 // courtesy — Claude Code renders a row for the statusLine whether or not it writes anything, and
 // #388 measured that row. The probe's terminal is never shown to anyone, which is the whole reason

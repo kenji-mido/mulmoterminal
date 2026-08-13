@@ -1,11 +1,13 @@
 // The /prs and /issues views: open pull requests and issues across the repos the user
 // configured, via the server's own `gh` login. Repos come from config, never the request.
 import type { Express } from "express";
-import { getPrRepos } from "../config/config-routes.js";
+import { getCwdPresets, getPrRepos, getRepoDirs } from "../config/config-routes.js";
 import { listPrsAcrossRepos } from "../git/prs.js";
 import { listIssuesAcrossRepos } from "../git/issues.js";
+import { repoDirsFromPresets } from "../git/repo-dirs.js";
 import { readStarState, starRepo } from "../git/github-star.js";
 import type { GithubStarState } from "../../common/githubRepo.js";
+import type { RepoDirsResponse } from "../../common/repoDirs.js";
 
 export function mountRepoRoutes(app: Express): void {
   // Cross-repo PR list (the /prs view): aggregate open PRs for the configured repos via
@@ -22,6 +24,19 @@ export function mountRepoRoutes(app: Express): void {
   app.get("/api/issues", async (_req, res) => {
     try {
       res.json({ repos: await listIssuesAcrossRepos(getPrRepos()) });
+    } catch (err) {
+      res.status(500).json({ error: String(err) });
+    }
+  });
+
+  // Where work on a repo can start: the saved directories grouped by the GitHub repo they clone,
+  // with the recorded choice per repo (#1172). Derived from `cwdPresets`, never from the request —
+  // this names local paths, and a caller must not be able to ask about a directory of its own
+  // choosing. A repo with no clone here is absent, which is how the caller learns it cannot start.
+  app.get("/api/repo-dirs", async (_req, res) => {
+    try {
+      const body: RepoDirsResponse = { repos: await repoDirsFromPresets(getCwdPresets(), getRepoDirs()) };
+      res.json(body);
     } catch (err) {
       res.status(500).json({ error: String(err) });
     }

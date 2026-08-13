@@ -79,6 +79,15 @@ describe("worktree routes: origin guard + validation", () => {
     expect(b.statusCode).toBe(400);
   });
 
+  // Refused rather than dropped: the number ends up in the branch name and from there in the
+  // PR's `Fixes`, so creating an UNANCHORED worktree would look like it worked and only diverge
+  // later, when nothing closes the issue.
+  it.each([["0"], ["-1"], ["1.5"], ['"1171"'], ["null"]])("400s create when issue is %s", async (literal) => {
+    const res = makeRes();
+    await routes(allow)["POST /api/worktrees/create"]({ headers: {}, body: { repoDir: "/x", task: "t", issue: JSON.parse(literal) } }, res);
+    expect(res.statusCode).toBe(400);
+  });
+
   it("400s remove when repoDir or path is missing", async () => {
     const r = routes(allow);
     const res = makeRes();
@@ -195,6 +204,17 @@ describe("worktree routes: create → list → remove lifecycle", () => {
       const empty = makeRes();
       await r["GET /api/worktrees"]({ headers: {}, query: { cwd: repo } }, empty);
       expect((empty.payload as { worktrees: unknown[] }).worktrees).toEqual([]);
+    },
+    GIT_TEST_TIMEOUT_MS,
+  );
+
+  it.skipIf(!hasGit)(
+    "passes an issue number through to the branch name",
+    async () => {
+      const created = makeRes();
+      await routes(allow)["POST /api/worktrees/create"]({ headers: {}, body: { repoDir: repo, task: "Anchor it", issue: 1171 } }, created);
+      expect(created.statusCode).toBe(200);
+      expect((created.payload as { branch: string }).branch).toBe("issue/1171-anchor-it");
     },
     GIT_TEST_TIMEOUT_MS,
   );

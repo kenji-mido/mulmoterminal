@@ -54,7 +54,11 @@ export const CELL_HEADER_MAIN = "flex min-w-0 flex-1 items-center gap-2 overflow
 export const CELL_DOT = "h-[9px] w-[9px] flex-none rounded-full";
 // A directory's configured colour tints the idle dot; a status replaces it outright.
 export const CELL_DOT_IDLE = "bg-[var(--cell-dot,var(--text-dim))]";
-export const CELL_DOT_WORKING = "bg-accent animate-cell-pulse";
+// The fill without the pulse, so a cell that must hold still (a parked one — see cellParked.ts)
+// takes the same colour from the same place instead of stripping the animation off the string
+// below, which Tailwind cannot follow: it emits classes it finds LITERALLY in the source.
+export const CELL_DOT_WORKING_STILL = "bg-accent";
+export const CELL_DOT_WORKING = `${CELL_DOT_WORKING_STILL} animate-cell-pulse`;
 
 export const CELL_ACTIONS = "flex flex-none gap-1";
 

@@ -70,9 +70,32 @@ between **Accounting** and **Wiki**).
 | **approved / changes requested / review required** | review state |
 | **author · relative time** | e.g. `alice · 2h ago` (last updated) |
 
-An Issue row shows only **#number · title · author · relative time**.
+An Issue row shows **#number · title · author · relative time**, plus a **▶ start** button on the
+right — see below.
 
 > Up to **100 PRs / 20 Issues per repo**. Beyond that, a "there are more" note appears with a link to GitHub.
+
+## 3. Start work on an issue from its row
+
+The **▶** button at the end of an issue row does the whole setup in one click:
+
+1. reads the issue (title and body),
+2. creates a **`issue/<number>-<slug>` worktree** in your clone of that repo, forked from a freshly
+   fetched `origin/<base>`,
+3. starts **Claude** in that worktree as a grid cell, with the issue **already typed into the input
+   box** — and **not sent**. You read it, edit it if you like, and press Enter yourself.
+
+Because the branch carries the issue number, everything downstream follows without being told again:
+the ⧉ Open PR button writes `Fixes #<number>` into the PR body, and the header's work-item chip, the
+issue work comment and the merge-time auto-close all read the same number.
+
+**If you keep several clones of one repo**, the button asks which one the first time and remembers
+your answer (`repoDirs` in the config); after that it is one click. **If you have no clone of that
+repo**, the button is disabled and says so — register the directory in Settings → directory presets
+to enable it.
+
+> The issue body is text written by whoever opened the issue, which is often not you. That is why it
+> is left in the input box rather than sent: the Enter is yours.
 
 ## Prerequisite: sign in to the GitHub CLI
 

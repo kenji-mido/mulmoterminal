@@ -1,142 +1,22 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
-// Capture the key handler ensure() registers, so a test can drive it and assert the
-// real wiring (send + suppress-default) — hoisted so the mock factory can write to it.
-// Defaults to a no-op that returns true, so a test that forgot to attach would see the
-// pass-through behavior (and thus fail the Shift+Enter assertion) rather than crash.
-const mockKeyState: { handler: (e: unknown) => boolean } = vi.hoisted(() => ({ handler: () => true }));
-// The options ensure() passes to `new Terminal({...})`, captured for assertions.
-type FakeWheelEvent = { deltaY: number; preventDefault: () => void };
-const mockTermState: {
-  options: Record<string, unknown>;
-  csiHandlers: unknown[][];
-  wheelHandler: (ev: FakeWheelEvent) => boolean;
-  input: string[];
-  bufferType: "normal" | "alternate";
-  hasSelection: boolean;
-  selection: string;
-  onSelectionChange: () => void;
-  helperTextarea: HTMLTextAreaElement | null;
-} = vi.hoisted(() => ({
-  options: {},
-  csiHandlers: [],
-  wheelHandler: () => true,
-  input: [],
-  bufferType: "normal",
-  hasSelection: false,
-  selection: "",
-  onSelectionChange: () => {},
-  helperTextarea: null,
-}));
+// The xterm / addon / WebSocket doubles are shared (test/helpers/xtermDouble.ts). The shape below
+// is dictated by hoisting: `vi.mock` factories run BEFORE this file's imports, so they cannot
+// close over one — hence `await import` inside each factory, and `vi.hoisted` for the state they
+// write into (a plain `const` would be in its temporal dead zone when a factory runs).
+const { termState: mockTermState, keyState: mockKeyState } = await vi.hoisted(async () => (await import("../../helpers/xtermDouble")).createXtermState());
 
-// Mock xterm + addons so the manager runs headless (no real DOM terminal / canvas).
-// Factories are hoisted above imports, so the fakes are declared INSIDE them.
-vi.mock("@xterm/xterm", () => ({
-  Terminal: class {
-    options: Record<string, unknown> = {};
-    cols = 80;
-    rows = 24;
-    constructor(opts: Record<string, unknown>) {
-      // The SAME object, not a copy: setFont/setTheme mutate `term.options` after construction,
-      // and a test that only saw the constructor argument could not tell whether they landed.
-      this.options = opts;
-      mockTermState.options = opts;
-    }
-    // ensure() registers the mouse-tracking guards through this (#729); the guards' own behaviour
-    // is covered against a REAL terminal in mouseTrackingGuard.spec.ts.
-    parser = { registerCsiHandler: (...args: unknown[]) => mockTermState.csiHandlers.push(args) };
-    loadAddon() {}
-    registerLinkProvider() {}
-    // Real xterm puts a hidden helper textarea inside the host, and the clipboard fallback finds
-    // the copy target through it — a double that skipped it would let that path "pass" untested.
-    open(host: HTMLElement) {
-      const textarea = document.createElement("textarea");
-      textarea.className = "xterm-helper-textarea";
-      host.appendChild(textarea);
-      mockTermState.helperTextarea = textarea;
-    }
-    onData() {}
-    attachCustomKeyEventHandler(fn: (e: unknown) => boolean) {
-      mockKeyState.handler = fn;
-    }
-    // The wheel guard (#737) is driven directly by the stale-mode test below.
-    attachCustomWheelEventHandler(fn: (ev: FakeWheelEvent) => boolean) {
-      mockTermState.wheelHandler = fn;
-    }
-    get buffer() {
-      return { active: { type: mockTermState.bufferType } };
-    }
-    // The clipboard decision asks the terminal whether anything is selected (#900), so the
-    // double has to answer. Selection-specific behaviour is covered in terminalClipboard.spec.
-    hasSelection() {
-      return mockTermState.hasSelection;
-    }
-    // Copy-on-select rides this pair (#900): xterm reports that the selection moved, and the
-    // manager reads what it now is.
-    onSelectionChange(fn: () => void) {
-      mockTermState.onSelectionChange = fn;
-    }
-    getSelection() {
-      return mockTermState.selection;
-    }
-    input(data: string) {
-      mockTermState.input.push(data);
-    }
-    write() {}
-    refresh() {}
-    reset() {}
-    focus() {}
-    scrollToBottom() {}
-    dispose() {}
-  },
-}));
-vi.mock("@xterm/addon-fit", () => ({
-  FitAddon: class {
-    fit() {}
-  },
-}));
-vi.mock("@xterm/addon-web-links", () => ({
-  WebLinksAddon: class {
-    activate() {}
-  },
-}));
-vi.mock("@xterm/addon-clipboard", () => ({
-  ClipboardAddon: class {
-    activate() {}
-  },
-}));
+vi.mock("@xterm/xterm", async () => (await import("../../helpers/xtermDouble")).xtermModule(mockTermState, mockKeyState));
+vi.mock("@xterm/addon-fit", async () => (await import("../../helpers/xtermDouble")).fitAddonModule());
+vi.mock("@xterm/addon-web-links", async () => (await import("../../helpers/xtermDouble")).webLinksAddonModule());
+vi.mock("@xterm/addon-clipboard", async () => (await import("../../helpers/xtermDouble")).clipboardAddonModule());
 vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
 
-// A WebSocket double the test drives by hand (fire onopen / onmessage when it wants).
-class FakeWebSocket {
-  static readonly CONNECTING = 0;
-  static readonly OPEN = 1;
-  static readonly CLOSING = 2;
-  static readonly CLOSED = 3;
-  static readonly instances: FakeWebSocket[] = [];
-  url: string;
-  readyState = FakeWebSocket.OPEN; // treat as open immediately for send() guards
-  sent: string[] = [];
-  onopen: (() => void) | null = null;
-  onmessage: ((e: { data: string }) => void) | null = null;
-  onclose: (() => void) | null = null;
-  onerror: (() => void) | null = null;
-  constructor(url: string) {
-    this.url = url;
-    FakeWebSocket.instances.push(this);
-  }
-  send(d: string) {
-    this.sent.push(d);
-  }
-  close() {
-    this.readyState = FakeWebSocket.CLOSED;
-  }
-}
-
 import * as conn from "../../../src/composables/useTerminalConnections";
+import { FakeWebSocket } from "../../helpers/xtermDouble";
 import { newlineSequence, submitSequence } from "../../../common/terminalSubmit";
 import { setTerminalSubmitMode } from "../../../src/composables/terminalSubmitMode";
-import { setCopyOnSelect } from "../../../src/composables/copyOnSelect";
+import { clickReportSequences } from "../../../src/composables/mouseReports";
 
 const target = (sessionId: string | null) => ({ sessionId, cwd: "/typed", devTerminal: false, command: null, launcher: null });
 
@@ -228,6 +108,57 @@ describe("useTerminalConnections — detached-slot state replay", () => {
     ).toBe(true);
     expect(ws.sent).toHaveLength(0);
     conn.release("cell-key");
+  });
+
+  // A parked cell wakes on input (#992), so `onInput` has to mean "the user put something in" and
+  // nothing else. It rides the one function every keystroke, bound key and paste funnels through
+  // on the way to the socket — which is also why output arriving from the server cannot reach it.
+  it("reports user input, and never reports it for output the server sends", () => {
+    mockKeyState.handler = () => true;
+    setTerminalSubmitMode("cr");
+    const onInput = vi.fn();
+    conn.attach("cell-input", target(null), { onSession: vi.fn(), onCwd: vi.fn(), onInput }, document.createElement("div"));
+    const ws = FakeWebSocket.instances.at(-1);
+    if (!ws) throw new Error("no socket created");
+    ws.onopen?.();
+
+    ws.onmessage?.({ data: JSON.stringify({ type: "output", data: "hello from the agent" }) } as MessageEvent);
+    expect(onInput).not.toHaveBeenCalled();
+
+    const shiftEnter = {
+      type: "keydown",
+      key: "Enter",
+      shiftKey: true,
+      altKey: false,
+      ctrlKey: false,
+      metaKey: false,
+      isComposing: false,
+      preventDefault: vi.fn(),
+    };
+    mockKeyState.handler(shiftEnter);
+    expect(onInput).toHaveBeenCalled();
+    conn.release("cell-input");
+  });
+
+  // Clicking a parked cell to READ it must leave it parked — but a click on a mouse-tracking app
+  // is delivered as input on the very channel keystrokes use, which is what made the cell wake on
+  // the click rather than on the typing. The report still reaches the PTY; it just is not the
+  // user typing.
+  it("forwards a pointer report to the PTY without calling it user input", () => {
+    const onInput = vi.fn();
+    conn.attach("cell-click", target(null), { onSession: vi.fn(), onCwd: vi.fn(), onInput }, document.createElement("div"));
+    const ws = FakeWebSocket.instances.at(-1);
+    if (!ws) throw new Error("no socket created");
+    ws.onopen?.();
+
+    const [press] = clickReportSequences(4, 9);
+    mockTermState.emitData(press);
+    expect(ws.sent).toContain(JSON.stringify({ type: "input", data: press }));
+    expect(onInput).not.toHaveBeenCalled();
+
+    mockTermState.emitData("x");
+    expect(onInput).toHaveBeenCalledTimes(1);
+    conn.release("cell-click");
   });
 
   it("wires the Enter handler through ensure() (esc-cr mode): submits a bare Enter with \\x1b\\r and makes Shift+Enter a \\r newline", () => {
@@ -404,462 +335,6 @@ describe("useTerminalConnections — detached-slot state replay", () => {
   });
 });
 
-// Claude Code emits OSC 52 with an EMPTY selection; the clipboard addon's default
-// provider only writes for "c", so the empty case must also route to the clipboard.
-describe("isSystemClipboard", () => {
-  it("routes the empty selection (Claude Code's OSC 52) and explicit 'c' to the clipboard", () => {
-    expect(conn.isSystemClipboard("")).toBe(true);
-    expect(conn.isSystemClipboard("c")).toBe(true);
-  });
-
-  it("ignores primary / select / cut-buffer selections", () => {
-    for (const sel of ["p", "s", "0", "7"]) expect(conn.isSystemClipboard(sel)).toBe(false);
-  });
-});
-
-// Copy-on-select (#900). The decision itself is unit-tested in terminalClipboard.spec; what is
-// asserted here is the WIRING — that the drag's flood of events becomes at most one clipboard
-// write, and that the setting is what gates it.
-describe("copy-on-select wiring", () => {
-  const writeText = vi.fn<(text: string) => Promise<void>>();
-  const execCommand = vi.fn<(commandId: string) => boolean>(() => true);
-  let cellEl: HTMLDivElement;
-  // Torn down in afterEach rather than inline, so a failing assertion cannot leave a focused node
-  // in the document — the fallback tests read document.activeElement, so one failure would
-  // cascade into the others.
-  let elsewhere: HTMLInputElement | null = null;
-
-  beforeEach(() => {
-    FakeWebSocket.instances.length = 0;
-    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
-    mockTermState.onSelectionChange = () => {};
-    mockTermState.selection = "";
-    mockTermState.hasSelection = false;
-    mockTermState.helperTextarea = null;
-    writeText.mockReset();
-    writeText.mockResolvedValue(undefined);
-    execCommand.mockClear();
-    vi.stubGlobal("navigator", { clipboard: { writeText } });
-    // jsdom implements no execCommand at all, and the fallback needs a real one to observe.
-    Object.defineProperty(document, "execCommand", { value: execCommand, configurable: true, writable: true });
-    // In the document, not detached: the fallback's focus check is answered by
-    // document.activeElement, which only follows focus() for an element that is actually attached.
-    cellEl = document.createElement("div");
-    document.body.appendChild(cellEl);
-    vi.useFakeTimers();
-  });
-
-  afterEach(() => {
-    vi.useRealTimers();
-    vi.unstubAllGlobals();
-    // unstubAllGlobals does NOT undo defineProperty on `document`, and jsdom ships no native
-    // execCommand — leaving the stub would hand every later suite one that silently returns true.
-    Reflect.deleteProperty(document, "execCommand");
-    setCopyOnSelect(false);
-    conn.release("cell-select");
-    cellEl.remove();
-    elsewhere?.remove();
-    elsewhere = null;
-  });
-
-  const attachTerminal = (): void => {
-    conn.attach("cell-select", target(null), { onSession: vi.fn(), onCwd: vi.fn() }, cellEl);
-  };
-
-  // The selection as the terminal would report it — both halves, since the wiring reads each for a
-  // different job (hasSelection per event, getSelection once it settles).
-  const select = (text: string): void => {
-    mockTermState.selection = text;
-    mockTermState.hasSelection = text !== "";
-    mockTermState.onSelectionChange();
-  };
-
-  // xterm fires on every coordinate change, so a drag is a burst. Writing each one would fill the
-  // OS clipboard history (Win+V) with partial selections — only the settled text may land.
-  it("writes once for a whole drag, with the text the selection settled on", async () => {
-    setCopyOnSelect(true);
-    attachTerminal();
-
-    for (const partial of ["npm", "npm run", "npm run build"]) {
-      select(partial);
-      await vi.advanceTimersByTimeAsync(20); // still mid-drag: under the settle window
-    }
-    expect(writeText).not.toHaveBeenCalled();
-
-    await vi.advanceTimersByTimeAsync(200);
-    expect(writeText).toHaveBeenCalledTimes(1);
-    expect(writeText).toHaveBeenCalledWith("npm run build");
-  });
-
-  // The default. Highlighting must not touch the clipboard for anyone who did not ask for this.
-  it("writes nothing while the setting is off", async () => {
-    attachTerminal();
-    select("npm run build");
-    await vi.advanceTimersByTimeAsync(500);
-    expect(writeText).not.toHaveBeenCalled();
-    expect(execCommand).not.toHaveBeenCalled();
-  });
-
-  // A selection can settle again unchanged (a drag that runs past the end of a line moves the
-  // coordinates without moving the text). A second write buys nothing and costs a duplicate entry
-  // in the OS clipboard history.
-  it("does not write the same selection twice while it stands", async () => {
-    setCopyOnSelect(true);
-    attachTerminal();
-
-    select("npm run build");
-    await vi.advanceTimersByTimeAsync(500);
-    select("npm run build");
-    await vi.advanceTimersByTimeAsync(500);
-    expect(writeText).toHaveBeenCalledTimes(1);
-  });
-
-  // But once the selection is gone, selecting the same text is a fresh intent — the user may have
-  // copied something else in between, and "you already copied that" would leave them holding the
-  // wrong thing with nothing to show for it.
-  it("copies the same text again after the selection was cleared", async () => {
-    setCopyOnSelect(true);
-    attachTerminal();
-
-    select("npm run build");
-    await vi.advanceTimersByTimeAsync(500);
-    select(""); // a click elsewhere in the terminal
-    select("npm run build"); // re-dragged inside the same settle window as the clear
-    await vi.advanceTimersByTimeAsync(500);
-    expect(writeText).toHaveBeenCalledTimes(2);
-  });
-
-  // The whole answer to reaching this app at http://<lan-ip>: browsers restrict the Clipboard API
-  // to secure contexts, so `navigator.clipboard` is not merely blocked there, it is ABSENT. Asking
-  // xterm to copy through its own listener is what still works.
-  it("falls back to xterm's own copy when the browser exposes no clipboard API", async () => {
-    setCopyOnSelect(true);
-    vi.stubGlobal("navigator", {}); // an insecure context
-    attachTerminal();
-    mockTermState.helperTextarea?.focus();
-
-    select("npm run build");
-    await vi.advanceTimersByTimeAsync(500);
-    expect(execCommand).toHaveBeenCalledWith("copy");
-  });
-
-  // Same route when the API exists but refuses (no document focus, permission denied): one failure
-  // must not end the attempt.
-  it("falls back after a rejected clipboard write", async () => {
-    setCopyOnSelect(true);
-    writeText.mockRejectedValue(new Error("not focused"));
-    attachTerminal();
-    mockTermState.helperTextarea?.focus();
-
-    select("npm run build");
-    await vi.advanceTimersByTimeAsync(500);
-    expect(writeText).toHaveBeenCalled();
-    expect(execCommand).toHaveBeenCalledWith("copy");
-  });
-
-  // The fallback needs the terminal's textarea focused, and deliberately does NOT take focus to get
-  // it: if the user has moved on in the settle window, pulling focus back mid-typing would be a
-  // worse outcome than a selection that did not copy.
-  it("gives up rather than stealing focus back from wherever it went", async () => {
-    setCopyOnSelect(true);
-    vi.stubGlobal("navigator", {});
-    attachTerminal();
-    elsewhere = document.createElement("input");
-    document.body.appendChild(elsewhere);
-    elsewhere.focus();
-
-    select("npm run build");
-    await vi.advanceTimersByTimeAsync(500);
-    expect(execCommand).not.toHaveBeenCalled();
-    expect(document.activeElement).toBe(elsewhere);
-  });
-
-  // A clipboard write can stay pending far longer than the settle window — a browser that asks for
-  // clipboard permission holds it open until the user answers. Fired as they came due, two writes
-  // would then resolve in whatever order the browser picked, and the clipboard could end up with
-  // the older selection. Each write therefore waits for the one before it.
-  it("holds a newer write until the pending one finishes, so the older text cannot win", async () => {
-    setCopyOnSelect(true);
-    attachTerminal();
-    const finish: Array<() => void> = [];
-    writeText.mockImplementation(() => new Promise<void>((resolve) => finish.push(resolve)));
-
-    select("first");
-    await vi.advanceTimersByTimeAsync(200);
-    expect(writeText).toHaveBeenCalledTimes(1); // in flight, and staying there
-
-    select("second");
-    await vi.advanceTimersByTimeAsync(200);
-    expect(writeText).toHaveBeenCalledTimes(1); // settled, but must not start yet
-
-    finish[0]();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(writeText).toHaveBeenNthCalledWith(2, "second");
-  });
-});
-
-describe("isOpenableTerminalLink", () => {
-  it("opens http and https OSC 8 targets", () => {
-    expect(conn.isOpenableTerminalLink("https://github.com/o/r/pull/2541")).toBe(true);
-    expect(conn.isOpenableTerminalLink("http://localhost:3000/x")).toBe(true);
-    expect(conn.isOpenableTerminalLink("HTTPS://EXAMPLE.COM")).toBe(true); // scheme is case-insensitive
-  });
-
-  // A terminal program is untrusted output — a `javascript:`/`file:`/relative target must NOT open.
-  it.each(["javascript:alert(1)", "file:///etc/passwd", "mailto:a@b.com", "vscode://x", "/rel/path", "example.com", ""])(
-    "refuses non-http(s) target %j",
-    (uri) => {
-      expect(conn.isOpenableTerminalLink(uri)).toBe(false);
-    },
-  );
-});
-
-describe("OSC 8 link handler wiring", () => {
-  beforeEach(() => {
-    FakeWebSocket.instances.length = 0;
-    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
-    mockTermState.options = {};
-  });
-
-  it("ensure() sets a linkHandler that opens http(s) links and ignores others", () => {
-    conn.attach("cell-link", target(null), { onSession: vi.fn(), onCwd: vi.fn() }, document.createElement("div"));
-    const handler = mockTermState.options.linkHandler as { activate: (e: unknown, uri: string) => void } | undefined;
-    expect(handler).toBeTruthy();
-    const open = vi.spyOn(window, "open").mockReturnValue(null);
-    try {
-      handler?.activate({}, "https://github.com/o/r/pull/2541");
-      expect(open).toHaveBeenCalledWith("https://github.com/o/r/pull/2541", "_blank", "noopener,noreferrer");
-      open.mockClear();
-      handler?.activate({}, "javascript:alert(1)"); // must not open
-      expect(open).not.toHaveBeenCalled();
-    } finally {
-      open.mockRestore();
-      conn.release("cell-link");
-    }
-  });
-});
-
-// The pure key→bytes decision (enterKeyOverride) is covered in test/common/terminalSubmit.spec.ts;
-// here we cover the thin wrapper that turns that decision into a send + preventDefault, and that
-// it re-reads the mode getter each call so a live config change takes effect.
-describe("makeEnterHandler", () => {
-  const ev = (
-    over: Partial<KeyboardEvent>,
-  ): Pick<KeyboardEvent, "type" | "key" | "shiftKey" | "altKey" | "ctrlKey" | "metaKey" | "isComposing" | "preventDefault"> => ({
-    type: "keydown",
-    key: "Enter",
-    shiftKey: false,
-    altKey: false,
-    ctrlKey: false,
-    metaKey: false,
-    isComposing: false,
-    preventDefault: () => {},
-    ...over,
-  });
-
-  it("cr mode: sends the newline sequence on Shift+Enter, cancels the default, and preventDefaults", () => {
-    const send = vi.fn();
-    const preventDefault = vi.fn();
-    const handler = conn.makeEnterHandler(() => "cr", send);
-    expect(handler(ev({ shiftKey: true, preventDefault }))).toBe(false); // false => xterm won't also send \r
-    expect(send).toHaveBeenCalledWith(newlineSequence("cr"));
-    expect(preventDefault).toHaveBeenCalled(); // else the browser fires a keypress and xterm submits a bare \r
-  });
-
-  it("cr mode: passes a plain Enter through (returns true, sends nothing)", () => {
-    const send = vi.fn();
-    const handler = conn.makeEnterHandler(() => "cr", send);
-    expect(handler(ev({}))).toBe(true);
-    expect(send).not.toHaveBeenCalled();
-  });
-
-  it("esc-cr mode: submits a bare Enter with the ESC+CR sequence and cancels the default", () => {
-    const send = vi.fn();
-    const preventDefault = vi.fn();
-    const handler = conn.makeEnterHandler(() => "esc-cr", send);
-    expect(handler(ev({ preventDefault }))).toBe(false);
-    expect(send).toHaveBeenCalledWith(submitSequence("esc-cr"));
-    expect(preventDefault).toHaveBeenCalled();
-  });
-
-  it("reads the mode getter on every keydown, so a live config change is honoured", () => {
-    const send = vi.fn();
-    let mode: "cr" | "esc-cr" = "cr";
-    const handler = conn.makeEnterHandler(() => mode, send);
-    expect(handler(ev({}))).toBe(true); // cr: a bare Enter is left to xterm
-    mode = "esc-cr";
-    expect(handler(ev({}))).toBe(false); // esc-cr: the same key is now intercepted as submit
-    expect(send).toHaveBeenCalledWith(submitSequence("esc-cr"));
-  });
-});
-
-// The GUI-originated sends (header run:"input", skill invocation, worktree commit prompt)
-// paste/type text then submit a beat later — that delayed submit byte must follow the same
-// Claude-scoped mapping as the keyboard, or a Claude cell in esc-cr mode never submits.
-describe("submitText / pasteAndSubmit — delayed submit follows terminalSubmit (Claude-scoped)", () => {
-  beforeEach(() => {
-    FakeWebSocket.instances.length = 0;
-    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
-    setTerminalSubmitMode("cr");
-  });
-  afterEach(() => setTerminalSubmitMode("cr"));
-
-  const openCell = (key: string, t: conn.ConnTarget) => {
-    conn.attach(key, t, { onSession: vi.fn(), onCwd: vi.fn() }, document.createElement("div"));
-    const ws = FakeWebSocket.instances.at(-1);
-    if (!ws) throw new Error("no socket created");
-    ws.onopen?.();
-    ws.sent.length = 0; // drop init sends
-    return ws;
-  };
-
-  it("submitText: a Claude cell in esc-cr submits with ESC+CR (text first, submit delayed)", () => {
-    vi.useFakeTimers();
-    try {
-      setTerminalSubmitMode("esc-cr");
-      const ws = openCell("cell-st", target(null));
-      expect(conn.submitText("cell-st", "/compact")).toBe(true);
-      // The trailing space is the #1142 guard: `/compact` alone leaves Claude's command menu
-      // open, and while it is open the ESC of the ESC+CR submit is eaten as the menu's dismiss.
-      expect(ws.sent).toEqual([JSON.stringify({ type: "input", data: "/compact " })]); // submit not yet
-      vi.advanceTimersByTime(60);
-      expect(ws.sent).toContain(JSON.stringify({ type: "input", data: submitSequence("esc-cr") }));
-      conn.release("cell-st");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("submitText: a shell cell submits with plain \\r even in esc-cr", () => {
-    vi.useFakeTimers();
-    try {
-      setTerminalSubmitMode("esc-cr");
-      const ws = openCell("cell-st2", { ...target(null), launcher: { shell: true as const } });
-      conn.submitText("cell-st2", "ls");
-      vi.advanceTimersByTime(60);
-      expect(ws.sent).toContain(JSON.stringify({ type: "input", data: "\r" }));
-      expect(ws.sent).not.toContain(JSON.stringify({ type: "input", data: "\x1b\r" }));
-      conn.release("cell-st2");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("pasteAndSubmit: a Claude cell in esc-cr submits with ESC+CR after the paste", () => {
-    vi.useFakeTimers();
-    try {
-      setTerminalSubmitMode("esc-cr");
-      const ws = openCell("cell-ps", target(null));
-      expect(conn.pasteAndSubmit("cell-ps", "line1\nline2")).toBe(true);
-      vi.advanceTimersByTime(200);
-      expect(ws.sent).toContain(JSON.stringify({ type: "input", data: submitSequence("esc-cr") }));
-      conn.release("cell-ps");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("submitText: the default cr mode still submits with plain \\r", () => {
-    vi.useFakeTimers();
-    try {
-      const ws = openCell("cell-st3", target(null));
-      conn.submitText("cell-st3", "hi");
-      vi.advanceTimersByTime(60);
-      expect(ws.sent).toContain(JSON.stringify({ type: "input", data: "\r" }));
-      conn.release("cell-st3");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  // #1142: the Skill menu types `/<slug>` through submitText, so this path has the same dead end
-  // as the phone's — Claude keeps the command menu open on a bare `/slug` and eats the ESC of an
-  // ESC+CR submit. The guard space is mode-independent: a cr host submits the same line either
-  // way, so both modes send it rather than the guard depending on a setting.
-  it.each(["cr", "esc-cr"] as const)("submitText: the skill seed carries the completion guard in %s mode", (mode) => {
-    vi.useFakeTimers();
-    try {
-      setTerminalSubmitMode(mode);
-      const ws = openCell(`cell-guard-${mode}`, target(null));
-      conn.submitText(`cell-guard-${mode}`, "/mulmoterminal-decisions");
-      expect(ws.sent[0]).toBe(JSON.stringify({ type: "input", data: "/mulmoterminal-decisions " }));
-      conn.release(`cell-guard-${mode}`);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  // The guard is Claude Code's behaviour, so a shell cell's bytes stay exactly what was asked for:
-  // measured in a live zsh, `echo foo\` + CR waits at a continuation prompt while `echo foo\ ` + CR
-  // runs and prints `foo`. Same scoping as the submit bytes above (isClaudeTarget).
-  it("submitText: a shell cell's line end is left untouched", () => {
-    vi.useFakeTimers();
-    try {
-      const ws = openCell("cell-sh-guard", { ...target(null), launcher: { shell: true as const } });
-      conn.submitText("cell-sh-guard", "echo foo\\");
-      expect(ws.sent[0]).toBe(JSON.stringify({ type: "input", data: "echo foo\\" }));
-      conn.release("cell-sh-guard");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("pasteAndSubmit: a shell cell's paste is byte-exact too", () => {
-    vi.useFakeTimers();
-    try {
-      const ws = openCell("cell-sh-ps", { ...target(null), launcher: { shell: true as const } });
-      conn.pasteAndSubmit("cell-sh-ps", "echo foo\\");
-      expect(ws.sent[0]).toBe(JSON.stringify({ type: "input", data: "\x1b[200~echo foo\\\x1b[201~" }));
-      conn.release("cell-sh-ps");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it("pasteAndSubmit: the guard rides inside the bracketed paste, not after the terminator", () => {
-    vi.useFakeTimers();
-    try {
-      const ws = openCell("cell-ps2", target(null));
-      conn.pasteAndSubmit("cell-ps2", "read @common/terminalSubmit.ts");
-      expect(ws.sent[0]).toBe(JSON.stringify({ type: "input", data: "\x1b[200~read @common/terminalSubmit.ts \x1b[201~" }));
-      conn.release("cell-ps2");
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  // insertText / pasteText hand the user a draft to read and send themselves, so they must keep
-  // exactly what was handed over — a guard space belongs only where WE press Enter.
-  it("insertText and pasteText leave the text untouched", () => {
-    const ws = openCell("cell-ins", target(null));
-    conn.insertText("cell-ins", "/compact");
-    conn.pasteText("cell-ins", "line1\nline2");
-    expect(ws.sent).toEqual([JSON.stringify({ type: "input", data: "/compact" }), JSON.stringify({ type: "input", data: "\x1b[200~line1\nline2\x1b[201~" })]);
-    conn.release("cell-ins");
-  });
-});
-
-// terminalSubmit is Claude's binding, so it must apply only to Claude cells — a shell /
-// codex / command / dev-terminal cell keeps the standard binding regardless of the setting.
-describe("isClaudeTarget", () => {
-  const base = { sessionId: null, cwd: "/x", devTerminal: false, command: null, launcher: null };
-
-  it("is true for a plain Claude cell", () => {
-    expect(conn.isClaudeTarget({ ...base })).toBe(true);
-    // A launch (provider/model) choice is Claude-only, so it's still a Claude cell.
-    expect(conn.isClaudeTarget({ ...base, launch: { provider: "openrouter", model: "x" } })).toBe(true);
-  });
-
-  it("is false for shell / codex / command / dev-terminal cells", () => {
-    expect(conn.isClaudeTarget({ ...base, launcher: { shell: true } })).toBe(false);
-    expect(conn.isClaudeTarget({ ...base, launcher: { index: 0 } })).toBe(false);
-    expect(conn.isClaudeTarget({ ...base, agent: "codex" })).toBe(false);
-    expect(conn.isClaudeTarget({ ...base, agent: "antigravity" })).toBe(false);
-    expect(conn.isClaudeTarget({ ...base, command: { source: "script", index: 0, label: "dev", cwd: null } })).toBe(false);
-    expect(conn.isClaudeTarget({ ...base, devTerminal: true })).toBe(false);
-  });
-});
-
 // The load-bearing half of #860/#864, and the half nothing asserted until now: changing the font
 // changes the CELL METRICS, so cols/rows change and the PTY has to be told. Delete the re-fit from
 // setFont and every other test in this repo still passes, while the bug #860 was filed for — a
@@ -919,66 +394,6 @@ describe("setFont — a font change must reach the PTY, not just the canvas", ()
 
   it("ignores a slot that does not exist rather than throwing", () => {
     expect(() => conn.setFont("cell-not-here", { size: 20, family: "monospace" })).not.toThrow();
-  });
-});
-
-// #1005. The pure key->bytes decision (sendBytesFor) is covered in test/common/keymapSend.spec.ts;
-// here we cover the wrapper — that it sends, cancels xterm's own handling, and preventDefaults,
-// and that it re-reads the keymap each call so editing config.json takes effect without a reload.
-describe("makeSendHandler", () => {
-  const CTRL_E = "\u0005";
-  const key = (
-    over: Partial<KeyboardEvent>,
-  ): Pick<KeyboardEvent, "type" | "key" | "shiftKey" | "altKey" | "ctrlKey" | "metaKey" | "isComposing" | "preventDefault"> => ({
-    type: "keydown",
-    key: "ArrowRight",
-    shiftKey: false,
-    altKey: false,
-    ctrlKey: false,
-    metaKey: true,
-    isComposing: false,
-    preventDefault: () => {},
-    ...over,
-  });
-  const bound = { send: [{ key: "Cmd+ArrowRight", bytes: CTRL_E }] };
-
-  it("sends the bytes, cancels xterm's handling, and preventDefaults", () => {
-    const send = vi.fn();
-    const preventDefault = vi.fn();
-    const handler = conn.makeSendHandler(() => bound, send);
-    expect(handler(key({ preventDefault }))).toBe(false); // false => xterm does not also translate the key
-    expect(send).toHaveBeenCalledWith(CTRL_E);
-    // Without this the browser fires a follow-up keypress that arrives as stray input — the same
-    // trap makeEnterHandler documents.
-    expect(preventDefault).toHaveBeenCalled();
-  });
-
-  it("passes an unbound key through untouched", () => {
-    const send = vi.fn();
-    const preventDefault = vi.fn();
-    const handler = conn.makeSendHandler(() => bound, send);
-    expect(handler(key({ key: "ArrowLeft", preventDefault }))).toBe(true);
-    expect(send).not.toHaveBeenCalled();
-    expect(preventDefault).not.toHaveBeenCalled();
-  });
-
-  it("takes no key at all when nothing is bound", () => {
-    const send = vi.fn();
-    const handler = conn.makeSendHandler(() => ({}), send);
-    expect(handler(key({}))).toBe(true);
-    expect(send).not.toHaveBeenCalled();
-  });
-
-  // Read through a getter, not captured: the keymap is hydrated asynchronously from /api/config
-  // and can change while a terminal is open.
-  it("re-reads the keymap on every keystroke", () => {
-    const send = vi.fn();
-    let keymap: { send?: { key: string; bytes: string }[] } = {};
-    const handler = conn.makeSendHandler(() => keymap, send);
-    expect(handler(key({}))).toBe(true);
-    keymap = bound;
-    expect(handler(key({}))).toBe(false);
-    expect(send).toHaveBeenCalledWith(CTRL_E);
   });
 });
 
@@ -1073,13 +488,13 @@ describe("useTerminalConnections — a hidden document does not take sessions", 
     sock?.onmessage?.({ data: JSON.stringify({ type: "superseded" }) } as MessageEvent);
     expect(conn.connView.get("cell-hidden")?.status).toBe("superseded");
 
-    sock?.onclose?.(new CloseEvent("close"));
+    sock?.onclose?.();
     expect(conn.connView.get("cell-hidden")?.status).toBe("superseded"); // not overwritten
   });
 
   it("still reports a plain drop as disconnected", async () => {
     conn.attach("cell-hidden", target("88888888-8888-4888-8888-888888888888"), { onSession: vi.fn(), onCwd: vi.fn() }, document.createElement("div"));
-    FakeWebSocket.instances.at(-1)?.onclose?.(new CloseEvent("close"));
+    FakeWebSocket.instances.at(-1)?.onclose?.();
     expect(conn.connView.get("cell-hidden")?.status).toBe("disconnected");
   });
 });

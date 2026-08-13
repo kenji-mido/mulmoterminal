@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   sanitizeSoundFile,
   sanitizeRepos,
+  sanitizeRepoDirs,
   sanitizeLaunchers,
   sanitizeQuickCommands,
   sanitizePushKinds,
@@ -85,6 +86,36 @@ describe("sanitizeRepos", () => {
     expect(sanitizeRepos(["  a/b ", "c/d", "a/b", "no-slash", "x/y/z", 5, "bad name/repo"])).toEqual(["a/b", "c/d"]);
     expect(sanitizeRepos("nope")).toEqual([]);
     expect(sanitizeRepos(undefined)).toEqual([]);
+  });
+});
+
+describe("sanitizeRepoDirs", () => {
+  it("keeps owner/repo keys pointing at absolute paths, trimmed", () => {
+    expect(sanitizeRepoDirs({ "a/b": "  /w/ab  ", " c/d ": "/w/cd" })).toEqual({ "a/b": "/w/ab", "c/d": "/w/cd" });
+  });
+
+  // A relative path would be resolved against the SERVER's cwd and name a directory the user
+  // never picked — the same rule the presets follow.
+  it.each([
+    ["a relative path", { "a/b": "w/ab" }],
+    ["a non-string value", { "a/b": 5 }],
+    ["a key that is not owner/repo", { "no-slash": "/w/x" }],
+    ["a key with a path in it", { "a/b/c": "/w/x" }],
+    ["a key with a space", { "bad name/repo": "/w/x" }],
+  ])("drops %s", (_case, input) => {
+    expect(sanitizeRepoDirs(input)).toEqual({});
+  });
+
+  // The deletion-by-malformed-body trap this field shares with `sounds`: an array sanitizes to
+  // `{}`, which the merge would apply as "the user cleared every choice". `config-body` rejects
+  // it before that, and this pins what the sanitizer alone would have done.
+  it.each([
+    ["an array", []],
+    ["a string", "nope"],
+    ["undefined", undefined],
+    ["null", null],
+  ])("is empty for %s", (_case, input) => {
+    expect(sanitizeRepoDirs(input)).toEqual({});
   });
 });
 
@@ -245,6 +276,7 @@ describe("loadAppConfig / saveAppConfig", () => {
     soundKinds: [...DEFAULT_SOUND_KINDS],
     sounds: {},
     prRepos: [],
+    repoDirs: {},
     launchers: [],
     quickCommands: [],
     userMcpServers: [],
@@ -277,6 +309,7 @@ describe("loadAppConfig / saveAppConfig", () => {
       soundKinds: [...DEFAULT_SOUND_KINDS],
       sounds: {},
       prRepos: ["o/r"],
+      repoDirs: {},
       launchers: [{ label: "Shell", command: "$SHELL" }],
       quickCommands: [],
       userMcpServers: [{ id: "weather", url: "http://localhost:9000/mcp" }],
@@ -335,6 +368,7 @@ describe("loadAppConfig / saveAppConfig", () => {
       soundKinds: [...DEFAULT_SOUND_KINDS],
       sounds: {},
       prRepos: ["o/r"],
+      repoDirs: {},
       launchers: [{ label: "S", command: "sh" }],
       quickCommands: [],
       userMcpServers: [{ id: "ok", url: "https://x/mcp" }],
@@ -443,6 +477,7 @@ describe("#741 corrupt config is not silently wiped by a partial update", () => 
     soundKinds: [...DEFAULT_SOUND_KINDS],
     sounds: {},
     prRepos: ["o/r"],
+    repoDirs: {},
     launchers: [{ label: "Shell", command: "$SHELL" }],
     quickCommands: [],
     userMcpServers: [{ id: "weather", url: "http://localhost:9000/mcp" }],
@@ -507,6 +542,7 @@ describe("mergeConfigUpdate", () => {
     soundKinds: [...DEFAULT_SOUND_KINDS],
     sounds: {},
     prRepos: [],
+    repoDirs: {},
     launchers: [],
     quickCommands: [],
     userMcpServers: [],

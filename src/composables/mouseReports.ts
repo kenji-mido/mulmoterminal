@@ -49,6 +49,26 @@ export function wantsMouseReports(active: ReadonlySet<number>): boolean {
 
 const sgrReport = (button: number, col: number, row: number, released = false): string => `\x1b[<${button};${col};${row}${released ? "m" : "M"}`;
 
+/** Whether a chunk on its way to the PTY is a mouse report rather than something the user typed.
+ *  Reports reach the socket through the SAME channel as keystrokes — the app feeds its own via
+ *  `term.input()` and xterm emits the rest through `onData` — so anything that has to mean "the
+ *  user typed" is obliged to tell them apart. Both encodings a terminal can produce are matched:
+ *  the SGR form `sgrReport` writes above (what every app requesting 1006 gets) and the legacy
+ *  X10 one, which this app never synthesizes but a terminal can still emit. */
+export function isMouseReport(data: string): boolean {
+  const CSI = "\x1b[";
+  if (!data.startsWith(CSI)) return false;
+  // The introducer is matched as a string, not inside the pattern: a literal ESC in a regex is
+  // both unreadable and a lint error, and what actually distinguishes the two encodings is the
+  // body anyway.
+  // Anchored: ONE report per chunk. Every producer here sends them that way — this app calls
+  // `term.input()` once per sequence, and xterm emits one per event — so a chunk carrying two
+  // concatenated reports would fall through as "typed". Benign if it ever happens (a parked cell
+  // wakes early), which is why this stays a single readable pattern rather than a scanner.
+  const body = data.slice(CSI.length);
+  return body.startsWith("M") || /^<\d+;\d+;\d+[Mm]$/.test(body);
+}
+
 /** The SGR wheel report for a wheel movement, or null when there is no vertical motion.
  *  Button 64 is wheel-up, 65 wheel-down; col/row are 1-based cell coordinates. */
 export function wheelReportSequence(deltaY: number, col: number, row: number): string | null {

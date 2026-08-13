@@ -3,6 +3,17 @@
 // terminal (no GUI MCP) — is unit-testable without xterm/WebSocket.
 import type { RunCommand } from "./runCommand";
 import type { TerminalAgent } from "../../common/sessionAgent";
+import { isUsableTerminalSize, type TerminalSize } from "../../common/terminalSize";
+
+// The geometry the terminal has ALREADY been fitted to, so the pty is spawned at it instead of the
+// server's 120x30 default and a first `resize` frame that goes missing costs nothing (#1178). Left
+// off when it isn't a size the server would accept anyway — the server then keeps its default and
+// waits for the resize frame, exactly as before this was sent.
+function appendSize(params: URLSearchParams, size: TerminalSize | null | undefined): void {
+  if (!size || !isUsableTerminalSize(size)) return;
+  params.set("cols", String(size.cols));
+  params.set("rows", String(size.rows));
+}
 
 // What the launch form picked for THIS session (#584), overriding the directory's own
 // default. Either half may be absent: a bare model is a valid pick on the default
@@ -19,11 +30,12 @@ export interface TerminalWsUrlInput {
   cwd?: string | null | undefined; // launch in this directory
   devTerminal?: boolean | undefined; // grid dev terminal: no GUI MCP (?gui=0)
   launch?: LaunchChoice | null | undefined; // picked at launch; absent => the directory's default
+  size?: TerminalSize | null | undefined; // the fitted geometry, so the pty is born at it
 }
 
 // The two session-terminal endpoints (/ws for claude, /ws/codex for codex) send the
 // identical session/cwd/gui query, so they share this assembly — only the path differs.
-function sessionTerminalWsUrl(path: string, { host, secure, sessionId, cwd, devTerminal, launch }: TerminalWsUrlInput): string {
+function sessionTerminalWsUrl(path: string, { host, secure, sessionId, cwd, devTerminal, launch, size }: TerminalWsUrlInput): string {
   const params = new URLSearchParams();
   if (sessionId) params.set("session", sessionId);
   if (cwd) params.set("cwd", cwd);
@@ -32,6 +44,7 @@ function sessionTerminalWsUrl(path: string, { host, secure, sessionId, cwd, devT
   // the directory's own provider/model.
   if (launch?.provider) params.set("provider", launch.provider);
   if (launch?.model) params.set("model", launch.model);
+  appendSize(params, size);
   const qs = params.toString();
   const suffix = qs ? `?${qs}` : "";
   const proto = secure ? "wss:" : "ws:";
@@ -42,7 +55,7 @@ export function buildTerminalWsUrl(input: TerminalWsUrlInput): string {
   return sessionTerminalWsUrl("ws", input);
 }
 
-export type RunWsUrlInput = { host: string; secure: boolean; cwd?: string | null } & (
+export type RunWsUrlInput = { host: string; secure: boolean; cwd?: string | null; size?: TerminalSize | null } & (
   | { index: number } // position in the directory's script.json (the server resolves it)
   | { buttonId: string; session: string | null; agent: TerminalAgent; model: string | null } // a header run:"shell" button, re-resolved server-side
 );
@@ -62,6 +75,7 @@ export function buildRunWsUrl(input: RunWsUrlInput): string {
     params.set("index", String(input.index));
   }
   if (input.cwd) params.set("cwd", input.cwd);
+  appendSize(params, input.size);
   const proto = input.secure ? "wss:" : "ws:";
   return `${proto}//${input.host}/ws/run?${params.toString()}`;
 }
@@ -73,17 +87,19 @@ export interface LaunchWsUrlInput {
   cwd?: string | null;
   launcher?: number; // position in the configured launcher list (the server resolves it)
   shell?: boolean; // run the OS default shell ($SHELL) — no configured index (the header "new terminal" button)
+  size?: TerminalSize | null; // the fitted geometry, so the pty is born at it
 }
 
 // The launcher-terminal endpoint (a configured shell/codex/command, or the OS default shell).
 // Persistent & reattachable like /ws: the browser sends the launcher INDEX (config is the allowlist)
 // — or `shell=1` for the OS default shell, which needs no index — plus the session id to reattach.
-export function buildLaunchWsUrl({ host, secure, sessionId, cwd, launcher, shell }: LaunchWsUrlInput): string {
+export function buildLaunchWsUrl({ host, secure, sessionId, cwd, launcher, shell, size }: LaunchWsUrlInput): string {
   const params = new URLSearchParams();
   if (sessionId) params.set("session", sessionId);
   if (cwd) params.set("cwd", cwd);
   if (shell) params.set("shell", "1");
   else params.set("launcher", String(launcher));
+  appendSize(params, size);
   const proto = secure ? "wss:" : "ws:";
   return `${proto}//${host}/ws/launch?${params.toString()}`;
 }
@@ -94,6 +110,7 @@ export interface AgentWsUrlInput {
   sessionId: string | null; // reattach/resume this session; null => fresh
   cwd?: string | null;
   devTerminal?: boolean; // grid dev terminal: no GUI MCP (?gui=0). Single view omits it => GUI MCP.
+  size?: TerminalSize | null; // the fitted geometry, so the pty is born at it
 }
 
 // Every non-Claude agent has its own endpoint, and they differ only in the path: persistent &
@@ -129,10 +146,10 @@ export interface ConnTargetUrlInput {
 
 // A command cell's endpoint: a script.json entry by index, or a header shell button by id
 // (+ the session context to re-resolve it server-side).
-function runCommandWsUrl(command: RunCommand, host: string, secure: boolean): string {
+function runCommandWsUrl(command: RunCommand, host: string, secure: boolean, size: TerminalSize | null): string {
   return command.source === "button"
-    ? buildRunWsUrl({ host, secure, cwd: command.cwd, buttonId: command.buttonId, session: command.session, agent: command.agent, model: command.model })
-    : buildRunWsUrl({ host, secure, cwd: command.cwd, index: command.index });
+    ? buildRunWsUrl({ host, secure, size, cwd: command.cwd, buttonId: command.buttonId, session: command.session, agent: command.agent, model: command.model })
+    : buildRunWsUrl({ host, secure, size, cwd: command.cwd, index: command.index });
 }
 
 // Which endpoint a slot connects to. The order is the rule: a Run command is ephemeral and
@@ -142,16 +159,17 @@ function runCommandWsUrl(command: RunCommand, host: string, secure: boolean): st
 // script as an agent session.
 //
 // `host`/`secure` are parameters rather than reads of `location`, which is what lets this be
-// exercised at all.
-export function connWsUrl(target: ConnTargetUrlInput, resumeId: string | null, host: string, secure: boolean): string {
-  if (target.command) return runCommandWsUrl(target.command, host, secure);
+// exercised at all. `size` is the terminal's already-fitted geometry: every endpoint here spawns a
+// pty, and one born at the browser's size never draws a frame at the server's default.
+export function connWsUrl(target: ConnTargetUrlInput, resumeId: string | null, host: string, secure: boolean, size: TerminalSize | null = null): string {
+  if (target.command) return runCommandWsUrl(target.command, host, secure, size);
   if (target.launcher) {
     return "shell" in target.launcher
-      ? buildLaunchWsUrl({ host, secure, sessionId: resumeId, cwd: target.cwd, shell: true })
-      : buildLaunchWsUrl({ host, secure, sessionId: resumeId, cwd: target.cwd, launcher: target.launcher.index });
+      ? buildLaunchWsUrl({ host, secure, size, sessionId: resumeId, cwd: target.cwd, shell: true })
+      : buildLaunchWsUrl({ host, secure, size, sessionId: resumeId, cwd: target.cwd, launcher: target.launcher.index });
   }
   if (target.agent && target.agent !== "claude") {
-    return buildAgentWsUrl(target.agent, { host, secure, sessionId: resumeId, cwd: target.cwd, devTerminal: target.devTerminal });
+    return buildAgentWsUrl(target.agent, { host, secure, size, sessionId: resumeId, cwd: target.cwd, devTerminal: target.devTerminal });
   }
-  return buildTerminalWsUrl({ host, secure, sessionId: resumeId, cwd: target.cwd, devTerminal: target.devTerminal, launch: target.launch });
+  return buildTerminalWsUrl({ host, secure, size, sessionId: resumeId, cwd: target.cwd, devTerminal: target.devTerminal, launch: target.launch });
 }

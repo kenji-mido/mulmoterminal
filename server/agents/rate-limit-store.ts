@@ -8,7 +8,7 @@
 //
 // Codex is not in that bargain — its windows are read from a rollout file — so it is refreshed
 // whenever asked and never gates on staleness.
-import type { RateLimits } from "./statusline.js";
+import type { ClaudeStatus, RateLimits } from "./statusline.js";
 
 export type RateLimitAgent = "claude" | "codex";
 
@@ -32,9 +32,16 @@ export type ProbeState =
   // `claude` cannot be found. Spawning is pointless until that changes, and re-checking costs
   // nothing (it is a PATH lookup, not a session).
   | { kind: "no-claude" }
-  // A status line ARRIVED and carried no windows. That is the API-key billing case, which
-  // statusline.ts documents as structural: this account will not report windows however many
-  // times we ask. Retried, but slowly, because billing can change under a running server.
+  // A status line arrived AFTER an API response and carried no windows. That is the API-key
+  // billing case, which statusline.ts documents as structural: this account will not report
+  // windows however many times we ask. Retried, but slowly, because billing can change under a
+  // running server.
+  //
+  // "after an API response" is load-bearing rather than detail. Every probe's FIRST status line
+  // carries no windows — they do not exist yet — so concluding this from the absence alone made a
+  // probe that then failed to finish indistinguishable from API-key billing: the wrong reason on
+  // screen, an hour between retries, and no failure counted against the one that actually broke
+  // (#1161).
   | { kind: "no-windows" }
   // Asked, and nothing came back before the timeout: a trust prompt nobody answered, an expired
   // login, a machine too slow to boot the TUI in 90s. Retried with a widening gap.
@@ -86,6 +93,37 @@ export function shouldProbe(now_ms: number, gate: ProbeGate): boolean {
   return gate.reportedAt_ms === null || now_ms - gate.reportedAt_ms > RATE_LIMIT_STALE_MS;
 }
 
+/** What one Claude status line proves about the probe, or null when it proves nothing.
+ *
+ *  Windows in hand is success outright. Windows ABSENT is an answer only once the session has had
+ *  an API response — before that they are simply not written yet (statusline.ts), so that payload
+ *  is evidence in neither direction and must leave the verdict where it was. Reading it as an
+ *  answer made a probe that then died indistinguishable from API-key billing (#1161). */
+export function claudeStatusVerdict(status: ClaudeStatus): ProbeState | null {
+  if (status.limits) return { kind: "ok" };
+  return status.afterApiResponse ? { kind: "no-windows" } : null;
+}
+
+// Whether a status line arrived during the attempt that just ended. One stamped before the probe
+// started belongs to an earlier attempt; no recorded start at all with a status line already in
+// hand means something answered without us asking, which counts as answered rather than a failure
+// invented out of nothing.
+const answeredDuringAttempt = (lastStatusLineAt_ms: number | null, lastProbeAt_ms: number | null): boolean =>
+  lastStatusLineAt_ms !== null && (lastProbeAt_ms === null || lastStatusLineAt_ms >= lastProbeAt_ms);
+
+/** One more consecutive silence. */
+const afterSilence = (state: ProbeState): ProbeState => ({
+  kind: "no-report",
+  failures: state.kind === "no-report" ? state.failures + 1 : 1,
+});
+
+// Only `no-claude` is the availability check's to set OR clear. Any other verdict is about
+// something the binary being present cannot answer, so a real failure survives finding one.
+const afterAvailability = (state: ProbeState, available: boolean): ProbeState => {
+  if (!available) return { kind: "no-claude" };
+  return state.kind === "no-claude" ? { kind: "ok" } : state;
+};
+
 /** Told after a report that carried windows. The agent is part of it because the two callers want
  *  different things from it: the cache wants the snapshot, while the probe wants to know its own
  *  answer is in — a Claude report with windows is the moment holding the PTY open stops buying
@@ -97,28 +135,43 @@ export function createRateLimitStore(initial: RateLimitSnapshot = {}, onChange: 
   let lastAskedAt_ms: number | null = null;
   let probeInFlight = false;
   let lastProbeAt_ms: number | null = null;
-  // When a Claude status line last ARRIVED — with or without windows. Compared against the probe's
-  // start to tell "it answered" from "nothing came back", which the state alone cannot: `ok` is
-  // also what a store looks like before anything has happened.
+  // When a Claude status line last ANSWERED — carried windows, or proved there are none. Compared
+  // against the probe's start to tell "it answered" from "nothing came back", which the state alone
+  // cannot: `ok` is also what a store looks like before anything has happened.
+  //
+  // A status line from before the session's first API response is deliberately not one of these. It
+  // says only "claude is running", which is not what the probe was spawned to find out.
   let lastStatusLineAt_ms: number | null = null;
   let state: ProbeState = { kind: "ok" };
 
+  /** A payload without the windows is routine — before the first API response, or API-key
+   * billing — so it leaves the last known reading alone rather than blanking the gauge. */
+  const record = (agent: RateLimitAgent, limits: RateLimits | null, now_ms: number): void => {
+    if (!limits) return;
+    byAgent[agent] = { limits, reportedAt_ms: now_ms };
+    onChange({ ...byAgent }, agent);
+  };
+
   return {
-    /** A payload without the windows is routine — before the first API response, or API-key
-     * billing — so it leaves the last known reading alone rather than blanking the gauge. */
-    report(agent: RateLimitAgent, limits: RateLimits | null, now_ms: number): void {
-      // A Claude status line that arrived WITHOUT windows is not a failure to retry at the failure
-      // cadence — it is this account answering "there are none" (API-key billing; see
-      // statusline.ts). Recording that is what stops the 90-second loop in #1011, and it is only
-      // knowable here: from the probe's side, an account with no windows and a login that expired
-      // look identical.
-      if (agent === "claude") {
+    /** Codex's windows, read from its rollout file. No probe and no verdict to reach: the file
+     * either had them or it did not. */
+    reportCodex(limits: RateLimits | null, now_ms: number): void {
+      record("codex", limits, now_ms);
+    },
+
+    /** One Claude status line. A payload that proves nothing moves nothing — not the state, not the
+     * "it answered" stamp — which is what leaves a probe that then dies to be counted as the
+     * silence it is (see claudeStatusVerdict).
+     *
+     * Kept apart from `reportCodex` rather than sharing one `report(agent, …)`: the verdict is
+     * Claude's alone, and an agent argument is a way to reach the store without it. */
+    reportClaudeStatus(status: ClaudeStatus, now_ms: number): void {
+      const verdict = claudeStatusVerdict(status);
+      if (verdict) {
         lastStatusLineAt_ms = now_ms;
-        state = limits ? { kind: "ok" } : { kind: "no-windows" };
+        state = verdict;
       }
-      if (!limits) return;
-      byAgent[agent] = { limits, reportedAt_ms: now_ms };
-      onChange({ ...byAgent }, agent);
+      record("claude", status.limits, now_ms);
     },
     snapshot(): RateLimitSnapshot {
       return { ...byAgent };
@@ -151,17 +204,13 @@ export function createRateLimitStore(initial: RateLimitSnapshot = {}, onChange: 
      *  probed is also `ok`, so treating `ok` as "it worked" would swallow the FIRST failure — and
      *  the first failure is the one that starts the loop this fix exists for (#1011). */
     noteProbeFailedIfNoReport(now_ms: number): void {
-      // No recorded probe start with a status line already in hand means something answered
-      // without us asking — count it as answered rather than inventing a failure.
-      const answered = lastStatusLineAt_ms !== null && (lastProbeAt_ms === null || lastStatusLineAt_ms >= lastProbeAt_ms);
-      if (answered) return;
+      if (answeredDuringAttempt(lastStatusLineAt_ms, lastProbeAt_ms)) return;
       // The gap is measured from when the attempt ENDED, not when it began. A probe times out
       // after PROBE_TIMEOUT_MS, which is the same 90 seconds as the first retry delay — so
       // measuring from the start would let the first retry fire the instant the timeout landed,
       // reproducing the exact cadence reported in #1011 for one more cycle.
       lastProbeAt_ms = now_ms;
-      const failures = state.kind === "no-report" ? state.failures + 1 : 1;
-      state = { kind: "no-report", failures };
+      state = afterSilence(state);
     },
     /** Whether `claude` can be launched at all, told to the store by whoever can look.
      *
@@ -169,21 +218,13 @@ export function createRateLimitStore(initial: RateLimitSnapshot = {}, onChange: 
      *  check that only ran inside the probe path could never clear itself — install claude and the
      *  gauge would stay unavailable until a restart (Codex review on #1019). */
     setClaudeAvailable(available: boolean): void {
-      if (!available) {
-        state = { kind: "no-claude" };
-        return;
-      }
-      if (state.kind === "no-claude") state = { kind: "ok" };
+      state = afterAvailability(state, available);
     },
-    probeState(): ProbeState {
-      return state;
-    },
+    probeState: (): ProbeState => state,
     /** Told to the browser so it can wait for the probe instead of sleeping through it: the probe
      * takes the better part of a minute, so a client on its normal interval would paint an
      * incomplete gauge and leave it that way for minutes. */
-    isProbing(): boolean {
-      return probeInFlight;
-    },
+    isProbing: (): boolean => probeInFlight,
   };
 }
 

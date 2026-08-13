@@ -54,7 +54,20 @@ function adoptSoundConfig(c: Record<string, unknown>): void {
 // Cross-repo PR list's repos — also a SINGLETON, so the settings modal (openable from
 // either view) and any future reader share one list; a save in one view is seen by the
 // other instead of each useAppConfig() keeping a divergent copy.
+// The server's home directory, used to shorten paths for display (`formatCwd`). A SINGLETON like
+// the settings below, and for a sharper reason: it is only ever written by `loadConfig`, so a
+// component that calls useAppConfig() WITHOUT calling loadConfig — which anything outside the two
+// views does — held its own copy that stayed null forever, and every path it showed came out
+// unshortened. Found by looking at a screenshot of the issue rows' clone menu.
+const home = ref<string | null>(null);
+
 const prRepos = ref<string[]>([]);
+
+// Which clone each repo's work starts in (#1172) — a SINGLETON for the same reason, and read from
+// the CONFIG rather than reconstructed from /api/repo-dirs: that view drops a recording whose
+// directory it cannot currently see, so merging a new choice into it would quietly delete the
+// choice for a clone that happens to be on an unmounted volume today.
+const repoDirs = ref<Record<string, string>>({});
 
 // Cell-launcher commands (shell/codex/…) — SINGLETON so the grid's cell launchers and
 // the settings editor (openable from either view) share one list.
@@ -219,6 +232,58 @@ async function savePrRepos(next: string[]): Promise<boolean> {
   if (r.ok) prRepos.value = r.value ?? [];
   return r.ok;
 }
+
+// The settings that are PUSHED into other modules rather than held as refs here. Grouped for the
+// same reason as adoptSoundConfig: loadConfig should read as what the config decides, not as the
+// plumbing for each decision.
+function applyGlobalSettings(c: Record<string, unknown>): void {
+  // The Enter-key submit/newline byte mapping — read once so every terminal's key
+  // handler honours it (config.json-only; unset falls back to the standard binding).
+  setTerminalSubmitMode(isTerminalSubmitMode(c.terminalSubmit) ? c.terminalSubmit : DEFAULT_TERMINAL_SUBMIT_MODE);
+  // Keyboard shortcuts are opt-in: no `keymap` in config.json leaves this empty and
+  // every shortcut stays off.
+  setActiveKeymap(c.keymap);
+  // Copy-on-select, off unless config.json asks for it — it changes the clipboard with no
+  // key pressed, so it must never arrive by default.
+  setCopyOnSelect(c.copyOnSelect);
+  // Whether a cell may comment on the issue it is working on (#979). Off unless opted in.
+  setIssueWorkComments(c.issueWorkComments);
+  // How far the cockpit roster clamps each line. Absent `cockpitLines` keeps 2/2/3.
+  setCockpitLines(c.cockpitLines);
+  // The terminal font stack (config.json-only, no Settings UI). Terminals already open
+  // re-fit when this lands — a different face means different cell metrics.
+  setGlobalFontFamily(c.fontFamily);
+  // The user's own colour schemes (#996). Re-applied after loading, because the selected id
+  // may name one of these: until the config arrives it resolves to nothing, and the app is
+  // painted with the default.
+  setCustomThemes(c.themes);
+  refreshTheme();
+}
+
+// The two GitHub-repo fields, adopted together — like adoptSoundConfig, so loadConfig keeps
+// reading as a list of facts rather than growing a ternary per field.
+function adoptRepoConfig(c: Record<string, unknown>): void {
+  prRepos.value = Array.isArray(c.prRepos) ? c.prRepos : [];
+  repoDirs.value = isRecord(c.repoDirs) ? readRepoDirs(c.repoDirs) : {};
+}
+
+// Only string values survive: the map goes straight into a request naming a working directory.
+const readRepoDirs = (raw: Record<string, unknown>): Record<string, string> => {
+  const out: Record<string, string> = {};
+  Object.entries(raw).forEach(([repo, dir]) => {
+    if (typeof dir === "string") out[repo] = dir;
+  });
+  return out;
+};
+
+// Remember which clone a repo's work starts in. MERGED into what is already saved, never
+// replacing it: this is called with one repo's answer, and a whole-map write would drop every
+// other repo's choice.
+async function saveRepoDir(repo: string, dir: string): Promise<boolean> {
+  const r = await postConfigField<Record<string, unknown>>("repoDirs", { ...repoDirs.value, [repo]: dir });
+  if (r.ok) repoDirs.value = isRecord(r.value) ? readRepoDirs(r.value) : repoDirs.value;
+  return r.ok;
+}
 // Persist the cell-launcher commands (partial update).
 async function saveLaunchers(next: Launcher[]): Promise<boolean> {
   const r = await postConfigField<Launcher[]>("launchers", next);
@@ -274,7 +339,6 @@ const soundSettings = { soundFile, soundKinds, sounds, saveSound, saveSoundKinds
 // user who has opened no directories. Take them from the shell that loaded them instead.
 export function useAppConfig() {
   const defaultCwd = ref<string | null>(null);
-  const home = ref<string | null>(null);
   const presets = ref<CwdPreset[]>([]);
   const saving = ref(false);
   const error = ref<string | null>(null);
@@ -293,31 +357,11 @@ export function useAppConfig() {
       adoptSoundConfig(c);
       pushEnabled.value = c.pushEnabled === true;
       pushKinds.value = Array.isArray(c.pushKinds) ? c.pushKinds : [];
-      prRepos.value = Array.isArray(c.prRepos) ? c.prRepos : [];
+      adoptRepoConfig(c);
       launchers.value = Array.isArray(c.launchers) ? c.launchers : [];
       quickCommands.value = Array.isArray(c.quickCommands) ? c.quickCommands : [];
       userMcpServers.value = Array.isArray(c.userMcpServers) ? c.userMcpServers : [];
-      // The Enter-key submit/newline byte mapping — read once so every terminal's key
-      // handler honours it (config.json-only; unset falls back to the standard binding).
-      setTerminalSubmitMode(isTerminalSubmitMode(c.terminalSubmit) ? c.terminalSubmit : DEFAULT_TERMINAL_SUBMIT_MODE);
-      // Keyboard shortcuts are opt-in: no `keymap` in config.json leaves this empty and
-      // every shortcut stays off.
-      setActiveKeymap(c.keymap);
-      // Copy-on-select, off unless config.json asks for it — it changes the clipboard with no
-      // key pressed, so it must never arrive by default.
-      setCopyOnSelect(c.copyOnSelect);
-      // Whether a cell may comment on the issue it is working on (#979). Off unless opted in.
-      setIssueWorkComments(c.issueWorkComments);
-      // How far the cockpit roster clamps each line. Absent `cockpitLines` keeps 2/2/3.
-      setCockpitLines(c.cockpitLines);
-      // The terminal font stack (config.json-only, no Settings UI). Terminals already open
-      // re-fit when this lands — a different face means different cell metrics.
-      setGlobalFontFamily(c.fontFamily);
-      // The user's own colour schemes (#996). Re-applied after loading, because the selected id
-      // may name one of these: until the config arrives it resolves to nothing, and the app is
-      // painted with the default.
-      setCustomThemes(c.themes);
-      refreshTheme();
+      applyGlobalSettings(c);
       await migrateLegacyRecents();
     } catch {
       // the app still works; presets are just unavailable
@@ -329,6 +373,8 @@ export function useAppConfig() {
     home,
     presets,
     prRepos,
+    repoDirs,
+    saveRepoDir,
     launchers,
     quickCommands,
     userMcpServers,

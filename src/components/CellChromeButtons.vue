@@ -22,8 +22,13 @@ const props = defineProps<{
   // the `render` MCP group registered with Claude Code. False disables the button rather than
   // removing it: the pane would open empty, and that is worth SAYING rather than hiding.
   canvasAvailable?: boolean;
+  // Whether this cell is set aside (#992). Present ONLY on a cell that can be parked — a session
+  // terminal. Left undefined, the button is not rendered at all, which is how the command and
+  // launcher cells opt out without declaring anything: an ephemeral run and an empty launch slot
+  // have nothing to come back to.
+  parked?: boolean | undefined;
 }>();
-const emit = defineEmits<{ (e: "toggle-expand" | "close" | "toggle-files" | "toggle-canvas" | "toggle-tools"): void }>();
+const emit = defineEmits<{ (e: "toggle-expand" | "close" | "toggle-files" | "toggle-canvas" | "toggle-tools" | "toggle-park"): void }>();
 
 // The unavailable case names the fix, not just the state: the registration is per directory and
 // only read when a session starts, so it takes a restart even once switched on.
@@ -41,6 +46,11 @@ const filesClass = computed(() => (props.filesOpen ? CELL_BTN_ACTIVE : CELL_BTN)
 // A disabled Canvas cannot be the open pane, so the pressed style never has to survive `disabled:`.
 const canvasClass = computed(() => (props.rightPane === "canvas" ? CELL_BTN_ACTIVE : CELL_BTN_DISABLEABLE));
 const toolsClass = computed(() => (props.rightPane === "tools" ? CELL_BTN_ACTIVE : CELL_BTN));
+// A different class string rather than an extra one, for the same reason as the panes above.
+const parkClass = computed(() => (props.parked ? CELL_BTN_ACTIVE : CELL_BTN));
+// The label says what the click DOES, and names the guarantee the user is buying: the cell stays
+// open and keeps its history. That is the whole reason this exists instead of `/clear`.
+const parkTitle = computed(() => (props.parked ? "Wake this terminal" : "Set aside (stays open, keeps its history)"));
 </script>
 
 <template>
@@ -93,6 +103,20 @@ const toolsClass = computed(() => (props.rightPane === "tools" ? CELL_BTN_ACTIVE
     @click="emit('toggle-tools')"
   >
     <span class="material-symbols-outlined" aria-hidden="true">build</span>
+  </button>
+  <!-- Before close on purpose: the two are the choice the user is making — set it aside, or end
+       it — and the reversible one should not sit past the one that tears a session down. -->
+  <button
+    v-if="parked !== undefined"
+    data-testid="cell-park-btn"
+    class="cell-btn"
+    :class="parkClass"
+    :aria-pressed="parked"
+    :title="parkTitle"
+    :aria-label="parkTitle"
+    @click="emit('toggle-park')"
+  >
+    <span class="material-symbols-outlined" aria-hidden="true">bedtime</span>
   </button>
   <button class="cell-btn cell-close" :class="CELL_CLOSE_BTN" title="Close terminal" aria-label="Close terminal" @click="emit('close')">
     <span class="material-symbols-outlined" aria-hidden="true">close</span>

@@ -14,7 +14,9 @@ const { HOME } = vi.hoisted(() => ({ HOME: `/tmp/mt-hidden-store-${crypto.random
 
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();
-  return { ...actual, default: { ...actual.default, homedir: () => HOME }, homedir: () => HOME };
+  // The module under test does `import os from "node:os"`, so the DEFAULT is what it calls — but
+  // `typeof import("node:os")` has no `default` to spread. Build it from the namespace instead.
+  return { ...actual, default: { ...actual, homedir: () => HOME }, homedir: () => HOME };
 });
 
 // Per-call delays for the atomic writer, so the "which write lands last" race can be reproduced

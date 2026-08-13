@@ -64,6 +64,7 @@ export interface CockpitRow {
   workPhase: WorkPhase | null; // planning vs editing while working; null when unknown / not working
   headerColor: string | null; // the directory's configured header background, tinting the row
   headerTextColor: string | null; // and its text colour, so the row stays legible on that tint
+  parked: boolean; // set aside by the user (#992) — the row sinks, unless it is blocked
 }
 const props = defineProps<{
   cells: Cell[];
@@ -91,6 +92,7 @@ const emit = defineEmits<{
   (e: "move", uid: number, dir: -1 | 1): void;
   (e: "status", uid: number, value: AttentionStatus): void;
   (e: "agent", uid: number, value: TerminalAgent): void;
+  (e: "park", uid: number, value: boolean): void;
   // Shared preset list events — uid-less since they mutate the one config list.
   (e: "record-cwd" | "remove-preset", value: string): void;
 }>();
@@ -724,8 +726,8 @@ watch(
         role="button"
         :tabindex="0"
         data-testid="cockpit-row"
-        class="flex shrink-0 cursor-pointer flex-col gap-1 overflow-hidden rounded-lg border border-l-[3px] px-2.5 py-2 text-left text-fg hover:brightness-[1.15] focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#4a9eff]"
-        :class="rosterAlertClass(row.status, { expanded: row.uid === expandedUid, blink: rosterBlink })"
+        class="flex shrink-0 cursor-pointer flex-col gap-1 overflow-hidden rounded-lg border border-l-[3px] px-2.5 py-2 text-left text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#4a9eff]"
+        :class="rosterAlertClass(row.status, { expanded: row.uid === expandedUid, blink: rosterBlink, parked: row.parked })"
         @click="row.uid !== expandedUid && emit('toggle-expand', row.uid)"
         @keydown.enter.self.prevent="row.uid !== expandedUid && emit('toggle-expand', row.uid)"
         @keydown.space.self.prevent="row.uid !== expandedUid && emit('toggle-expand', row.uid)"
@@ -907,7 +909,9 @@ watch(
           :open-session-ids="openSessionIds"
           :open-cwds="openCwds"
           :cancellable="cell.uid === cancelUid"
+          :parked="cell.parked === true"
           v-on="gridCellEvents(cell)"
+          @park="(on) => emit('park', cell.uid, on)"
           @session="(id) => emit('session', cell.uid, id)"
           @agent="(a) => emit('agent', cell.uid, a)"
           @cwd="(c) => emit('cwd', cell.uid, c)"

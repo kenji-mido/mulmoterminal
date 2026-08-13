@@ -28,6 +28,15 @@ lose a session**, and open git/dirs in **one click** — a **terminal-first mode
 
 ![A board of parallel AI-agent terminals](guide/images/grid-2x2.png)
 
+> **最新情報は X で発信しています / Follow us on X**
+>
+> 新バージョンや新機能のお知らせは、X の
+> [Singularity Society（@SingularitySoci）](https://x.com/SingularitySoci) で流していきます。
+> **ぜひフォローしてください！**
+>
+> New releases and features are announced on X (in Japanese) —
+> [**follow @SingularitySoci**](https://x.com/SingularitySoci) to hear about them first.
+
 ## ✨ おすすめ機能 / Highlights
 
 **📋 コックピット・ロスター / The cockpit roster** — 1 体に拡大したまま、横の一覧で全セッションの
@@ -120,6 +129,4 @@ The launcher detects it and prints the exact removal command; run that, then `np
 > Repo: [github.com/receptron/mulmoterminal](https://github.com/receptron/mulmoterminal) ·
 > npm: [`mulmoterminal`](https://www.npmjs.com/package/mulmoterminal) — `npx mulmoterminal@latest`
 
-> **アップデート情報 / Updates** — 新バージョンや新機能のお知らせは X の
-> [Singularity Society（@SingularitySoci）](https://x.com/SingularitySoci) で流しています
-> (release and feature announcements, in Japanese).
+> X: [**@SingularitySoci**](https://x.com/SingularitySoci) — 更新情報はこちらで / follow for updates

@@ -50,6 +50,20 @@ A global rule in `src/style.css` gives them `font-size: inherit`, so size them o
 - `docs/` — Jekyll site; bilingual guide under `docs/guide/{en,ja}` (keep both in sync).
 - `plans/` — design notes per change. `test/` — Vitest specs.
 
+## The grid has three view modes — read before changing anything a cell renders
+
+`TerminalGrid.vue` is ONE `.stage` in three CSS states: the **tiled grid** (`!zoomed`), the
+**cockpit roster** (`zoomed && listMode`, the default when you enlarge) and the **filmstrip**
+(`zoomed && !listMode`). There is one component instance per cell and it is never remounted — the
+enlarged one is **teleported** out, and in roster mode the rest are parked off-screen but **still
+live**. The roster row is not a `TerminalCell` at all; it is a separate template with its own
+chrome. And the tiled grid shows one page of ≤9 while both zoomed modes show **every** cell.
+
+So "collapse the cell to its header" is already shipped in one mode, needs a new layout mechanism
+in another, and lands on a different component in the third. Work it out from
+[`docs/grid-view-modes.md`](docs/grid-view-modes.md) rather than from the screen you happen to be
+looking at.
+
 ## MulmoClaude is the reference host — read it before wiring a shared package
 
 **MulmoClaude's source is a sibling checkout at `../mulmoclaude`.** It drives the same

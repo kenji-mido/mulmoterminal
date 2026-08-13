@@ -585,6 +585,7 @@ The Settings modal (⚙) persists per-user UI choices to `~/.mulmoterminal/confi
 | `soundKinds` | Which moments beep — see [Notification sounds](#notification-sounds). Defaults to `["finished","waiting"]`; the other kinds are opt-in. |
 | `sounds`     | Per-kind sound: `{ "waiting": "preset:coin" }`. A `preset:<id>` reference or an absolute path; a kind with no entry falls back to `soundFile`. |
 | `prRepos`    | `owner/repo` entries whose open PRs/issues the cross-repo **PRs & Issues** view aggregates (via your `gh` login). |
+| `repoDirs`   | `{ "owner/repo": "/abs/path" }` — which local clone work on a repo starts in, when you keep several side by side. Only the *choice* is stored; which clones exist is re-derived from `cwdPresets` on every read, and an entry that no longer names a clone of that repo is ignored. |
 | `launchers`  | `{ label, command }` entries offered in a grid cell's launcher besides the agents — any interactive command. A plain shell needs no entry: the launch form's **Shell** toggle opens `$SHELL` unconfigured. |
 | `quickCommands` | `{ label, text, agents? }` phrases the **phone** offers as chips on a session's terminal view. Tapping one puts `text` in the input box; it is not sent until you press send. `agents` (`"claude"` / `"codex"` / `"shell"`) scopes a chip to session kinds — omit it to offer the chip everywhere. Empty by default. |
 | `userMcpServers` | `{ id, url }` HTTP MCP servers merged into the **single-view** Claude session's `--mcp-config` (a `localhost` URL is reached over `host.docker.internal` in the Docker sandbox). Takes effect on the next session. |
@@ -958,6 +959,18 @@ separate working tree that shares the repo's `.git`, so several agents can work 
 repo without colliding. Worktrees live under `~/.mulmoterminal/worktrees/` (override with
 `MULMOTERMINAL_HOME`), and existing ones are listed for reuse.
 
+A worktree started **from an issue** gets an `issue/<N>-<slug>` branch instead. The number
+in the name is what later tells the app which issue the work belongs to: the ⧉ Open PR
+button puts `Fixes #<N>` in the PR body, and the branch chip, the issue work comment and
+the merge-time auto-close all read the same number rather than guessing at it.
+
+That path also **fetches first and forks from `origin/<base>`**, because several clones of
+one repo often run side by side and only the one being worked in gets pulled — forking from
+the local branch would start the work on however old that clone happens to be. A local base
+that already contains the remote wins anyway (it is a superset, so nothing is lost), and
+with no remote reachable the local branch is used and the worktree is still created.
+Typing a task name yourself keeps the local base it has always used, with no fetch.
+
 ![An empty cell's launch form — choose the agent, working directory, or a worktree](https://raw.githubusercontent.com/receptron/mulmoterminal/main/docs/guide/images/grid-launch-form.png)
 
 *Every empty grid cell shows this launch form: toggle **Claude / Codex / Antigravity / Shell**, type a **working directory** (frequent ones autocomplete from your presets), or — in a git repo — name a task under **OR ISOLATE IN A WORKTREE** and hit **＋ New worktree** to start the agent on its own isolated branch. **Shell** runs your OS default shell there instead of an agent; **OR LAUNCH** runs one of your configured launch commands.*
@@ -979,6 +992,24 @@ view that aggregates open PRs **and** issues across the repos listed in Settings
 PRs show a CI-rollup / review-decision / draft badge; each repo lists its latest open
 issues. Rows are real links, per-repo errors don't sink the view, and the two lists load
 independently. Backed by `GET /api/prs` and `GET /api/issues`.
+
+**Starting work from an issue row.** Each issue row carries a **▶** button that does the setup in
+one click: read the issue, cut an `issue/<number>-<slug>` worktree in your clone of that repo, and
+open Claude there as a grid cell with the issue **typed into its input box but not sent**. The
+prompt is seeded server-side as a *draft* (`server/session/draft-injection.ts`), which waits for
+claude's input box to be ready — text pushed in before that lands in the scrollback instead. A repo
+with several clones asks which one the first time and remembers the answer; a repo with no clone
+here disables the button and says why. Backed by `POST /api/issues/start`.
+
+**Which clone a repo's work happens in.** `GET /api/repo-dirs` answers the reverse of the
+GitHub link a cell already shows: given `owner/repo`, which of your saved directories are
+clones of it. The candidates are derived from your directory presets by reading each one's
+`origin` — there is no second list to keep in step — and are ordered by each directory's
+`orderPriority`, then by path. Several clones of one repo commonly run side by side, so the
+answer is a choice rather than a lookup; once you make it, `repoDirs` in the config records
+`owner/repo` → the chosen path and it is used from then on. A recording is dropped if the
+directory is no longer a saved clone of that repo, and a repo with no clone here is simply
+absent from the answer — which is how a caller learns work cannot start on it.
 
 ---
 
@@ -1063,6 +1094,17 @@ Favorited collections get their own toolbar buttons.
 
 ![Zoom — one agent enlarged, the others as a filmstrip along the bottom](https://raw.githubusercontent.com/receptron/mulmoterminal/main/docs/guide/images/grid-zoom.png)
 
+- **Set a terminal aside** — the moon button in a cell's header **sinks** it: the tile, its
+  filmstrip thumbnail and its cockpit-roster row all fade, and the working dot stops pulsing.
+  The session stays **connected and keeps its whole history** — this is what to reach for
+  instead of `/clear`-ing a cell you are done with for now, which resets the conversation just
+  to change how the cell looks. The setting survives a reload. **Enlarging it keeps it faded** —
+  that is how you read a set-aside session without waking it, and its roster row keeps the blue
+  "you are here" edge either way — while **typing into it wakes it**, so nothing has to be undone
+  by hand. Clicking or scrolling to read it does *not* wake it, even though a mouse-tracking agent
+  receives those as input. A cell that **stops for a permission prompt comes back to full strength
+  on its own**, so setting one aside can never hide a session that is waiting on you; a merely *finished* turn
+  does not, since that is the expected outcome of setting a running agent aside.
 - **Timeline** (🕘) — a read-only per-session activity timeline (tools run, newest first),
   from `GET /api/transcript/timeline`.
 - **Bring another cell's turn here** (💬) — pick another terminal in the grid and its
@@ -1286,8 +1328,10 @@ same-origin-guarded.
 | `GET /api/git-status?cwd=` | `{ repo, branch, detached, dirty, ahead, behind, upstream }`. |
 | `POST /api/git-remote` | The dir's GitHub repo URL (for the header GitHub menu). |
 | `GET /api/worktrees?cwd=` · `GET /api/worktrees/diff?cwd=` | List managed worktrees / diff one vs its base. |
-| `POST /api/worktrees/create` · `/remove` · `/push` · `/pr` | Create on `agent/<slug>`, remove (managed root only), push, open a PR (`gh`, else compare URL). |
+| `POST /api/worktrees/create` · `/remove` · `/push` · `/pr` | Create on `agent/<slug>` — or, with `issue: <N>`, on `issue/<N>-<slug>` forked from a freshly fetched `origin/<base>`; remove (managed root only), push, open a PR (`gh`, else compare URL). |
 | `GET /api/prs` · `GET /api/issues` | Open PRs / issues across the configured `prRepos` (via `gh`). |
+| `GET /api/repo-dirs` | Which saved directories clone which GitHub repo, ordered, with the recorded choice per repo. |
+| `POST /api/issues/start` | Cut an issue's worktree in one of that repo's known clones and spawn a session there, seeded with the issue as a draft. |
 | `GET /api/github/star` · `POST /api/github/star` | Whether you have starred MulmoTerminal, and star it (via `gh`). `starred: null` means `gh` could not answer, and hides the button. |
 
 **Workspace views**
@@ -1341,6 +1385,10 @@ connection (or reattach to an existing background PTY).
   background PTY exists for `<id>`, the socket reattaches to it (and its recent
   output buffer is replayed); otherwise the server spawns
   `claude --resume <id> --settings <hooks>`.
+- `&cols=<n>&rows=<n>` — the terminal's geometry, on every endpoint that starts a PTY. The
+  PTY is created at it instead of the 120x30 default, so nothing is ever drawn at a size the
+  browser didn't ask for. Out-of-range values are ignored (same bounds as a `resize` frame),
+  and a connection that sends none keeps the default until its first `resize`.
 
 **Server → client** (JSON text frames):
 

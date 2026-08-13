@@ -35,6 +35,10 @@ export interface ConnectionDeps {
    *  asked for — and force it if not. A repaint cannot fix a window that is genuinely too small,
    *  and nothing else closes that gap (#957, session/tmux-size-sync.ts). */
   checkTerminalSize: (id: string, size: { cols: number; rows: number }) => void;
+  /** Re-verify the window against the size the browser last asked for, with no new resize frame to
+   *  hang off. Every check used to need one, so a window that drifted — or was never corrected
+   *  because the frame that would have corrected it went missing — had nothing to notice (#1178). */
+  recheckTerminalSize: (id: string) => void;
   /** The socket is gone, so a settling size check has nobody to repair the screen for. */
   cancelTerminalSizeCheck: (id: string) => void;
 }
@@ -57,6 +61,20 @@ export function handleCommandFrame(term: IPty, raw: WireFrame) {
   } catch (err) {
     console.warn(`[ws/run] dropped message: ${messageOf(err)}`);
   }
+}
+
+// The user's focus moved onto/off a pane (a grid cell zoomed/opened, or blurred). An active pane
+// suppresses the attention flag and marks it read; an inactive grid cell can surface blocked/done
+// among its siblings.
+//
+// Coming into view is also when a wrong terminal size is worth catching: the user is looking at
+// this pane, and is not typing into it yet. Until #1178 the size was only ever checked when a
+// resize frame arrived, so a pane that never got one had nothing to notice.
+function applyViewFrame(entry: PtyEntry, sessionId: string, active: boolean, deps: Pick<ConnectionDeps, "setWaiting" | "recheckTerminalSize">): void {
+  entry.active = active;
+  if (!active) return;
+  deps.setWaiting(sessionId, false);
+  if (entry.tmux) deps.recheckTerminalSize(sessionId);
 }
 
 export function createConnectionHandlers(deps: ConnectionDeps) {
@@ -112,11 +130,7 @@ export function createConnectionHandlers(deps: ConnectionDeps) {
         // disconnect grace window, so the session slot frees immediately.
         deps.reap(sessionId);
       } else if (msg.type === "view" && typeof msg.active === "boolean") {
-        // The user's focus moved onto/off this pane (a grid cell zoomed/opened, or
-        // blurred). An active pane suppresses the attention flag and marks it read;
-        // an inactive grid cell can surface blocked/done among its siblings.
-        entry.active = msg.active;
-        if (msg.active) deps.setWaiting(sessionId, false);
+        applyViewFrame(entry, sessionId, msg.active, deps);
       } else if (msg.type === "input" && typeof msg.data === "string") {
         entry.term.write(msg.data);
       } else if (isResizeFrame(msg)) {

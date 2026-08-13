@@ -1,5 +1,5 @@
 import type { RunCommand } from "./runCommand";
-import { dirPriority } from "./dirPriorityOrder";
+import { dirPriority } from "../../common/dirPriorityOrder";
 import { asTerminalAgent, type TerminalAgent } from "../../common/sessionAgent";
 import { isRecord } from "../../common/isRecord";
 import type { AttentionStatus } from "./attentionStatus";
@@ -43,6 +43,10 @@ export interface Cell {
   launcher?: CellLauncher | null;
   // The agent this cell runs. "codex" / "antigravity"; absent = Claude (the default).
   agent?: "codex" | "antigravity";
+  // Set aside by the user: still connected and still holding its history, just sunk out of the
+  // way (#992). Stored as the ABSENCE of the key when not parked, for the same reason `agent`
+  // is — only an absent key survives the JSON a persisted cell round-trips.
+  parked?: true;
 }
 // How the grid orders its cells. "manual": the user's hand-arranged order (the move buttons);
 // "auto": attention-first, recomputed from each cell's live status; "priority": the rank each
@@ -128,6 +132,14 @@ export function setCellAgent(state: GridState, uid: number, agent: TerminalAgent
   // Claude is the ABSENT case, so switching back to it removes the key rather than setting it
   // to undefined — a persisted cell round-trips through JSON, where only the former survives.
   const applied = ({ agent: _previous, ...rest }: Cell): Cell => (agent === "claude" ? rest : { ...rest, agent });
+  return { ...state, cells: state.cells.map((c) => (c.uid === uid ? applied(c) : c)) };
+}
+
+// Set a cell aside, or bring it back. Unparking REMOVES the key rather than setting it to false —
+// the same round-trip rule as `setCellAgent` above, and what keeps "not parked" one value on disk
+// instead of two.
+export function setCellParked(state: GridState, uid: number, parked: boolean): GridState {
+  const applied = ({ parked: _previous, ...rest }: Cell): Cell => (parked ? { ...rest, parked: true } : rest);
   return { ...state, cells: state.cells.map((c) => (c.uid === uid ? applied(c) : c)) };
 }
 
@@ -487,12 +499,15 @@ export function parseGridState(raw: string | null): GridState | null {
         return true;
       })
       .slice(0, MAX_TERMINALS);
+    // Every field a cell keeps across a reload is named HERE — a persisted key this literal does
+    // not rebuild is dropped silently, with nothing to typecheck against.
     const cells: Cell[] = running.map((c: Cell, i: number) => ({
       uid: i,
       session: c.session,
       cwd: c.cwd,
       launcher: asLauncher(c.launcher),
       agent: storedCellAgent(asTerminalAgent(c.agent)),
+      ...(c.parked === true ? { parked: true as const } : {}),
     }));
     const expandedIdx = running.findIndex((c: Cell) => c.uid === parsed.expanded);
     const expanded = typeof parsed.expanded === "number" && expandedIdx >= 0 ? expandedIdx : null;

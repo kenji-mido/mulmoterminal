@@ -35,7 +35,7 @@ const PROBE_NOTES: Record<ClaudeProbeState, string | null> = {
  *  window has already reset is held but not drawn, and that is exactly when the reader most needs
  *  the reason. Checking `snapshot.claude` instead let a stale cached figure suppress the note —
  *  uninstall `claude` and the gauge would go on showing yesterday's percentage, silently. */
-export function claudeProbeNote(snapshot: RateLimitSnapshot | null, now_ms: number): string | null {
+function claudeProbeNote(snapshot: RateLimitSnapshot | null, now_ms: number): string | null {
   if (!snapshot || gaugeWindows(snapshot.claude, now_ms).length > 0) return null;
   return PROBE_NOTES[snapshot.claudeProbe ?? "ok"];
 }
@@ -90,25 +90,42 @@ export function gaugeWindows(limits: RateLimits | null, now_ms: number): GaugeWi
 
 export interface AgentGauge {
   agent: "claude" | "codex";
-  /** Drawn only when BOTH agents have something: one row needs nothing to distinguish it from
-   * (see AgentMark.vue for why the mark is drawn rather than picked from the icon set). */
+  /** Drawn whenever something ELSE shares the row — the other agent's figures, or the note that
+   * stands in for them (see AgentMark.vue for why the mark is drawn rather than picked from the
+   * icon set). */
   marked: boolean;
   windows: GaugeWindow[];
 }
 
+export interface RateLimitReadout {
+  note: string | null;
+  gauges: AgentGauge[];
+}
+
 /**
- * The whole readout. An agent with nothing to show is dropped rather than rendered empty, and the
- * agent mark appears only when there are two — a solo user of either tool should not have to read
- * a symbol that distinguishes nothing.
+ * The whole header readout, decided in ONE pass.
+ *
+ * The note and the marks are not separable, which is why one function returns both: the note stands
+ * where Claude's figures would be, so a Codex row next to it is a second thing on the row and needs
+ * saying whose it is. Deciding the mark from "do both agents report" alone made that impossible —
+ * the note only appears when Claude reports nothing, so it was ALWAYS unmarked, and
+ * `claude usage n/a | 7d 71%` read as Claude's 7d with the 5h missing. It was Codex's (#1161).
+ *
+ * An agent with nothing to show is dropped rather than rendered empty, and a solo user of either
+ * tool still gets no mark — a symbol that distinguishes nothing is one more thing to read.
  */
-export function agentGauges(snapshot: RateLimitSnapshot | null, now_ms: number): AgentGauge[] {
+export function rateLimitReadout(snapshot: RateLimitSnapshot | null, now_ms: number): RateLimitReadout {
+  const note = claudeProbeNote(snapshot, now_ms);
   const claude = gaugeWindows(snapshot?.claude ?? null, now_ms);
   const codex = gaugeWindows(snapshot?.codex ?? null, now_ms);
-  const both = claude.length > 0 && codex.length > 0;
-  return [
-    ...(claude.length ? [{ agent: "claude" as const, marked: both, windows: claude }] : []),
-    ...(codex.length ? [{ agent: "codex" as const, marked: both, windows: codex }] : []),
-  ];
+  const marked = note !== null || (claude.length > 0 && codex.length > 0);
+  return {
+    note,
+    gauges: [
+      ...(claude.length ? [{ agent: "claude" as const, marked, windows: claude }] : []),
+      ...(codex.length ? [{ agent: "codex" as const, marked, windows: codex }] : []),
+    ],
+  };
 }
 
 /** "resets in 2h 15m", or "" when the reset is unknown or already past. The hover text says when

@@ -42,6 +42,19 @@ class FakeSocket {
 const asWebSocket = (socket: FakeSocket): WebSocket => socket as unknown as WebSocket;
 const entry = { pty: null } as unknown as PtyEntry;
 
+// An entry whose pty records what it was resized to, for the geometry the connect URL carries.
+function sizedEntry() {
+  const resizes: Array<[number, number]> = [];
+  const withPty = {
+    term: {
+      resize: (cols: number, rows: number) => {
+        resizes.push([cols, rows]);
+      },
+    },
+  } as unknown as PtyEntry;
+  return { resizes, entry: withPty };
+}
+
 function harness() {
   const socket = new FakeSocket();
   const delivered: string[] = [];
@@ -88,6 +101,23 @@ describe("startAndWire", () => {
     startAndWire(reentrantDeps, asWebSocket(socket), { id: "s1", tag: "codex", early, startFailureMessage: () => "nope" }, () => entry);
 
     expect(delivered).toEqual(["buffered-1", "landed-mid-replay", "buffered-2"]);
+  });
+
+  // The pty is created at the server's default and learns the real size from a `resize` frame that
+  // has to survive the spawn to arrive at all (#1178). The URL's geometry is applied the moment the
+  // pty exists, so the program inside never draws at a size nobody asked for.
+  it("puts the connect URL's geometry on the pty as soon as it exists", () => {
+    const { socket, deps, early } = harness();
+    const { resizes, entry: sized } = sizedEntry();
+    startAndWire(deps, asWebSocket(socket), { id: "s1", tag: "claude", early, startFailureMessage: () => "nope", size: { cols: 131, rows: 41 } }, () => sized);
+    expect(resizes).toEqual([[131, 41]]);
+  });
+
+  it("leaves the pty at the server's default when the URL carried no geometry", () => {
+    const { socket, deps, early } = harness();
+    const { resizes, entry: sized } = sizedEntry();
+    startAndWire(deps, asWebSocket(socket), { id: "s1", tag: "claude", early, startFailureMessage: () => "nope" }, () => sized);
+    expect(resizes).toEqual([]);
   });
 
   it("wires the close handler to the started entry", () => {

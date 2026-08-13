@@ -26,6 +26,7 @@ import TimelineOverlay from "./TimelineOverlay.vue";
 import CopyCodeBlock from "./CopyCodeBlock.vue";
 import CockpitHeader from "./CockpitHeader.vue";
 import CellChromeButtons from "./CellChromeButtons.vue";
+import { isCellSunk, SUNK_CELL, SUNK_DOT_STATUS } from "./cellParked";
 import { cellChromeBinding } from "./cellChromeBinding";
 import type { CwdPreset } from "./presets";
 import type { Launcher, LaunchPick } from "./launchers";
@@ -92,6 +93,8 @@ const props = defineProps<
     cancellable?: boolean;
     // Manual sort mode: show move buttons to swap this cell with its neighbour.
     reorderable?: boolean;
+    // Set aside by the user (#992): sunk out of the way, still connected, still holding history.
+    parked?: boolean;
   }
 >();
 const emit = defineEmits<
@@ -106,6 +109,8 @@ const emit = defineEmits<
     (e: "launch", value: LaunchPick): void;
     // The agent chosen for this fresh launch, so the grid persists it.
     (e: "agent", value: TerminalAgent): void;
+    // Set this cell aside, or bring it back. The grid owns the flag; this only asks.
+    (e: "park", value: boolean): void;
   }
 >();
 
@@ -730,7 +735,18 @@ const HEADER_STATUS = {
 const DOT_STATUS = { idle: CELL_DOT_IDLE, working: CELL_DOT_WORKING, done: "bg-accent", blocked: "bg-amber" } as const;
 const cellStatusClass = computed(() => CELL_STATUS[status.value]);
 const headerStatusClass = computed(() => HEADER_STATUS[status.value]);
-const dotStatusClass = computed(() => DOT_STATUS[status.value]);
+// Set aside, and not stopped waiting for an answer (see cellParked.ts). Enlarging it does NOT
+// bring it back — that is how you look at a parked session without waking it.
+const parked = computed(() => props.parked === true);
+const sunk = computed(() => isCellSunk(parked.value, status.value));
+const sunkClass = computed(() => (sunk.value ? SUNK_CELL : ""));
+const togglePark = () => emit("park", !parked.value);
+// Typing into it is the un-parking gesture. Guarded on `parked` so an awake cell does not ask the
+// grid to rewrite its state on every keystroke.
+const onTerminalInput = (): void => {
+  if (parked.value) emit("park", false);
+};
+const dotStatusClass = computed(() => (sunk.value ? SUNK_DOT_STATUS : DOT_STATUS)[status.value]);
 // This session raised a notification nothing announced — the audio was still locked, or the row
 // arrived as the page's first sighting and was swallowed as baseline (#1152). A ring on the dot
 // rather than a new element: it has to be legible in a filmstrip thumbnail, and the header track
@@ -943,7 +959,11 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
     :class="[statusClass, cellStatusClass]"
     :style="cellStyle"
   >
-    <div :class="CELL_INNER">
+    <!-- The sink rides on CELL_INNER, which already wraps every child including the header, so
+         one property covers the whole cell. Opacity alone: the status branches own the borders,
+         backgrounds and ink, and two utilities for one property are settled by Tailwind's
+         output order rather than by intent. -->
+    <div class="cell-inner" :class="[CELL_INNER, sunkClass]">
       <template v-if="launched">
         <!-- Filmstrip thumbnail: the same roster header (CockpitHeader) — the dir colour is applied
            regardless of status (status is the dot + badge), so a thumbnail reads as its directory
@@ -961,7 +981,7 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
           @click="onHeaderClick"
         >
           <span class="cell-actions" :class="CELL_ACTIONS">
-            <CellChromeButtons v-bind="chromeProps" v-on="chromeEvents" />
+            <CellChromeButtons v-bind="chromeProps" :parked="parked" v-on="chromeEvents" @toggle-park="togglePark" />
           </span>
         </CockpitHeader>
         <!-- Row 1 — INFO only (normal grid / expanded): dir + git + model/token + what it's doing.
@@ -1097,7 +1117,7 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
              track, so they're always pinned top-right. `.stop` so they don't trigger the
              header's click-to-zoom. -->
           <span class="cell-actions" :class="CELL_ACTIONS">
-            <CellChromeButtons v-bind="chromeProps" v-on="chromeEvents" />
+            <CellChromeButtons v-bind="chromeProps" :parked="parked" v-on="chromeEvents" @toggle-park="togglePark" />
           </span>
         </div>
         <TimelineOverlay :session-id="sessionId" :cwd="cwd" :open="timelineOpen" @close="timelineOpen = false" />
@@ -1117,6 +1137,7 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
           dev-terminal
           run-menu
           @session="onSession"
+          @input="onTerminalInput"
           @cwd="onServerCwd"
           @run="(cmd) => emit('runSpare', cmd)"
         >

@@ -70,6 +70,36 @@ describe("createTmuxSizeSync", () => {
     expect(events).toEqual([]);
   });
 
+  // Until #1178 every check hung off a resize frame, so a window that drifted while the browser's
+  // size stayed put had nothing to notice it. `recheck` re-runs against the size last asked for.
+  it("re-verifies against the last requested size, with no new resize frame", async () => {
+    const { sync, resizes, events } = setup([
+      { cols: 120, rows: 40 },
+      { cols: 80, rows: 24 },
+      { cols: 120, rows: 40 },
+    ]);
+    sync.requestCheck(SESSION, { cols: 120, rows: 40 });
+    await runTimers();
+    expect(resizes).toEqual([]); // in step at first
+
+    sync.requestCheck(SESSION); // the window has drifted since, and nothing resized to tell us
+    await runTimers();
+    expect(resizes).toEqual([
+      { cols: 120, rows: 39 },
+      { cols: 120, rows: 40 },
+    ]);
+    expect(events.map((e) => e.kind)).toEqual(["repairing"]);
+  });
+
+  // Nothing to compare against: a session that has never reported a size would otherwise have one
+  // invented for it.
+  it("does nothing for a session that has never reported a size", async () => {
+    const { sync, resizes, events, asked } = setup([{ cols: 80, rows: 24 }]);
+    sync.requestCheck(SESSION);
+    await runTimers();
+    expect([resizes, events, asked]).toEqual([[], [], []]);
+  });
+
   it("nudges a row off and straight back when the window disagrees", async () => {
     const { sync, resizes, events } = setup([
       { cols: 80, rows: 24 },

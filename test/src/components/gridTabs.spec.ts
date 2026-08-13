@@ -9,6 +9,7 @@ import {
   setSession,
   setCwd,
   setCellAgent,
+  setCellParked,
   closeCell,
   toggleExpand,
   switchPage,
@@ -529,6 +530,34 @@ describe("setCellAgent", () => {
   it("keeps the rest of the cell intact across the switch", () => {
     const s = setCellAgent(make([cell(0, U(0), "/repo")]), 0, "codex");
     expect(s.cells[0]).toMatchObject({ uid: 0, session: U(0), cwd: "/repo" });
+  });
+});
+
+// Parking is a display state the user sets (#992), so it has to survive a reload — and
+// `parseGridState` rebuilds every cell from a fixed field list, where a key nobody named is
+// dropped silently with nothing to typecheck against. Same absent-means-off round-trip rule as
+// `agent` above.
+describe("setCellParked", () => {
+  it("parks the matching cell and leaves the others alone", () => {
+    const s = setCellParked(make([cell(0, U(0)), cell(1, U(1))]), 0, true);
+    expect(s.cells[0].parked).toBe(true);
+    expect(Object.hasOwn(s.cells[1], "parked")).toBe(false);
+  });
+
+  it("drops the key when waking, rather than setting it false", () => {
+    const parked = setCellParked(make([cell(0, U(0))]), 0, true);
+    expect(Object.hasOwn(setCellParked(parked, 0, false).cells[0], "parked")).toBe(false);
+  });
+
+  it("keeps the rest of the cell intact", () => {
+    expect(setCellParked(make([cell(0, U(0), "/repo")]), 0, true).cells[0]).toMatchObject({ uid: 0, session: U(0), cwd: "/repo" });
+  });
+
+  it("survives parseGridState, so a reload does not silently wake every parked cell", () => {
+    const s = setCellParked(make([cell(0, U(0), "/repo"), cell(1, U(1), "/other")]), 0, true);
+    const cells = parseGridState(JSON.stringify(s))?.cells ?? [];
+    expect(cells.map((c) => Object.hasOwn(c, "parked"))).toEqual([true, false]);
+    expect(cells[0]?.parked).toBe(true);
   });
 });
 

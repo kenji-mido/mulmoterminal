@@ -8,9 +8,9 @@ description: 複数の AI コーディングエージェント（Claude Code / C
 
 # MulmoTerminal ガイド（日本語）
 
-> **[2.9.0 で変わったこと](v2.9.0.html)** — 許可待ちで止まっている行と単に終わった行が別物に見えるように、通知音がブロックされていることがツールバーに出る、Antigravity の会話が再起動をまたぐ（2026-07-31 時点）
+> **[3.0.0 で変わったこと](v3.0.0.html)** — **PRs & Issues** が「読む」場所から「**始める**」場所になった。issue の行のボタン1つで `issue/<番号>-…` の worktree を切り、issue を入力欄に入れた Claude を開く。あわせて、見なくていいターミナルを**沈める**機能（2026-07-31 時点）
 >
-> **アップデート情報（日本語）** — 新バージョンや新機能のお知らせは X の [Singularity Society（@SingularitySoci）](https://x.com/SingularitySoci) で流しています。
+> **X で最新情報を発信しています** — 新バージョンや新機能のお知らせは X の [Singularity Society（@SingularitySoci）](https://x.com/SingularitySoci) で流していきます。ここが一番早いので、[**@SingularitySoci をフォローしてください！**](https://x.com/SingularitySoci)
 >
 > **「なんか変」と思ったら** — セッションで `/mulmoterminal-bug-report` と打ってください。同梱スキルが症状を聞き、**実際の**設定とバージョンを読んで仕様・設定で説明がつかないかを先に確かめ、既知の issue を検索し、それでも残ったものだけを報告にまとめます（環境情報は自動収集、鍵はマスク）。
 

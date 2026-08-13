@@ -6,7 +6,7 @@
 // The interval is slow on purpose: the server caches each (repo, branch) answer for 30s and the
 // call behind it shells out to `gh`, so polling faster buys nothing but subprocesses.
 import { ref, watch, onMounted, onUnmounted, type Ref } from "vue";
-import { EMPTY_WORK_ITEM, isPrPhase, type WorkItem } from "../../common/prPhase";
+import { EMPTY_WORK_ITEM, isIssueNumber, isPrPhase, type WorkItem } from "../../common/prPhase";
 import { isRecord } from "../../common/isRecord";
 import { isIssueWorkCommentsEnabled } from "./issueWorkComments";
 import type { WorkCommentKind } from "../../common/workComment";
@@ -15,7 +15,7 @@ const POLL_MS = 30_000;
 
 // There is no PR #0 and no negative issue: a stale or malformed response saying so must render
 // nothing rather than an impossible link (found by CodeRabbit review).
-const numberOrNull = (v: unknown): number | null => (typeof v === "number" && Number.isSafeInteger(v) && v > 0 ? v : null);
+const numberOrNull = (v: unknown): number | null => (isIssueNumber(v) ? v : null);
 
 // These go straight into an `<a href>`, so the scheme is not the response's decision to make:
 // `javascript:` in that attribute runs on click. https only — github.com and GitHub Enterprise

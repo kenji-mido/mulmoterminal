@@ -159,8 +159,14 @@ export function createTmuxSizeSync(deps: TmuxSizeSyncDeps) {
     unclosable.clear(id);
   }
 
-  /** Call on every resize frame; only the last of a burst is acted on. */
-  function requestCheck(id: string, target: TerminalSize): void {
+  /** Call on every resize frame; only the last of a burst is acted on.
+   *
+   *  A caller with no new size — a pane coming into view — passes none, and the last size the
+   *  browser asked for is re-checked. Every check used to need a resize frame to hang off, so a
+   *  window that drifted while the browser's size stayed put, or one whose correcting frame never
+   *  arrived, had nothing to notice it (#1178). Nothing to compare against is nothing to do. */
+  function requestCheck(id: string, target: TerminalSize | undefined = wanted.get(id)): void {
+    if (!target) return;
     const timer = pending.get(id);
     if (timer !== undefined) clearTimeout(timer);
     wanted.set(id, target);

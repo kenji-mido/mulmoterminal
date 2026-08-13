@@ -4,6 +4,183 @@ Release notes for MulmoTerminal, mirrored from the [GitHub Releases](https://git
 
 This file records **what changed and why**. For **how to actually use** a new feature, a release may also ship a dated setup guide — linked at the top of its entry, and written as a snapshot of that moment. The living reference is always the [guide](https://receptron.github.io/mulmoterminal/).
 
+## mulmoterminal@3.0.0 — 2026-07-31
+
+> **Setup guide:** [Start from the issue](https://receptron.github.io/mulmoterminal/guide/en/v3.0.0.html) — written at release time. ([日本語](https://receptron.github.io/mulmoterminal/guide/ja/v3.0.0.html))
+
+The **PRs & Issues** view stops being somewhere to read and becomes somewhere to start. One button
+on an issue row cuts a worktree for that issue and opens Claude in it with the issue already in the
+input box. Three PRs build that, in the order the pieces have to exist.
+
+**There are no breaking changes.** The major version marks the milestone, not a migration: no config
+key is required, nothing moved, and an existing setup keeps working untouched.
+
+### The app now knows that work starts from an issue (#1026)
+
+Until now every part of this was arranged around *directories*, and the connection back to the issue
+was re-derived by guesswork at each step — which meant that when a guess missed, nothing happened
+and nothing said so.
+
+**Anchor the worktree to its issue (#1171, #1174).** A worktree started from an issue gets an
+`issue/<number>-<slug>` branch. The number in the name is what everything downstream reads: the
+⧉ Open PR button puts `Fixes #<number>` in the PR body, and the work-item chip, the issue work
+comment and the merge-time auto-close (#979) all use the same number instead of inferring one. The
+branch the launcher creates for a hand-typed task is unchanged (`agent/<slug>`).
+
+Two defects found while building it, both fixed here:
+
+- The managed worktree's directory name stripped the literal prefix `agent/`, so any other prefix
+  would have nested a level below the managed root — created without error and visible nowhere.
+- The new branch forked from the **local** base. Several clones of one repo commonly run side by
+  side and only the one being worked in gets pulled, so the work started on however old that clone
+  happened to be. Measured on this repo: a clone reported `HEAD..origin/main = 0` before a fetch and
+  `20` after. An issue-started worktree now fetches and forks from `origin/<base>` — unless the
+  local base already *contains* the remote, in which case it wins, because it is then a superset and
+  dropping unpushed commits would be a different silent loss.
+
+**Answer which local clone a repo has (#1172, #1177).** `GET /api/repo-dirs` reverses the dir → repo
+resolution the app already did: given `owner/repo`, which of the saved directories clone it, ordered
+by each one's `orderPriority` then by path, and which one was chosen. The candidates are derived from
+`cwdPresets` rather than a second hand-kept list, so adding a clone needs no second edit. Only the
+*choice* is stored (`repoDirs`), and it is dropped on read if it no longer names a clone of that
+repo — a directory that was deleted or repointed would otherwise send work into the wrong tree,
+invisibly.
+
+`prRepos` stays a hand-typed list. Deriving it from the clones would have added repos that are
+cloned but deliberately not watched, and removed watched repos with no clone here — both of which
+happen in a real setup.
+
+**Start from the row (#1173, #1180).** The issue row's ▶ reads the issue, cuts its worktree and
+spawns a Claude session in it seeded with the issue as an editable **draft** — typed into the input
+box, never submitted. The body was written by whoever opened the issue, so the Enter belongs to
+whoever is about to run it, and the seed goes through the same control-byte stripping that protects
+the collection plugin's spawns. A repo with several clones asks once and remembers; a repo with no
+clone here disables the button and says why. `dir` arrives from the browser but is checked against
+the clones the server itself resolved for that repo, so a request cannot start an agent in an
+arbitrary directory.
+
+### A draft could be typed before there was anywhere to put it (#1173)
+
+Seeding a session with a prompt has existed since #548, but every caller spawned into a warm,
+already-trusted working directory. Spawning into a worktree created moments earlier broke it, and
+the failure was silent: the session came up with an empty input box, indistinguishable from the
+feature not existing.
+
+The drift fallback fired **6 seconds after the spawn**. In a fresh worktree claude needs longer than
+that to reach any input box, so the fallback pasted into a half-drawn screen and marked itself done
+— the text was gone before there was anywhere to put it. It now waits for the output stream to go
+**quiet**, re-armed by each burst, which is the shape `attachCodexAutoRun` has always used for an
+agent with no readiness marker to wait on.
+
+Two things found alongside it. A directory claude has not seen opens on its **trust dialog**, which
+is itself a quiet screen — so quiet alone would paste into the dialog and lose the text; the dialog
+gets a much longer window instead. And `draftReadyMarker` (`/shift\+tab to cycle/`) is
+**mode-dependent** in Claude Code v2.1.220 — a manual-mode status line reads `? for shortcuts` and
+never matches at all, so the marker is now the fast path rather than the only path.
+
+None of this was visible to the test suite, which passed throughout. It took reading the real
+terminal with `tmux capture-pane`.
+
+### Park a terminal you do not need to watch (#992, #1165)
+
+A moon button in the cell header dims that terminal — in the tiles, the filmstrip thumbnails and the
+cockpit roster row — and stops its working dot pulsing. The session, its connection and its history
+are untouched, and the state survives a reload.
+
+The workaround before this was to type `/clear` in the cell you wanted quiet: the header text falls
+back through `memo > aiTitle > lastPrompt > session id`, so clearing made it drop to the id and the
+cell *looked* empty. Losing the history was not a side effect of that trick — it was its whole
+mechanism.
+
+Two safety rules. A cell **waiting for permission never parks**, because missing a permission prompt
+because you parked it is an accident, not less noise. And a parked cell that **finishes its turn
+stays parked**, since a parked agent finishing is the expected outcome rather than a reason to
+resurface. Typing into the terminal wakes it; enlarging does not, because enlarging is how you read
+a cell without waking it.
+
+### Fixes
+
+**An enlarged cell rendered at its parked width, permanently (#1178, #1179).** Measured at ~131
+columns against xterm's ~237 — the cell's PTY was frozen at the size it had while parked. `Terminal.vue`'s
+`onUnmounted` passed `terminalRef.value`, but Vue nulls a template ref **before** that hook runs
+(now pinned by a test), so `detach`'s "a newer attach already owns this slot" guard never fired and
+every unmount cleared `attachedEl` unconditionally. `fit()` returns early without it, so the cell
+stopped fitting, stopped sending resizes and stopped refreshing — the PTY kept its last size while
+the browser drew the new one. Reloading fixed it because a new mount re-attached. Same place as the
+second unexplained case in #957.
+
+**Hovering a `done` roster row turned it white (#1168, #1169).** The cockpit roster used a lightness
+filter for hover, which pushed `done` to `#ffffff` and erased the green state colour. It now mixes
+more of the same state colour instead, so the hue holds in every theme — `done` goes `#edfaf2` →
+`#d7f5e2`, `blocked` `#fef1dd` → `#fde8c4`.
+
+### Internal
+
+**Shared xterm/WebSocket test doubles (#1166, #1175).** `useTerminalConnections.spec.ts` had grown
+to 1020 lines against a 600-line limit, and ~150 of those were scaffolding (an xterm `Terminal`
+double, three addons, a `FakeWebSocket`) that any split would have had to copy — so silencing one
+warning meant breaking DRY. The scaffolding moved to `test/helpers/xtermDouble.ts` and the spec split
+by concern into three files, the largest now 376 lines.
+
+**Codex review no longer tries to run the tests (#1176).** The review job has no dependencies
+installed, and on a test-only PR Codex tried anyway and left `vitest: not found` in its review — which
+reads as "CI is broken" and cost a round trip to disprove. The prompt now says the dependencies are
+absent.
+
+**X account on the documentation site (#1170).** The three landing pages now introduce
+[@SingularitySoci](https://x.com/SingularitySoci) and ask for a follow, matching how the README
+already does it.
+
+## mulmoterminal@2.9.1 — 2026-07-31
+
+> **Setup guide:** [What changed in this release](https://receptron.github.io/mulmoterminal/guide/en/v2.9.1.html) — written at release time. ([日本語](https://receptron.github.io/mulmoterminal/guide/ja/v2.9.1.html))
+
+A fix-only release, both fixes in the **rate-limit readout**. A user running Claude and Codex
+together reported that Codex usage never appeared and that Claude's 5h window had no data. Both
+halves of that report turn out to be one display bug, plus a second bug that keeps the check stuck.
+
+### The figure beside `claude usage n/a` was Codex's, drawn with no mark (#1161, #1162)
+
+`claude usage n/a | 7d 71%` — that `71%` was **Codex's** seven-day window. The note only appears
+when Claude has no window to show, so the neighbouring number cannot be Claude's; but the mark that
+says which tool a set of figures belongs to was drawn only when **both** tools reported numbers,
+which is exactly what the note rules out. In the one case where the mark was needed it was
+structurally guaranteed to be absent, and the line read as "Claude's 7d is 71%, only the 5h is
+missing".
+
+The note and the marks are now decided by a single `rateLimitReadout()` that returns both, so a
+caller cannot derive them separately and reintroduce the same mismatch. A row with only one tool on
+it still gets no mark.
+
+Also confirmed while investigating: current Codex reports a **7d window only**, no 5h, across every
+rollout on disk. That is upstream behaviour and was not changed.
+
+### A status line from before the first API response was read as "API-key billing" (#1161, #1162)
+
+Claude Code emits its first status line before the session's first API response, and at that point
+`rate_limits` does not exist yet. The store took that window-less report as proof the account has no
+windows — which it surfaces as API-key billing — and counted the probe as *answered*.
+
+So when a probe did not finish (trust prompt, slow start, expired login, already rate-limited), the
+tooltip explained the missing figures with the **wrong reason**, the failure was never counted, and
+the retry stayed pinned to the flat one-hour schedule for `no-windows` instead of the exponential
+backoff for a check that got no answer. Every attempt repeated the same path, so the readout stayed
+`n/a` indefinitely.
+
+`hadApiResponse()` now distinguishes the two using `cost.total_api_duration_ms` (measured against
+Claude Code 2.1.220 on a real PTY: `0` with no `rate_limits` before the response, `2769` with both
+windows after). A pre-response status line moves neither the state nor `lastStatusLineAt_ms`, so a
+probe that dies quietly lands on the correct `no-report` backoff. Where the field is missing or
+unreadable the answer falls back to `false` — concluding nothing from an absent window — because a
+wrong `false` only slows a retry, while a wrong `true` is this bug again.
+
+`report(agent, …)` was split into `reportCodex` / `reportClaudeStatus` so no argument can route
+around the Claude-side check.
+
+### Also in this release
+
+- A launch plan for the project was added under `plans/` (#1159). Nothing user-facing.
+
 ## mulmoterminal@2.9.0 — 2026-07-31
 
 > **Setup guide:** [What changed in this release](https://receptron.github.io/mulmoterminal/guide/en/v2.9.0.html) — written at release time. ([日本語](https://receptron.github.io/mulmoterminal/guide/ja/v2.9.0.html))

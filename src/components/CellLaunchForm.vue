@@ -3,7 +3,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useDirColors, useDirPriorities } from "../composables/useDirConfig";
 import { useResumableSessions, useDirScripts, useDirWorktrees, type ResumableSession, type Worktree } from "../composables/useDirLists";
 import { useMcpToolGroups } from "../composables/useMcpToolGroups";
-import { orderByDirPriority } from "./dirPriorityOrder";
+import { orderByDirPriority } from "../../common/dirPriorityOrder";
 import { CHIP_IDLE, CHIP_RUNNING, CHIP_DOT_RUNNING } from "./dirChipColor";
 import { relativeTime as relativeTimeFrom } from "./cellDisplay";
 import { LAUNCH_TARGETS } from "./launchTargets";

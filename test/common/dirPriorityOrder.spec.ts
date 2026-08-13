@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { UNSET_PRIORITY, dirPriority, orderByDirPriority } from "../../../src/components/dirPriorityOrder.js";
+import { UNSET_PRIORITY, dirPriority, orderByDirPriority } from "../../common/dirPriorityOrder.js";
 
 describe("dirPriority", () => {
   it("reads a directory's declared rank", () => {

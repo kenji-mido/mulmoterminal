@@ -7,9 +7,12 @@ import { ref, watch } from "vue";
 import type { CiState, RepoIssues, RepoPrs } from "../../common/ghItems";
 import { usePrsView } from "../composables/usePrsView";
 import { useEscapeToClose } from "../composables/useEscapeToClose";
+import { useIssueStart } from "../composables/useIssueStart";
 import { relativeTimeFromIso } from "./cellDisplay";
+import IssueStartButton from "./IssueStartButton.vue";
 
 const { isOpen, close } = usePrsView();
+const { loadRepoDirs, startError } = useIssueStart();
 
 const repos = ref<RepoPrs[]>([]);
 const issueRepos = ref<RepoIssues[]>([]);
@@ -36,7 +39,9 @@ async function load(): Promise<void> {
   loading.value = true;
   prsError.value = null;
   issuesError.value = null;
-  const [prs, issues] = await Promise.all([loadSection("/api/prs"), loadSection("/api/issues")]);
+  // Alongside the two lists: the issue rows need to know which repos have a clone here before
+  // their start control can say anything, and it is the same one-shot read on view open.
+  const [prs, issues] = await Promise.all([loadSection("/api/prs"), loadSection("/api/issues"), loadRepoDirs()]);
   if (id !== reqId) return;
   repos.value = prs.rows as RepoPrs[];
   prsError.value = prs.error;
@@ -139,6 +144,9 @@ useEscapeToClose(isOpen, close);
           Issues
         </h2>
         <p v-if="issuesError" class="px-1 py-6 text-[13px] text-err">{{ issuesError }}</p>
+        <!-- One place for the whole section: only one start can be in flight at a time, so a
+             per-repo copy would be the same message repeated down the page. -->
+        <p v-if="startError" data-testid="issue-start-error" class="px-1 py-2 text-[13px] text-err">{{ startError }}</p>
         <section v-for="r in issueRepos" :key="`iss-${r.repo}`" class="mb-5">
           <h3 class="my-1.5 flex items-center gap-2 border-b border-border pb-1 font-mono text-[13px] font-semibold text-fg">
             {{ r.repo }}
@@ -147,10 +155,12 @@ useEscapeToClose(isOpen, close);
           <p v-if="r.error" class="px-1 py-6 text-[13px] text-err">{{ r.error }}</p>
           <p v-else-if="r.issues && r.issues.length === 0" class="px-1 py-2 text-[13px] text-muted">No open issues</p>
           <ul v-else-if="r.issues" class="m-0 list-none p-0">
-            <li v-for="iss in r.issues" :key="iss.number">
+            <!-- The row is a link to GitHub and the control STARTS work here, so they cannot be
+                 one element: the button sits beside the anchor rather than inside it. -->
+            <li v-for="iss in r.issues" :key="iss.number" class="flex items-center gap-1.5 rounded-md pr-2 hover:bg-hover">
               <a
                 data-testid="prs-row"
-                class="flex w-full cursor-pointer items-center gap-2.5 rounded-md px-2 py-[7px] text-left text-[13px] text-secondary no-underline hover:bg-hover hover:text-fg"
+                class="flex min-w-0 flex-auto cursor-pointer items-center gap-2.5 rounded-md px-2 py-[7px] text-left text-[13px] text-secondary no-underline hover:text-fg"
                 :href="iss.url"
                 target="_blank"
                 rel="noopener noreferrer"
@@ -159,6 +169,7 @@ useEscapeToClose(isOpen, close);
                 <span class="min-w-0 flex-auto truncate">{{ iss.title }}</span>
                 <span class="flex-none text-[11px] text-dim">{{ iss.author }} · {{ relativeTimeFromIso(iss.updatedAt, Date.now()) }}</span>
               </a>
+              <IssueStartButton :repo="r.repo" :issue="iss.number" />
             </li>
           </ul>
           <p v-if="r.truncated" class="px-1 py-2 text-[13px] text-muted">

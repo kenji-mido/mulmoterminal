@@ -20,7 +20,7 @@ import {
   type AppConfig,
 } from "./app-config.js";
 import { type HeaderConfig } from "./header-config.js";
-import { type Launcher, type Provider, type UserMcpServer } from "./config-schema.js";
+import { type CwdPreset, type Launcher, type Provider, type UserMcpServer } from "./config-schema.js";
 import type { QuickCommand } from "../../common/quickCommands.js";
 import type { PushKind } from "../../common/pushKinds.js";
 import { type TerminalSubmitMode } from "../../common/terminalSubmit.js";
@@ -39,6 +39,17 @@ let config: AppConfig = loadAppConfig(CONFIG_FILE);
 // changes them takes effect on the next /api/prs without a restart.
 export function getPrRepos(): string[] {
   return config.prRepos;
+}
+
+// The saved directories and the recorded clone-per-repo choices, for the repo -> dir reverse
+// lookup (#1172). Read live for the same reason as the repos above: choosing a clone writes the
+// config, and the next lookup has to see it without a restart.
+export function getCwdPresets(): CwdPreset[] {
+  return config.cwdPresets;
+}
+
+export function getRepoDirs(): Record<string, string> {
+  return config.repoDirs;
 }
 
 // The launch commands a grid cell offers — read live so /ws/launch resolves a launcher

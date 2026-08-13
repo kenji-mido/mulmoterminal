@@ -1,11 +1,26 @@
 import { describe, it, expect } from "vitest";
-import { createRateLimitStore, shouldProbe, probeRetryDelay, PROBE_RETRY_BASE_MS, PROBE_RETRY_MAX_MS, RATE_LIMIT_STALE_MS } from "./rate-limit-store";
+import {
+  createRateLimitStore,
+  claudeStatusVerdict,
+  shouldProbe,
+  probeRetryDelay,
+  PROBE_RETRY_BASE_MS,
+  PROBE_RETRY_MAX_MS,
+  RATE_LIMIT_STALE_MS,
+} from "./rate-limit-store";
 import type { ProbeState } from "./rate-limit-store";
 
 const NOW = 1_700_000_000_000;
 const fresh = NOW - 1000;
 const old = NOW - RATE_LIMIT_STALE_MS - 1;
 const limits = { fiveHour: { usedPercentage: 27, resetsAt_sec: 1 }, sevenDay: null };
+
+// The two status lines a probe actually produces, in order (measured on 2.1.220 — see
+// statusline.ts). `booting` is the one written before the first API response: no windows, and no
+// verdict to draw from that.
+const booting = { limits: null, afterApiResponse: false };
+const answered = { limits, afterApiResponse: true };
+const noWindows = { limits: null, afterApiResponse: true };
 
 // Defaults describe the case the gauge is built for: someone is watching, the reading is stale,
 // nothing has gone wrong. Each test names only what it changes.
@@ -16,6 +31,22 @@ const gate = (over: Partial<Parameters<typeof shouldProbe>[1]> = {}) => ({
   lastProbeAt_ms: null,
   state: { kind: "ok" } as ProbeState,
   ...over,
+});
+
+// The whole of #1161 in three cases: an absence only means something once the session has had an
+// API response to have reported it.
+describe("claudeStatusVerdict", () => {
+  it("reads windows as success", () => {
+    expect(claudeStatusVerdict(answered)).toEqual({ kind: "ok" });
+  });
+
+  it("reads an answered call with no windows as API-key billing", () => {
+    expect(claudeStatusVerdict(noWindows)).toEqual({ kind: "no-windows" });
+  });
+
+  it("draws NOTHING from the status line written before the first API response", () => {
+    expect(claudeStatusVerdict(booting)).toBeNull();
+  });
 });
 
 // The probe spends the very budget the gauge reports, so "when may it run" is the rule that keeps
@@ -85,8 +116,8 @@ describe("shouldProbe after a failure", () => {
 describe("createRateLimitStore", () => {
   it("keeps the last reading per agent, and reports them together", () => {
     const store = createRateLimitStore();
-    store.report("claude", limits, NOW);
-    store.report("codex", { fiveHour: null, sevenDay: { usedPercentage: 3, resetsAt_sec: 2 } }, NOW);
+    store.reportClaudeStatus(answered, NOW);
+    store.reportCodex({ fiveHour: null, sevenDay: { usedPercentage: 3, resetsAt_sec: 2 } }, NOW);
     expect(store.snapshot().claude?.limits).toEqual(limits);
     expect(store.snapshot().codex?.limits.sevenDay?.usedPercentage).toBe(3);
   });
@@ -95,9 +126,17 @@ describe("createRateLimitStore", () => {
   // Blanking on those would read as "0% used", which is the opposite of what is true.
   it("ignores a null report rather than blanking what it holds", () => {
     const store = createRateLimitStore();
-    store.report("claude", limits, NOW);
-    store.report("claude", null, NOW + 1000);
+    store.reportClaudeStatus(answered, NOW);
+    store.reportClaudeStatus(noWindows, NOW + 1000);
+    store.reportClaudeStatus(booting, NOW + 2000);
     expect(store.snapshot().claude?.limits).toEqual(limits);
+  });
+
+  it("ignores a codex rollout with no windows in it", () => {
+    const store = createRateLimitStore();
+    store.reportCodex(limits, NOW);
+    store.reportCodex(null, NOW + 1000);
+    expect(store.snapshot().codex?.limits).toEqual(limits);
   });
 
   // Which agent reported is what lets the caller end a probe the moment its own answer lands, and
@@ -107,11 +146,11 @@ describe("createRateLimitStore", () => {
     const seen: string[] = [];
     const store = createRateLimitStore({}, (_snapshot, agent) => seen.push(agent));
 
-    store.report("claude", null, NOW);
+    store.reportClaudeStatus(booting, NOW);
     expect(seen).toEqual([]);
 
-    store.report("codex", limits, NOW);
-    store.report("claude", limits, NOW);
+    store.reportCodex(limits, NOW);
+    store.reportClaudeStatus(answered, NOW);
     expect(seen).toEqual(["codex", "claude"]);
   });
 
@@ -137,7 +176,7 @@ describe("createRateLimitStore", () => {
     store.setProbeInFlight(true);
     expect(store.wantsProbe(NOW)).toBe(false);
     store.setProbeInFlight(false);
-    store.report("claude", limits, NOW);
+    store.reportClaudeStatus(answered, NOW);
     expect(store.wantsProbe(NOW)).toBe(false);
   });
 
@@ -145,7 +184,7 @@ describe("createRateLimitStore", () => {
   // mutate the store by editing its own response.
   it("hands out a copy, not the store's own object", () => {
     const store = createRateLimitStore();
-    store.report("claude", limits, NOW);
+    store.reportClaudeStatus(answered, NOW);
     const snap = store.snapshot();
     delete snap.claude;
     expect(store.snapshot().claude).toBeTruthy();
@@ -163,7 +202,7 @@ describe("probe outcomes", () => {
     s.noteProbeFailedIfNoReport(NOW);
     expect(s.probeState().kind).toBe("no-report");
     s.noteProbeStarted(NOW - 1000);
-    s.report("claude", limits, NOW);
+    s.reportClaudeStatus(answered, NOW);
     expect(s.probeState()).toEqual({ kind: "ok" });
   });
 
@@ -172,10 +211,36 @@ describe("probe outcomes", () => {
   it("a status line WITHOUT windows is 'no windows', not a failure", () => {
     const s = store();
     s.noteProbeStarted(NOW - 1000);
-    s.report("claude", null, NOW);
+    s.reportClaudeStatus(noWindows, NOW);
     expect(s.probeState()).toEqual({ kind: "no-windows" });
     s.noteProbeFailedIfNoReport(NOW);
     expect(s.probeState()).toEqual({ kind: "no-windows" });
+  });
+
+  // #1161. Every probe writes this one first — claude is up, the question has not been answered
+  // yet, so `rate_limits` does not exist. Read as an answer it made a probe that then died look
+  // exactly like API-key billing: the wrong reason on screen, and an hour before the next attempt
+  // instead of the widening gap a silence earns.
+  it("a status line from BEFORE the first API response settles nothing", () => {
+    const s = store();
+    s.noteAsked(NOW);
+    s.noteProbeStarted(NOW);
+    s.reportClaudeStatus(booting, NOW + 2000);
+    expect(s.probeState()).toEqual({ kind: "ok" });
+
+    s.noteProbeFailedIfNoReport(NOW + 90_000);
+    expect(s.probeState()).toEqual({ kind: "no-report", failures: 1 });
+    expect(s.wantsProbe(NOW + 90_000 + PROBE_RETRY_BASE_MS + 1)).toBe(true);
+  });
+
+  // And it must not suppress the windows that follow it in the same probe.
+  it("still succeeds when the windows arrive after that first one", () => {
+    const s = store();
+    s.noteProbeStarted(NOW);
+    s.reportClaudeStatus(booting, NOW + 2000);
+    s.reportClaudeStatus(answered, NOW + 8000);
+    expect(s.probeState()).toEqual({ kind: "ok" });
+    expect(s.snapshot().claude?.limits).toEqual(limits);
   });
 
   it("counts consecutive silences", () => {

@@ -26,6 +26,7 @@ import type { SessionAgent } from "../../common/sessionAgent.js";
 import { mountSessionRoutes } from "../routes/session-routes.js";
 import { mountToolRoutes } from "../routes/tool-routes.js";
 import { mountRepoRoutes } from "../routes/repo-routes.js";
+import { mountIssueWorkRoutes } from "../routes/issue-work-routes.js";
 import { mountDirRoutes } from "../routes/dir-routes.js";
 import { mountGuiMcpRoutes } from "../routes/gui-mcp-routes.js";
 import { mountDropRoutes } from "../routes/drop-routes.js";
@@ -279,6 +280,9 @@ function mountSessionFacingRoutes(app: Express, deps: AppRouteDeps): void {
 
   // The /prs and /issues views (see routes/repo-routes.ts).
   mountRepoRoutes(app);
+
+  // Starting work FROM an issue row in that view: the worktree plus its seeded session (#1173).
+  mountIssueWorkRoutes(app, { spawnClaudePty: deps.spawnClaudePty, isAllowedOrigin: deps.isAllowedOrigin });
 
   // GET/POST /api/config (workspace dir + directory presets) — in its own module.
   // GRID-ONLY (dev_tool): backs the grid launcher's default dir + the settings

@@ -247,6 +247,37 @@ describe("connWsUrl — endpoint precedence", () => {
     expect([q.get("session"), q.get("cwd"), q.get("gui"), q.get("provider")]).toEqual(["sess-1", "/work/proj", "0", "openrouter"]);
   });
 
+  // The pty is spawned at whatever the URL says (#1178), so every endpoint that starts one has to
+  // carry the geometry — a cell that reached the server without it drew its first frame at the
+  // server's 120x30 default in a pane of another size.
+  it("carries the fitted geometry to every endpoint that spawns a pty", () => {
+    const size = { cols: 131, rows: 41 };
+    const command = { source: "button", buttonId: "diff", label: "Diff", cwd: "/w", session: "s1", agent: "codex", model: "opus" } as const;
+    const urls = [
+      connWsUrl(target(), "sess-1", HOST, false, size),
+      connWsUrl(target({ agent: "codex" }), "sess-1", HOST, false, size),
+      connWsUrl(target({ launcher: { shell: true } }), "sess-1", HOST, false, size),
+      connWsUrl(target({ command }), null, HOST, false, size),
+    ];
+    for (const url of urls) {
+      const q = new URL(url).searchParams;
+      expect([q.get("cols"), q.get("rows")]).toEqual(["131", "41"]);
+    }
+  });
+
+  // A size the server would refuse is worse than none: it would be dropped there anyway, and the
+  // absent pair is what tells the server to keep its default and wait for the resize frame.
+  it("leaves the geometry off when it is not one the server would accept", () => {
+    for (const size of [
+      { cols: 0, rows: 0 },
+      { cols: 9999, rows: 41 },
+      { cols: 131, rows: 0 },
+    ]) {
+      const q = new URL(connWsUrl(target(), "sess-1", HOST, false, size)).searchParams;
+      expect([q.get("cols"), q.get("rows")]).toEqual([null, null]);
+    }
+  });
+
   it("uses wss over https", () => {
     expect(connWsUrl(target(), null, HOST, true).startsWith("wss://")).toBe(true);
   });

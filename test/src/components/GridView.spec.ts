@@ -1,5 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
+import { h, KeepAlive, type Component } from "vue";
+
+// App.vue renders GridView inside <KeepAlive>, and the grid registers its openers (new terminal,
+// spawned-chat placement) on ACTIVATE so a cached-but-hidden grid is never mutated behind the
+// user's back. onActivated does not fire for a bare mount, so a test that skips the KeepAlive
+// silently exercises a grid that registered nothing — which is not the component the app runs.
+const mountActivated = (component: Component, options: Parameters<typeof mount>[1]) => mount({ render: () => h(KeepAlive, null, [h(component)]) }, options);
 
 // The grid subscribes to the pub/sub socket on mount — stub it so no real socket opens.
 vi.mock("../../../src/composables/usePubSub", () => ({
@@ -99,6 +106,32 @@ describe("GridView roster ordering (#720)", () => {
     expect(rosterOrder).toEqual([1, 0, 2]);
     // The grid reads the SAME ordering — roster and grid can't drift.
     expect(grid.props("cells").map((c: { uid: number }) => c.uid)).toEqual([1, 0, 2]);
+    w.unmount();
+  });
+
+  // The last untested link in the parking chain (#992): the cell's persisted flag has to reach the
+  // roster ROW that renders it. rosterAlertClass and the row's binding are each pinned elsewhere,
+  // so a mapping stuck at `false` here would leave every one of those green while no roster row
+  // ever sank. Driven from localStorage, the way a reloaded grid actually gets the flag.
+  it("carries each cell's parked flag onto its roster row", async () => {
+    localStorage.setItem(
+      "grid_v2",
+      JSON.stringify({
+        cells: [
+          { uid: 20, session: IDS.idleA, cwd: "/w" },
+          { uid: 21, session: IDS.idleB, cwd: "/w", parked: true },
+        ],
+        expanded: 20,
+        page: 0,
+        sortMode: "manual",
+      }),
+    );
+    const w = mount((await import("../../../src/components/GridView.vue")).default, {
+      global: { stubs: { TerminalGrid: OrderStub, AppToolbar: ToolbarStub, SettingsModal: SettingsStub } },
+    });
+    await flushPromises();
+    const rows = w.findComponent(OrderStub).props("listRows");
+    expect(rows.map((r: { parked: boolean }) => r.parked)).toEqual([false, true]);
     w.unmount();
   });
 });
@@ -389,7 +422,7 @@ describe("GridView skill launch (#1111)", () => {
       }
       return realFetch(url, init);
     }) as typeof fetch;
-    const w = mount((await import("../../../src/components/GridView.vue")).default, {
+    const w = mountActivated((await import("../../../src/components/GridView.vue")).default, {
       global: { stubs: { TerminalGrid: CellsStub, AppToolbar: ToolbarStub, SettingsModal: SkillSettingsStub } },
     });
     await flushPromises();
@@ -466,7 +499,7 @@ describe("GridView skill launch — capacity and placement (#1111)", () => {
       if (String(url).includes("spawnBackgroundChat")) return { ok: true, json: async () => ({ jsonData: { chatId: SPAWNED } }) } as Response;
       return realFetch(url, init);
     }) as typeof fetch;
-    const w = mount((await import("../../../src/components/GridView.vue")).default, {
+    const w = mountActivated((await import("../../../src/components/GridView.vue")).default, {
       global: { stubs: { TerminalGrid: CellsStub, AppToolbar: ToolbarStub, SettingsModal: SkillSettingsStub } },
     });
     await flushPromises();
@@ -492,6 +525,30 @@ describe("GridView skill launch — capacity and placement (#1111)", () => {
     (await import("../../../src/composables/useChatLauncher")).registerChatOpener(openSession);
     const w = await launchFrom(filledGrid(81)); // MAX_TERMINALS
     expect(openSession).toHaveBeenCalledWith(SPAWNED, expect.objectContaining({ agent: "claude" }));
+    w.unmount();
+  });
+
+  // The full-grid fallback is the ONE path where `draft` still has to reach the single view, and
+  // it is the easiest to drop: the cell it would otherwise have made needs no such flag (the
+  // server types the draft into the PTY), so nothing else here carries one. Without it a
+  // startNewChatDraft at MAX_TERMINALS silently loses the "preparing your draft…" hint and reads
+  // as a turn already running.
+  it("carries `draft` into the single-view fallback when the grid is full", async () => {
+    const openSession = vi.fn();
+    (await import("../../../src/composables/useChatLauncher")).registerChatOpener(openSession);
+    const { placeSpawnedChat } = await import("../../../src/composables/useSpawnedChat");
+    localStorage.setItem("grid_v2", filledGrid(81)); // MAX_TERMINALS
+    const w = mountActivated((await import("../../../src/components/GridView.vue")).default, {
+      global: { stubs: { TerminalGrid: CellsStub, AppToolbar: ToolbarStub, SettingsModal: SkillSettingsStub } },
+    });
+    await flushPromises();
+
+    // Straight through the placement seam: a draft spawn is startNewChatDraft's, and going via a
+    // skill button would only ever produce draft:false.
+    placeSpawnedChat({ id: SPAWNED, agent: "claude", draft: true });
+    await flushPromises();
+
+    expect(openSession).toHaveBeenCalledWith(SPAWNED, expect.objectContaining({ agent: "claude", draft: true }));
     w.unmount();
   });
 });

@@ -7,7 +7,7 @@
 // question, not the first.
 import { computed, onMounted, onUnmounted } from "vue";
 import { useRateLimits } from "../composables/useRateLimits";
-import { agentGauges, gaugeTitle, claudeProbeNote } from "../composables/rateLimitGauge";
+import { rateLimitReadout, gaugeTitle } from "../composables/rateLimitGauge";
 import AgentMark from "./AgentMark.vue";
 
 const { snapshot, start, stop } = useRateLimits();
@@ -22,9 +22,8 @@ onUnmounted(stop);
 // `probeNote` sits where the numbers would be, in the muted colour, because it is the same kind of
 // information: "here is what we know about your usage" (#1011).
 const view = computed(() => {
-  const reading = snapshot.value;
   const now_ms = Date.now();
-  return { now_ms, gauges: agentGauges(reading, now_ms), note: claudeProbeNote(reading, now_ms) };
+  return { now_ms, ...rateLimitReadout(snapshot.value, now_ms) };
 });
 const gauges = computed(() => view.value.gauges);
 const probeNote = computed(() => view.value.note);

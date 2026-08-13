@@ -18,7 +18,9 @@ const { HOME } = vi.hoisted(() => ({ HOME: `/tmp/mt-grid-state-${crypto.randomUU
 
 vi.mock("node:os", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:os")>();
-  return { ...actual, default: { ...actual.default, homedir: () => HOME }, homedir: () => HOME };
+  // The module under test does `import os from "node:os"`, so the DEFAULT is what it calls — but
+  // `typeof import("node:os")` has no `default` to spread. Build it from the namespace instead.
+  return { ...actual, default: { ...actual, homedir: () => HOME }, homedir: () => HOME };
 });
 
 const STATE_FILE = path.join(HOME, ".mulmoterminal", "grid-state.json");

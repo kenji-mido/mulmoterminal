@@ -9,7 +9,7 @@
 // states outright: safe methods are not gated, so a cross-site `<img src=…/api/rate-limits>` would
 // otherwise spend the user's quota on a probe. The GET stays a pure read.
 import type { Express } from "express";
-import { extractRateLimits } from "./statusline.js";
+import { readClaudeStatus } from "./statusline.js";
 import type { ProbeState } from "./rate-limit-store.js";
 import type { RateLimitSnapshot, RateLimitStore } from "./rate-limit-store.js";
 
@@ -28,7 +28,7 @@ export interface RateLimitRouteDeps {
 export function mountRateLimitRoutes(app: Express, deps: RateLimitRouteDeps): void {
   // Written by the statusLine given to the probe, which pipes Claude Code's status payload here.
   app.post("/api/rate-limits", (req, res) => {
-    deps.store.report("claude", extractRateLimits(req.body), deps.now_ms());
+    deps.store.reportClaudeStatus(readClaudeStatus(req.body), deps.now_ms());
     res.json({ ok: true });
   });
 

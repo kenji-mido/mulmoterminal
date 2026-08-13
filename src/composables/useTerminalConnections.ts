@@ -36,6 +36,7 @@ import { arrowSequence, type ArrowDir } from "./terminalArrowKeys";
 import { documentHidden, whenDocumentVisible } from "./documentVisibility";
 import { clearResetModes, recordSwallowedModes } from "./mouseReports";
 import { guardMouseClicks, guardMouseWheel, guardTouchScroll } from "./terminalMouseInput";
+import { isTypedInput } from "./terminalUserInput";
 import { bufferIsShort, readBufferShape } from "./terminalBufferHealth";
 import { CanvasAddon } from "@xterm/addon-canvas";
 import "@xterm/xterm/css/xterm.css";
@@ -44,20 +45,12 @@ import { reconnectDelayMs, shouldReconnect } from "./reconnectPolicy";
 import type { RunCommand } from "../components/runCommand";
 import { readableSlot, type SlotCandidate, type SlotInfo } from "./readableSlot";
 import { exitCodeOf, messageEffect } from "./serverMessage";
-import {
-  enterKeyOverride,
-  submitSequence,
-  submittableLine,
-  DEFAULT_TERMINAL_SUBMIT_MODE,
-  type EnterKeyEvent,
-  type TerminalSubmitMode,
-} from "../../common/terminalSubmit";
+import { submitSequence, submittableLine, DEFAULT_TERMINAL_SUBMIT_MODE, type TerminalSubmitMode } from "../../common/terminalSubmit";
 import { TERMINAL_FONT_SIZE_DEFAULT } from "../../common/terminalFontSize";
 import { TERMINAL_FONT_FAMILY_DEFAULT } from "../../common/terminalFontFamily";
 import { getTerminalSubmitMode } from "./terminalSubmitMode";
 import { getTerminalScrollSpeed } from "./useTerminalScrollSpeed";
 import { clipboardActionFor, selectionToCopy } from "../../common/terminalClipboard";
-import { sendBytesFor, type Keymap, type KeymapKeyEvent } from "../../common/keymap";
 import { getActiveKeymap } from "./activeKeymap";
 import { isCopyOnSelectEnabled } from "./copyOnSelect";
 import { createFilePathLinkProvider } from "./terminalFilePathLinkProvider";
@@ -69,44 +62,11 @@ import type { TerminalAgent } from "../../common/sessionAgent";
 // held by another window, so the view can offer to take it back instead of a dead pill.
 export type ConnStatus = "connecting" | "connected" | "disconnected" | "superseded";
 
-// Enter submits and Shift/Option+Enter make a newline — but which BYTES carry each meaning
-// depends on the host's Claude binding, so the choice lives in `enterKeyOverride` (keyed by
-// the user's `terminalSubmit` setting) rather than being hardcoded here. xterm emits "\r" for
-// both Enter and Shift+Enter, so whenever we need anything else we intercept the key and send
-// the right bytes ourselves.
-//
-// The handler: when `enterKeyOverride` returns bytes, `send` them and return false to cancel
-// xterm's default \r; otherwise return true so xterm handles the key normally.
-// `preventDefault()` is essential: xterm's _keyDown returns early on a false custom handler
-// WITHOUT preventDefault, so the browser fires a follow-up keypress that _keyPress turns into a
-// bare \r — submitting the prompt. Cancelling the default stops that keypress.
-type EnterHandlerEvent = EnterKeyEvent & { preventDefault: () => void };
-export function makeEnterHandler(getMode: () => TerminalSubmitMode, send: (data: string) => void): (e: EnterHandlerEvent) => boolean {
-  return (e) => {
-    const bytes = enterKeyOverride(getMode(), e);
-    if (bytes === null) return true;
-    e.preventDefault();
-    send(bytes);
-    return false;
-  };
-}
-
-// The user's `keymap.send` bindings, turned into bytes on this terminal's PTY (#1005) — the
-// same three lines as the Enter handler above, and `preventDefault()` matters here for the same
-// reason: without it xterm leaves the browser to fire a keypress that arrives as stray input.
-//
-// Per terminal rather than on the grid's handler, because the bytes go to ONE pty — the one
-// whose xterm saw the key — and the grid has no such subject when nothing is enlarged.
-type SendHandlerEvent = KeymapKeyEvent & { type: string; isComposing?: boolean; preventDefault: () => void };
-export function makeSendHandler(getKeymap: () => Keymap, send: (data: string) => void): (e: SendHandlerEvent) => boolean {
-  return (e) => {
-    const bytes = sendBytesFor(getKeymap(), e);
-    if (bytes === null) return true;
-    e.preventDefault();
-    send(bytes);
-    return false;
-  };
-}
+// Both live in terminalSubmitHandlers.ts now. Imported because wireTerminalInput below calls
+// them, re-exported because `conn.makeEnterHandler` / `conn.makeSendHandler` is where every
+// caller and every spec still reaches for them.
+import { makeEnterHandler, makeSendHandler } from "./terminalSubmitHandlers";
+export { makeEnterHandler, makeSendHandler };
 
 // What a slot connects to. Mirrors the relevant Terminal.vue props; a connectKey
 // change (session switch / relaunch) hands a fresh target to retarget().
@@ -156,6 +116,10 @@ export interface ConnHandlers {
   // failure, or an agent session that ended without one). A Run cell reads it to tell a
   // clean finish from a broken build.
   onExit?: (exitCode: number | null) => void;
+  // The user put something INTO this terminal. Fired from the one place keystrokes, bound keys
+  // and pastes all funnel through on their way to the socket, so it cannot be reached by output
+  // the server writes back or by anything the app renders — only by someone using the session.
+  onInput?: () => void;
 }
 
 // The two xterm options that decide the CELL METRICS, so they travel together: both change how
@@ -380,6 +344,13 @@ function guardMouseTracking(term: Terminal, swallowedMouseModes: Set<number>): v
 // Claude-scoped `terminalSubmit` mapping) are sent by us and the default \r suppressed.
 function wireTerminalInput(term: Terminal, c: Conn): void {
   const send = (data: string): void => {
+    // Announced even when the socket is down: the user typed either way, and what a parked cell
+    // reads it for (#992) is "someone is using this", not "the PTY received it".
+    //
+    // Pointer and focus reports ride this same function — the app feeds its own clicks and wheel
+    // through `term.input()` — so they have to be excluded here or clicking a parked cell to READ
+    // it would wake it, which is the one thing parking is for.
+    if (isTypedInput(data)) c.handlers.onInput?.();
     if (c.ws && c.ws.readyState === WebSocket.OPEN) c.ws.send(JSON.stringify({ type: "input", data }));
   };
   term.onData(send);
@@ -614,7 +585,11 @@ function connect(c: Conn) {
   // same session instead of spawning a fresh one each retry.
   const resumeId = c.knownSessionId ?? c.target.sessionId;
   const secure = location.protocol === "https:";
-  const url = connWsUrl(c.target, resumeId, location.host, secure);
+  // The geometry rides on the URL as well as in the `resize` frame below: the frame is what keeps a
+  // live pty in step, but it arrives as a separate message, and a pty spawned before it lands draws
+  // its first frame at the server's default (#1178). Callers fit before connecting, so by here
+  // `term.cols/rows` is the real cell.
+  const url = connWsUrl(c.target, resumeId, location.host, secure, { cols: c.term.cols, rows: c.term.rows });
   const sock = new WebSocket(url);
   c.ws = sock;
 
@@ -739,9 +714,13 @@ export function attach(key: string, target: ConnTarget, handlers: ConnHandlers, 
   // fitAndSyncSize below re-derives cols/rows from the new cell size, so this must land
   // before it, not after.
   if (!sameFont(c.font, font)) applyFont(c, font);
+  // Fit BEFORE connecting, not after: connect() puts the terminal's geometry on the URL so the pty
+  // is spawned at it, and an unfitted terminal would send xterm's 80x24 default there (#1178). For
+  // an already-live slot this is the same sync it always was — the send is a no-op until OPEN.
+  // retarget() opens a socket the same way connect() does, so it sits on this side of the fit too.
+  fitAndSyncSize(c);
   if (created) connect(c);
   else if (staleIdentity) retarget(key, target);
-  fitAndSyncSize(c);
   c.term.focus();
   // The persisted xterm was just re-parented into a new host. The sync fit() above can no-op (same size)
   // or run before layout, leaving the canvas renderer blank until a scroll. Re-fit + force a repaint next
@@ -967,10 +946,24 @@ export function readBuffer(key: string): string {
   return lines.join("\n").trimEnd();
 }
 
+// A slot whose xterm is still on screen IS attached, whatever the bookkeeping says. `attachedEl` is
+// what fit() and the rAF repaint key off, and it used to be a one-way door: a detach that raced a
+// re-attach cleared it, and from then on the cell never fit, never sent a resize and never repainted
+// — the pty froze at its last size while the browser drew the cell at a new one (#1178, and the
+// blank-terminal half of #957). The host's own parent is the truth, so read it back rather than
+// leaving the slot dead.
+// `isConnected`, not merely "has a parent": a host sitting in a container that was itself removed
+// from the document is not on screen, and adopting that orphan would point the slot at an element
+// nothing can measure.
+function attachedHostOf(c: Conn): HTMLElement | null {
+  if (!c.attachedEl && c.host.isConnected) c.attachedEl = c.host.parentElement;
+  return c.attachedEl;
+}
+
 // Refit to the current host size and push the new dimensions to the PTY.
 export function fit(key: string) {
   const c = conns.get(key);
-  if (!c || !c.attachedEl) return;
+  if (!c || !attachedHostOf(c)) return;
   fitAndSyncSize(c);
   // A resize is what trips the upstream buffer bug, so this is where a short buffer shows up
   // first — usually while the terminal is still alive (#846).

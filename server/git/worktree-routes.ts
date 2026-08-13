@@ -7,6 +7,7 @@ import { repoRoot, defaultBaseBranch, listWorktrees, createWorktree, removeWorkt
 import { worktreeDiff } from "./worktree-diff.js";
 import { pushWorktree, createOrOpenPR } from "./worktree-pr.js";
 import { requestOriginAllowed } from "../routes/same-origin-guard.js";
+import { isIssueNumber } from "../../common/prPhase.js";
 
 interface WorktreeRouteOptions {
   isAllowedOrigin: (origin: string | undefined, remoteAddress: string | undefined) => boolean;
@@ -43,11 +44,19 @@ export function mountWorktreeRoutes(app: Express, { isAllowedOrigin }: WorktreeR
 
   app.post("/api/worktrees/create", async (req, res) => {
     if (!requestOriginAllowed(req, isAllowedOrigin)) return res.status(403).end();
-    const { repoDir, task } = req.body ?? {};
+    const { repoDir, task, issue } = req.body ?? {};
     if (typeof repoDir !== "string" || typeof task !== "string" || !task.trim()) {
       return res.status(400).json({ error: "repoDir and a non-empty task are required" });
     }
-    const wt = await createWorktree(repoDir, task);
+    // An unusable `issue` is refused rather than dropped: the number ends up in the branch name
+    // and from there in the PR's `Fixes`, so silently creating an UNANCHORED worktree would look
+    // like it worked and only diverge later, once nothing closes the issue.
+    if (issue !== undefined && !isIssueNumber(issue)) {
+      return res.status(400).json({ error: "issue must be a positive integer" });
+    }
+    // Re-checked rather than reusing the guard above: `req.body` is `any`, and narrowing it there
+    // does not survive to here — the call would take `any` and typecheck would not notice.
+    const wt = await createWorktree(repoDir, task, isIssueNumber(issue) ? issue : undefined);
     if (!wt) return res.status(500).json({ error: "could not create the worktree (is this a git repo?)" });
     res.json(wt);
   });

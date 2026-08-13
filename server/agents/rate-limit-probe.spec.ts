@@ -148,7 +148,7 @@ describe("ending the probe when its answer lands", () => {
 
   it("stops as soon as a Claude report carries windows", () => {
     const { store, killed, onSettled } = wire();
-    store.report("claude", windows, 1000);
+    store.reportClaudeStatus({ limits: windows, afterApiResponse: true }, 1000);
     expect(killed).toHaveBeenCalled();
     expect(onSettled).toHaveBeenCalledTimes(1);
   });
@@ -158,14 +158,15 @@ describe("ending the probe when its answer lands", () => {
   // was spawned to collect.
   it("keeps going for a status line that carried none", () => {
     const { store, killed } = wire();
-    store.report("claude", null, 1000);
+    store.reportClaudeStatus({ limits: null, afterApiResponse: false }, 1000);
+    store.reportClaudeStatus({ limits: null, afterApiResponse: true }, 2000);
     expect(killed).not.toHaveBeenCalled();
   });
 
   // Codex is read from a file on every poll; it has nothing to do with this probe's lifetime.
   it("is not ended by a Codex reading", () => {
     const { store, killed } = wire();
-    store.report("codex", windows, 1000);
+    store.reportCodex(windows, 1000);
     expect(killed).not.toHaveBeenCalled();
   });
 });

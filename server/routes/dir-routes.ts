@@ -17,7 +17,7 @@ import { loadScripts } from "../files/scripts.js";
 import { gitStatus } from "../git/git-status.js";
 import { resolveGithubUrl } from "../git/gitRemote.js";
 import { phaseForRepoBranch } from "../git/prPhase.js";
-import { EMPTY_WORK_ITEM } from "../../common/prPhase.js";
+import { EMPTY_WORK_ITEM, isIssueNumber } from "../../common/prPhase.js";
 import { ensureWorkComment } from "../git/work-comment.js";
 import { workCommentDirLabel } from "../../common/workComment.js";
 import { isRecord } from "../../common/isRecord.js";
@@ -75,7 +75,7 @@ async function prPhaseHandler(req: Request, res: Response): Promise<void> {
   res.json(!repo || !status.branch ? { ...EMPTY_WORK_ITEM } : await phaseForRepoBranch(repo, status.branch));
 }
 
-const positiveInt = (v: unknown): number | null => (typeof v === "number" && Number.isSafeInteger(v) && v > 0 ? v : null);
+const positiveInt = (v: unknown): number | null => (isIssueNumber(v) ? v : null);
 
 export function mountDirRoutes(app: Express): void {
   // GRID-ONLY (dev_tool): the `script.json` entries a cell's launcher offers for its

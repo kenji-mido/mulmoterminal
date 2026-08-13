@@ -19,7 +19,25 @@ type DraftTarget = Pick<PtyEntry, "agent"> & { term: Pick<IPty, "write"> };
 // briefly, then type. A fallback fires if that marker never shows (UI string drift).
 const DRAFT_READY_MARKER = claudeAdapter.draftReadyMarker;
 const DRAFT_SETTLE_MS = 250;
-const DRAFT_FALLBACK_MS = 6000;
+// The drift fallback waits for the stream to go QUIET for this long, not for this long since the
+// spawn. A booting TUI streams continuously, and in a worktree the app has just created claude
+// takes longer than one fixed window to reach an input box at all — so a since-spawn timer typed
+// into a half-drawn screen, marked itself done, and the draft was gone before the input box
+// existed. Same reasoning (and roughly the same shape) as attachCodexAutoRun below, which has
+// never had a marker to wait for.
+const DRAFT_QUIET_MS = 6000;
+
+// Claude opens on a trust prompt in a directory it has not seen — the state a worktree created
+// moments ago starts in, the first time one is made under a repo's managed root (#1173). There is
+// no input box behind it, and it is also a QUIET screen, so the window above would read it as
+// readiness and paste into the dialog, which discards the text.
+//
+// So the dialog gets a much longer window instead of the normal one. Long rather than infinite:
+// the stream cannot tell whether the dialog is still up — answering it repaints the dialog and the
+// new screen together, and then the screen stops changing — so a scanner that waited forever for
+// proof would never type at all. Observed doing exactly that.
+const TRUST_QUIET_MS = 60_000;
+const TRUST_PROMPT_MARKER = /Yes, I trust this folder|project you created or one you trust/i;
 // Claude's TUI commits a bracketed paste to its input box asynchronously; a CR glued
 // onto the same write can arrive before the paste lands and be dropped — leaving an
 // auto-run prompt typed-but-unsent. Send the submitting Enter as a SEPARATE chunk a
@@ -81,17 +99,35 @@ export function attachDraftInjection(
       // pty already gone — nothing to draft into
     }
   };
-  // Fallback: type even if the readiness marker never appears (UI string drift).
-  setTimeout(typeDraft, DRAFT_FALLBACK_MS);
+  // Fallback: type even if the readiness marker never appears (UI string drift, or a mode whose
+  // status line does not carry it — v2.1.220's manual mode reads "? for shortcuts"). Re-armed on
+  // every burst below, so it measures silence rather than elapsed time.
+  let quiet = setTimeout(typeDraft, DRAFT_QUIET_MS);
+  const waitFor = (ms: number) => {
+    clearTimeout(quiet);
+    quiet = setTimeout(typeDraft, ms);
+  };
   return (data: string) => {
     if (done) return;
     // Type the draft once claude's input box has painted (its mode-hint status line),
     // then settle briefly so the paste lands in the input rather than the scrollback.
     scan = (scan + data).slice(-4096);
+    // Checked before the dialog: answering it repaints the dismissed dialog and the new prompt in
+    // ONE burst, and the marker is the stronger fact — it means an input box exists now.
     if (DRAFT_READY_MARKER.test(scan)) {
       scan = "";
+      clearTimeout(quiet);
       setTimeout(typeDraft, DRAFT_SETTLE_MS);
+      return;
     }
+    // The one quiet screen that must not be typed into: hold much longer than usual. `scan` is
+    // cleared so a repaint does not keep re-arming the long window forever.
+    if (TRUST_PROMPT_MARKER.test(scan)) {
+      scan = "";
+      waitFor(TRUST_QUIET_MS);
+      return;
+    }
+    waitFor(DRAFT_QUIET_MS);
   };
 }
 

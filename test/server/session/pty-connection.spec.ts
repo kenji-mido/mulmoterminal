@@ -59,6 +59,7 @@ function setup(terminalModes: readonly number[] = []) {
     },
     redrawTerminal: (id, clientPid) => calls.push(`redraw:${id}:${clientPid}`),
     checkTerminalSize: (id, { cols, rows }) => calls.push(`sizeCheck:${id}:${cols}x${rows}`),
+    recheckTerminalSize: (id) => calls.push(`sizeRecheck:${id}`),
     cancelTerminalSizeCheck: (id) => calls.push(`sizeCheckCancel:${id}`),
   });
   return { ...handlers, calls };
@@ -171,6 +172,25 @@ describe("handleClientFrame", () => {
     handleClientFrame(entry, s.ws as never, frame({ type: "view", active: false }), SESSION);
     expect(entry.active).toBe(false);
     expect(calls).toHaveLength(1); // deactivating must not clear the attention flag
+  });
+
+  // The size check used to hang off resize frames alone, so a window that drifted — or one that
+  // never got the frame that would have corrected it — had nothing to notice (#1178). Becoming the
+  // viewed pane is the moment it matters, so it re-verifies there.
+  it("re-verifies a tmux pane's size when it becomes the viewed one", () => {
+    const { handleClientFrame, calls } = setup();
+    const s = fakeSocket();
+    const entry = entryWith({ ws: s.ws as never, tmux: true });
+    handleClientFrame(entry, s.ws as never, frame({ type: "view", active: true }), SESSION);
+    expect(calls).toEqual([`setWaiting:${SESSION}:false`, `sizeRecheck:${SESSION}`]);
+  });
+
+  it("does not re-verify a size for a pane leaving view, or one with no tmux window", () => {
+    const { handleClientFrame, calls } = setup();
+    const s = fakeSocket();
+    handleClientFrame(entryWith({ ws: s.ws as never, tmux: true }), s.ws as never, frame({ type: "view", active: false }), SESSION);
+    handleClientFrame(entryWith({ ws: s.ws as never }), s.ws as never, frame({ type: "view", active: true }), SESSION);
+    expect(calls.filter((c) => c.startsWith("sizeRecheck:"))).toEqual([]);
   });
 
   it("ignores a view frame whose active flag is not a boolean", () => {

@@ -4,6 +4,8 @@
 // frame that goes out on a closing socket throws and a resize frame that isn't bounded
 // reaches node-pty unchecked.
 
+import { isUsableTerminalSize } from "../../common/terminalSize.js";
+
 // The socket surface these helpers actually use. Narrower than ws's WebSocket (which
 // satisfies it structurally) so a test can hand in a fake instead of a live connection.
 export interface FrameSocket {
@@ -13,19 +15,12 @@ export interface FrameSocket {
   close(): void;
 }
 
-// Bounds a resize frame must satisfy before it reaches the PTY: a crafted or buggy
-// client must not be able to ask for a 0-column or absurdly large terminal.
-const MIN_TERM_COLS = 2;
-const MAX_TERM_COLS = 500;
-const MIN_TERM_ROWS = 1;
-const MAX_TERM_ROWS = 200;
-
-/** A well-formed `resize` frame with both dimensions inside the allowed bounds. */
+/** A well-formed `resize` frame with both dimensions inside the allowed bounds — the same bounds
+ *  the connect URL's geometry is held to (common/terminalSize.ts), because they answer one
+ *  question: which sizes may reach node-pty at all. */
 export function isResizeFrame(msg: { type?: unknown; cols?: unknown; rows?: unknown }): msg is { type: "resize"; cols: number; rows: number } {
   if (msg.type !== "resize" || !Number.isInteger(msg.cols) || !Number.isInteger(msg.rows)) return false;
-  const cols = Number(msg.cols);
-  const rows = Number(msg.rows);
-  return cols >= MIN_TERM_COLS && cols <= MAX_TERM_COLS && rows >= MIN_TERM_ROWS && rows <= MAX_TERM_ROWS;
+  return isUsableTerminalSize({ cols: Number(msg.cols), rows: Number(msg.rows) });
 }
 
 // Send a JSON frame if the socket is still there and open. Null-tolerant so the PTY

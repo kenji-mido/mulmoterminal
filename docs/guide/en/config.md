@@ -1234,6 +1234,7 @@ What you write here appears in an empty cell's launcher under **OR RUN A SCRIPT*
 | `launchers` | The launch commands that appear under "OR LAUNCH" in a grid cell. Only what you add — a plain shell is already the launcher's **Shell** toggle |
 | `quickCommands` | Phrases the **phone** offers as chips on a session (`{ label, text, agents? }`). Tapping one fills the input box — it is not sent until you press send. `agents` scopes a chip to `"claude"` / `"codex"` / `"shell"`; omit it to offer the chip everywhere. Editable in Settings → **Phone quick commands** |
 | `prRepos` | The repos targeted by the cross-repo PR/Issue view |
+| `repoDirs` | Which local clone work on a repo starts in, when you keep several side by side: `{ "acme/web": "/Users/you/src/web" }`. Only the choice is stored — which clones exist is re-derived from `cwdPresets`, so adding one needs no second edit, and an entry that no longer names a clone of that repo is ignored |
 | `buttons` / `chips` | Header buttons / chips (merged with project settings → [Customizing the header](#header)) |
 | `providers` | Anthropic-compatible backends (→ [Using another model via OpenRouter](providers.html)) |
 | `soundFile` | The fallback notification sound for every kind (absolute path to an audio file; also settable from the modal) |

@@ -11,10 +11,13 @@ const PASTE_START = "\x1b[200~";
 const PASTE_END = "\x1b[201~";
 const CR = "\r";
 const ESC_CR = "\x1b\r";
-// Matches DRAFT_SUBMIT_MS / DRAFT_SETTLE_MS / DRAFT_FALLBACK_MS in draft-injection.ts.
+// Matches DRAFT_SUBMIT_MS / DRAFT_SETTLE_MS / DRAFT_QUIET_MS / TRUST_QUIET_MS in draft-injection.ts.
 const SUBMIT_MS = 150;
 const SETTLE_MS = 250;
+// The quiet window the drift fallback waits for. Named FALLBACK_MS from when it measured elapsed
+// time since the spawn rather than silence.
 const FALLBACK_MS = 6000;
+const TRUST_QUIET_MS = 60_000;
 
 // What claude prints once its input box is up — the marker the scanner waits for.
 const READY = "shift+tab to cycle";
@@ -158,5 +161,71 @@ describe("attachDraftInjection", () => {
     scan(READY);
     vi.advanceTimersByTime(FALLBACK_MS + SETTLE_MS + SUBMIT_MS);
     expect(t.writes).toEqual([]);
+  });
+
+  // All of these come from driving the real flow in a worktree the app had just created and
+  // reading the pane with `tmux capture-pane`. Every one of them passed unit tests while the
+  // feature silently dropped the seed.
+  describe("a directory claude has not seen (#1173)", () => {
+    const TRUST = "Is this a project you created or one you trust?\n 1. Yes, I trust this folder";
+
+    // The bug that made every attempt look identical: claude in a fresh worktree takes longer to
+    // reach any input box than one fixed window, so a since-spawn fallback typed into a
+    // half-drawn screen and marked itself done. The draft was gone before there was anywhere to
+    // put it.
+    it("does not type while the screen is still being drawn", () => {
+      const t = target();
+      const scan = attachDraftInjection(t.entry, undefined, "edit me", () => ESC_CR);
+      // A booting TUI streams continuously; each burst pushes the wait out.
+      for (let elapsed = 0; elapsed < FALLBACK_MS * 3; elapsed += FALLBACK_MS / 2) {
+        scan("still drawing");
+        vi.advanceTimersByTime(FALLBACK_MS / 2);
+      }
+      expect(t.writes).toEqual([]);
+    });
+
+    it("holds the draft while the trust dialog is up, far past the normal window", () => {
+      const t = target();
+      const scan = attachDraftInjection(t.entry, undefined, "edit me", () => ESC_CR);
+      scan(TRUST);
+      // Nothing more paints until the user answers, so the normal quiet window must not make it
+      // type — this is the one quiet screen that is not readiness.
+      vi.advanceTimersByTime(FALLBACK_MS * 5);
+      expect(t.writes).toEqual([]);
+    });
+
+    // Long, not forever. The stream cannot prove the dialog is gone — answering it repaints the
+    // dialog and the new screen in one burst and then output stops — so a scanner that held out
+    // for proof never typed at all. Bounded degradation beats a draft that is silently dropped.
+    it("gives up holding after the long window, rather than never typing", () => {
+      const t = target();
+      const scan = attachDraftInjection(t.entry, undefined, "edit me", () => ESC_CR);
+      scan(TRUST);
+      vi.advanceTimersByTime(TRUST_QUIET_MS);
+      expect(t.writes).toEqual([`${PASTE_START}edit me${PASTE_END}`]);
+    });
+
+    it("types once the dialog is answered and the screen settles, with no marker at all", () => {
+      const t = target();
+      const scan = attachDraftInjection(t.entry, undefined, "edit me", () => ESC_CR);
+      scan(TRUST);
+      vi.advanceTimersByTime(FALLBACK_MS * 5);
+      // Answering repaints. v2.1.220's manual mode never prints the marker, so quiet is all
+      // there is to go on.
+      scan("manual mode on · ? for shortcuts");
+      vi.advanceTimersByTime(FALLBACK_MS);
+      expect(t.writes).toEqual([`${PASTE_START}edit me${PASTE_END}`]);
+    });
+
+    // The marker still wins when it does appear: it means the input box exists, so there is no
+    // reason to sit through the quiet window.
+    it("types on the marker even in the same burst that repaints the answered dialog", () => {
+      const t = target();
+      const scan = attachDraftInjection(t.entry, undefined, "edit me", () => ESC_CR);
+      scan(TRUST);
+      scan(`${TRUST}\n\n${READY}`);
+      vi.advanceTimersByTime(SETTLE_MS);
+      expect(t.writes).toEqual([`${PASTE_START}edit me${PASTE_END}`]);
+    });
   });
 });

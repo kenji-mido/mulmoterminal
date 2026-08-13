@@ -29,6 +29,7 @@ import { launcherCommandWithGuiMcp } from "../session/launcher-gui-mcp.js";
 import { codexGuiMcpServers } from "../session/mcp-config.js";
 import { registeredGuiMcpGroups } from "../infra/gui-mcp-registration.js";
 import { TOOL_GROUPS, type ToolGroup } from "../../common/toolGroups.js";
+import { parseTerminalSize, type TerminalSize } from "../../common/terminalSize.js";
 import { handleCommandFrame } from "../session/pty-connection.js";
 import { closeWithError } from "../session/ws-frames.js";
 import { ProviderRefusedError } from "../session/provider-env.js";
@@ -109,11 +110,32 @@ export function workspaceFromUrl(url: URL): { cwd: string; unusable: string | nu
   return { cwd: request.cwd, unusable: null };
 }
 
-function wsConnectionContext(req: WsUpgradeRequest): { url: URL; requested: string | null; cwd: string; unusable: string | null } {
+function wsConnectionContext(req: WsUpgradeRequest): { url: URL; requested: string | null; cwd: string; unusable: string | null; size: TerminalSize | null } {
   const url = new URL(req.url ?? "/", "http://localhost");
   const raw = url.searchParams.get("session");
   const requested = raw && SESSION_ID_RE.test(raw) ? raw : null;
-  return { url, requested, ...workspaceFromUrl(url) };
+  return { url, requested, size: sizeFromUrl(url), ...workspaceFromUrl(url) };
+}
+
+/** The geometry the browser has already fitted its terminal to, or null when it sent none it can
+ *  stand behind — the same bounds a `resize` frame is held to. */
+function sizeFromUrl(url: URL): TerminalSize | null {
+  return parseTerminalSize(url.searchParams.get("cols"), url.searchParams.get("rows"));
+}
+
+// Put the browser's geometry on the pty the moment it exists. A pty is created at the server's
+// default and learns the real size from the first `resize` frame — a SEPARATE message, which has to
+// survive the spawn to be heard at all (#1178). Applying the URL's size here means the program
+// inside never draws a frame at a size nobody asked for, and a lost first frame costs nothing.
+// A reattach gets it too: the browser's current size is what that session should be at.
+function applyClientSize(term: IPty, size: TerminalSize | null, tag: string, sessionId: string): void {
+  if (!size) return;
+  try {
+    term.resize(size.cols, size.rows);
+  } catch (err) {
+    // e.g. the pty exited between the spawn and here — the resize frame will retry it.
+    console.warn(`[ws/${tag}] ${sessionId}: initial resize dropped: ${messageOf(err)}`);
+  }
 }
 
 // A directory was named and cannot be entered. For a FRESH start that is the end of it: this is
@@ -170,7 +192,7 @@ async function startRunTerminal(deps: WsRouteDeps, ws: WebSocket, url: URL): Pro
   if (refuseUnusableWorkspace(ws, "run", unusable, null)) return;
   const resolved = await resolveRunTarget(url, cwd);
   if (!resolved) return closeWithError(ws, "Command not found — check your config / script.json.");
-  beginRunTerminal(deps, ws, resolved);
+  beginRunTerminal(deps, ws, resolved, sizeFromUrl(url));
 }
 
 // Spawn the ephemeral Run PTY and wire its lifecycle. resolveRunTarget above can await a git
@@ -179,7 +201,7 @@ async function startRunTerminal(deps: WsRouteDeps, ws: WebSocket, url: URL): Pro
 // is ephemeral: no reattach, no reap/grace, so its only kill is the close handler below). Bail
 // if the socket has since closed — the same guard handleClaudeConnection applies after its
 // keychain refresh.
-export function beginRunTerminal(deps: WsRouteDeps, ws: WebSocket, resolved: { command: string; cwd: string }): void {
+export function beginRunTerminal(deps: WsRouteDeps, ws: WebSocket, resolved: { command: string; cwd: string }, size: TerminalSize | null = null): void {
   if (ws.readyState !== ws.OPEN) return;
   let term: IPty;
   try {
@@ -188,6 +210,7 @@ export function beginRunTerminal(deps: WsRouteDeps, ws: WebSocket, resolved: { c
     console.error(`[ws/run] failed to start command: ${messageOf(err)}`);
     return closeWithError(ws, `Failed to start the command: ${messageOf(err)}`);
   }
+  applyClientSize(term, size, "run", "command");
   ws.on("message", (raw) => handleCommandFrame(term, raw));
   ws.on("close", () => {
     try {
@@ -268,7 +291,7 @@ async function handleClaudeConnection(deps: WsRouteDeps, ws: WebSocket, req: WsU
   // ?session=<id> resumes an existing conversation; absent => fresh session. For
   // new sessions we generate the id ourselves (--session-id) so the server always
   // knows the current session's id, even before any file exists.
-  const { url, requested, cwd, unusable } = wsConnectionContext(req);
+  const { url, requested, cwd, unusable, size } = wsConnectionContext(req);
   if (refuseUnusableWorkspace(ws, "claude", unusable, requested)) return;
   // A bad id is never silently reused — closing the socket without a replacement
   // makes the client auto-reconnect with the same bad id forever, so we warn and
@@ -307,7 +330,10 @@ async function handleClaudeConnection(deps: WsRouteDeps, ws: WebSocket, req: WsU
   // PTY's own cwd (NOT this request's ?cwd=, which it ignores); otherwise it's the
   // resolved cwd the new PTY will spawn in.
   const reportedCwd = live?.cwd ?? cwd;
-  ws.send(JSON.stringify({ type: "session", id: sessionId, cwd: reportedCwd }));
+  // Buffered from here, like every other terminal endpoint: the browser's first frame is the
+  // terminal's geometry and it arrives while this handler may still be awaiting the Keychain — /ws
+  // was the one route that let it fall on the floor (#1178, see early-frames.ts).
+  const early = announceSession(ws, sessionId, reportedCwd);
 
   // Before touching the Keychain for a sandbox session, refresh it if the token expired
   // (macOS refreshes into the Keychain, not the file — so an untouched export can be a
@@ -317,40 +343,29 @@ async function handleClaudeConnection(deps: WsRouteDeps, ws: WebSocket, req: WsU
     // Renewal can block for seconds (it drives the host CLI). If the client vanished
     // during that window the close handlers aren't wired yet, so spawning now would
     // leak a PTY nobody reaps — bail instead.
-    if (ws.readyState !== ws.OPEN) {
-      console.log(`[ws] client left during credential refresh — abandoning ${sessionId}`);
-      return;
-    }
+    if (!clientStillConnected(ws, "claude", sessionId, early)) return;
   }
 
-  let entry: PtyEntry;
-  try {
+  // A provider refusal already says exactly what is wrong with the directory's config (#579), and a
+  // refused spawn already names the binary and the PATH it searched, or the directory that is gone
+  // (#1063, #1078); a generic hint would bury either.
+  const startFailureMessage = (err: unknown): string =>
+    err instanceof ProviderRefusedError || err instanceof SpawnRefusedError ? err.message : `Failed to start Claude: ${messageOf(err)}`;
+
+  startAndWire(deps, ws, { id: sessionId, tag: "claude", early, startFailureMessage, size }, () => {
     // A sandbox session's credential is snapshotted at spawn onto its mounted per-session
     // file. On reconnect, re-sync it from the (now-refreshed) Keychain so a token that
     // rotated since spawn doesn't leave the reattached session stuck at "Not logged in".
     if (live?.sandbox) writeSandboxCredentials(sessionId);
-    entry = live ? deps.reattachPty(live, ws, sessionId) : deps.spawnClaudePty(sessionId, resume, ws, { cwd, attachGuiMcp, launch });
-  } catch (err) {
-    // A failed spawn (claude missing, or node-pty's spawn-helper not executable)
-    // must close just this connection — never crash the whole server.
-    console.error(`[ws] failed to start session ${sessionId}: ${messageOf(err)}`);
-    // A provider refusal already says exactly what is wrong with the directory's config
-    // (#579), and a refused spawn already names the binary and the PATH it searched, or the
-    // directory that is gone (#1063, #1078); a generic hint would bury either.
-    if (err instanceof ProviderRefusedError || err instanceof SpawnRefusedError) return closeWithError(ws, err.message);
-    closeWithError(ws, `Failed to start Claude: ${messageOf(err)}`);
-    return;
-  }
-
-  // Single view (gui) = the attached session IS the actively-viewed pane, so mark it
-  // read. A grid dev-terminal cell (gui=0) is only "viewed" once focused/zoomed (the
-  // client then sends a `view` frame), so it stays inactive here and can surface
-  // blocked/done while the user is on another cell or page.
-  entry.active = attachGuiMcp;
-  if (entry.active) deps.setWaiting(sessionId, false);
-
-  ws.on("message", (raw) => deps.handleClientFrame(entry, ws, raw, sessionId));
-  ws.on("close", () => deps.handleClientClose(entry, ws, sessionId));
+    const entry = live ? deps.reattachPty(live, ws, sessionId) : deps.spawnClaudePty(sessionId, resume, ws, { cwd, attachGuiMcp, launch });
+    // Single view (gui) = the attached session IS the actively-viewed pane, so mark it
+    // read. A grid dev-terminal cell (gui=0) is only "viewed" once focused/zoomed (the
+    // client then sends a `view` frame), so it stays inactive here and can surface
+    // blocked/done while the user is on another cell or page.
+    entry.active = attachGuiMcp;
+    if (entry.active) deps.setWaiting(sessionId, false);
+    return entry;
+  });
 }
 
 // Command terminal: resolve the command SERVER-SIDE (the browser never sends a raw command) and run it
@@ -385,7 +400,14 @@ export const startFailureMessageFor =
 export function startAndWire(
   deps: Pick<WsRouteDeps, "handleClientFrame" | "handleClientClose">,
   ws: WebSocket,
-  session: { id: string; tag: string; early: EarlyFrames<{ toString(): string }>; startFailureMessage: (err: unknown) => string },
+  session: {
+    id: string;
+    tag: string;
+    early: EarlyFrames<{ toString(): string }>;
+    startFailureMessage: (err: unknown) => string;
+    /** The browser's own geometry, off the connect URL. */
+    size?: TerminalSize | null;
+  },
   start: () => PtyEntry,
 ): void {
   let entry: PtyEntry;
@@ -396,6 +418,7 @@ export function startAndWire(
     session.early.discard();
     return closeWithError(ws, session.startFailureMessage(err));
   }
+  applyClientSize(entry.term, session.size ?? null, session.tag, session.id);
   const deliver = (raw: { toString(): string }) => deps.handleClientFrame(entry, ws, raw, session.id);
   ws.on("message", deliver);
   ws.on("close", () => deps.handleClientClose(entry, ws, session.id));
@@ -425,7 +448,7 @@ function clientStillConnected(ws: WebSocket, tag: string, sessionId: string, ear
 // lifecycle (reattach + reap grace + handleClientClose) but with no hooks/transcript,
 // and is marked a dev-terminal session so it stays out of the chat sidebar.
 async function handleLaunchConnection(deps: WsRouteDeps, ws: WebSocket, req: WsUpgradeRequest) {
-  const { url, requested, cwd, unusable } = wsConnectionContext(req);
+  const { url, requested, cwd, unusable, size } = wsConnectionContext(req);
   if (refuseUnusableWorkspace(ws, "launch", unusable, requested)) return;
   const index = parseIndexParam(url.searchParams.get("launcher"));
   const shell = url.searchParams.get("shell") === "1";
@@ -447,14 +470,16 @@ async function handleLaunchConnection(deps: WsRouteDeps, ws: WebSocket, req: WsU
   // A launcher runs the user's own command line, so there is no binary pre-flight — but its cwd
   // is checked like every other spawn's, and that refusal is already a sentence.
   const startFailureMessage = startFailureMessageFor("the launch command");
-  startAndWire(deps, ws, { id: sessionId, tag: "launch", early, startFailureMessage }, () => startLaunchEntry(deps, sessionId, ws, live, launchCommand, cwd));
+  startAndWire(deps, ws, { id: sessionId, tag: "launch", early, startFailureMessage, size }, () =>
+    startLaunchEntry(deps, sessionId, ws, live, launchCommand, cwd),
+  );
 }
 
 // codex terminal (?cwd=<dir>, ?session=<id> to reattach/resume). ?gui=0 (grid dev terminal) runs
 // codex without the GUI MCP and keeps it out of the sidebar; absent (single view) attaches the GUI
 // MCP so codex drives the GUI panel like claude.
 async function handleCodexConnection(deps: WsRouteDeps, ws: WebSocket, req: WsUpgradeRequest) {
-  const { url, requested, cwd, unusable } = wsConnectionContext(req);
+  const { url, requested, cwd, unusable, size } = wsConnectionContext(req);
   if (refuseUnusableWorkspace(ws, "codex", unusable, requested)) return;
   const attachGuiMcp = url.searchParams.get("gui") !== "0";
 
@@ -470,7 +495,7 @@ async function handleCodexConnection(deps: WsRouteDeps, ws: WebSocket, req: WsUp
   if (!clientStillConnected(ws, "codex", sessionId, early)) return;
 
   const startFailureMessage = startFailureMessageFor("codex");
-  startAndWire(deps, ws, { id: sessionId, tag: "codex", early, startFailureMessage }, () =>
+  startAndWire(deps, ws, { id: sessionId, tag: "codex", early, startFailureMessage, size }, () =>
     startCodexEntry(deps, ws, { sessionId, live, resumeRolloutId, cwd, attachGuiMcp, mcpGroups }),
   );
 }
@@ -520,7 +545,7 @@ function startAntigravityEntry(deps: WsRouteDeps, ws: WebSocket, start: Antigrav
 // in the DIRECTORY, so every session there reaches whatever that directory registered — `?gui=0`
 // only keeps a grid dev terminal out of the sidebar.
 async function handleAntigravityConnection(deps: WsRouteDeps, ws: WebSocket, req: WsUpgradeRequest) {
-  const { url, requested, cwd, unusable } = wsConnectionContext(req);
+  const { url, requested, cwd, unusable, size } = wsConnectionContext(req);
   if (refuseUnusableWorkspace(ws, "antigravity", unusable, requested)) return;
   const attachGuiMcp = url.searchParams.get("gui") !== "0";
   // Before resolving, not after: the mapping this reads lives on disk, and a reconnect that
@@ -541,7 +566,7 @@ async function handleAntigravityConnection(deps: WsRouteDeps, ws: WebSocket, req
   // the socket and replays the buffer, so returning early here left a reloaded terminal printing
   // output while ignoring every keystroke, and never detaching or reaping on close.
   const startFailureMessage = startFailureMessageFor("Antigravity");
-  startAndWire(deps, ws, { id: sessionId, tag: "antigravity", early, startFailureMessage }, () =>
+  startAndWire(deps, ws, { id: sessionId, tag: "antigravity", early, startFailureMessage, size }, () =>
     startAntigravityEntry(deps, ws, { sessionId, live, resumeConversationId, cwd, attachGuiMcp, mcpGroups }),
   );
 }

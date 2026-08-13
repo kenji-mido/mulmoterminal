@@ -87,4 +87,19 @@ describe("RateLimitGauge", () => {
     expect(wrapper.text()).not.toContain("83");
     wrapper.unmount();
   });
+
+  // #1161, as reported: `claude usage n/a | 7d 71%`. The 71% is Codex's — the note only appears
+  // when Claude has nothing — but nothing on the row said so, and it was read as Claude's 7d with
+  // the 5h missing. Whether a figure belongs to the tool beside it is not something a reader can
+  // work out, so this pins the MARK reaching the screen and not merely the flag.
+  it("says whose the surviving figure is when a note stands in for the other", async () => {
+    const codex = { fiveHour: null, sevenDay: { usedPercentage: 71, resetsAt_sec: inHours(50) } };
+    const wrapper = await showGauge(body({ codex, claudeProbe: "no-report" }));
+
+    expect(note(wrapper).exists()).toBe(true);
+    expect(wrapper.text()).toContain("7d 71%");
+    expect(wrapper.get("[aria-label]").attributes("aria-label")).toContain("codex rate limit");
+    expect(wrapper.findComponent({ name: "AgentMark" }).props("agent")).toBe("codex");
+    wrapper.unmount();
+  });
 });

@@ -46,6 +46,10 @@ export interface AppConfig {
   sounds: Partial<Record<NotifyKind, string>>;
   // GitHub repos ("owner/repo") whose open PRs the cross-repo PR view aggregates.
   prRepos: string[];
+  // Which local clone work on a repo starts in, for the repos the user has chosen one for (#1172).
+  // Only the CHOICE is stored: which clones exist at all is derived from `cwdPresets` on every
+  // read, so adding a clone needs no second edit and a stale entry cannot invent a directory.
+  repoDirs: Record<string, string>;
   // User-defined launch commands offered in the grid cell launcher (label + command).
   launchers: Launcher[];
   // Phrases the phone offers as chips on a session's terminal view (#830), optionally
@@ -227,6 +231,22 @@ export function sanitizeRepos(input: unknown): string[] {
   return [...seen];
 }
 
+// Which local clone a repo's work starts in (#1172), for the repos where the user has chosen.
+// Absolute paths only, for the same reason as the presets: a relative one would be resolved
+// against the server's own cwd and name a directory nobody picked. The path is NOT checked for
+// existence here — a clone on an unmounted volume must survive a config round trip, and the read
+// side drops a recording that no longer names a clone of that repo anyway.
+export function sanitizeRepoDirs(input: unknown): Record<string, string> {
+  if (!isRecord(input)) return {};
+  const out: Record<string, string> = {};
+  for (const [repo, dir] of Object.entries(input)) {
+    if (!REPO_RE.test(repo.trim()) || typeof dir !== "string") continue;
+    const resolved = dir.trim();
+    if (path.isAbsolute(resolved)) out[repo.trim()] = resolved;
+  }
+  return out;
+}
+
 // Keep only a non-empty ABSOLUTE path; anything else (relative, blank, non-string)
 // clears the custom sound. Absolute-only matches the documented contract and stops
 // /api/sound from resolving a relative value against the server's cwd.
@@ -335,6 +355,7 @@ export const emptyConfig = (): AppConfig => ({
   soundKinds: [...DEFAULT_SOUND_KINDS],
   sounds: {},
   prRepos: [],
+  repoDirs: {},
   launchers: [],
   quickCommands: [],
   userMcpServers: [],
@@ -378,6 +399,7 @@ function sanitizeAppConfig(raw: unknown): AppConfig {
     soundKinds: sanitizeSoundKinds(o.soundKinds),
     sounds: sanitizeSounds(o.sounds),
     prRepos: sanitizeRepos(o.prRepos),
+    repoDirs: sanitizeRepoDirs(o.repoDirs),
     launchers: sanitizeLaunchers(o.launchers),
     quickCommands: sanitizeQuickCommands(o.quickCommands),
     userMcpServers: sanitizeUserMcpServers(o.userMcpServers),
@@ -481,6 +503,7 @@ export function mergeConfigUpdate(base: AppConfig, body: Record<string, unknown>
     soundKinds: updated("soundKinds", sanitizeSoundKinds, base.soundKinds),
     sounds: updated("sounds", sanitizeSounds, base.sounds),
     prRepos: updated("prRepos", sanitizeRepos, base.prRepos),
+    repoDirs: updated("repoDirs", sanitizeRepoDirs, base.repoDirs),
     launchers: updated("launchers", sanitizeLaunchers, base.launchers),
     quickCommands: updated("quickCommands", sanitizeQuickCommands, base.quickCommands),
     userMcpServers: updated("userMcpServers", sanitizeUserMcpServers, base.userMcpServers),
@@ -515,6 +538,7 @@ export function toPublicAppConfig(config: AppConfig): AppConfig {
     soundKinds: config.soundKinds,
     sounds: config.sounds,
     prRepos: config.prRepos,
+    repoDirs: config.repoDirs,
     launchers: config.launchers,
     quickCommands: config.quickCommands,
     userMcpServers: config.userMcpServers,
