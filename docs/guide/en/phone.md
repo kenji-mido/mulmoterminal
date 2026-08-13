@@ -2,7 +2,7 @@
 title: From your phone
 layout: default
 parent: English
-nav_order: 10
+nav_order: 11
 description: Watch, reply to, and start Claude Code / Codex sessions from your phone.
 ---
 

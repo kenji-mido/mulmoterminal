@@ -52,6 +52,18 @@ export function resolveReattachableId(
   return { reattachId, sessionId };
 }
 
+/**
+ * Whether a connection CONTINUES a session rather than creating one.
+ *
+ * Both resolvers above keep the requested id exactly when something can serve it — a live pty, a
+ * surviving tmux session, a transcript or rollout to resume — and mint a fresh one otherwise. So
+ * the id they settled on already answers this, and reading it here is what stops a caller from
+ * re-listing those cases and missing one: the first version of the worktree limit did exactly
+ * that, omitting tmux-only liveness, which reads a reconnect after a server restart as a brand-new
+ * session (#1208, caught by Codex).
+ */
+export const isContinuingSession = (requested: string | null, sessionId: string): boolean => requested !== null && requested === sessionId;
+
 /** Whether a launcher connection may start at all. A reattach needs no launcher index —
  *  the pty already IS the chosen program — and the header's "new terminal" button runs the
  *  default shell with no configured index. Otherwise the index must name a real launcher,

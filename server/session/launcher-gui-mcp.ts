@@ -11,6 +11,7 @@
 // has to be a narrow, recognisable case rather than a guess.
 import path from "node:path";
 import { shellQuoteFor } from "../config/header-resolve.js";
+import { isTerminalAgent, type SessionAgent } from "../../common/sessionAgent.js";
 import type { GuiMcpServer } from "../agents/codex-args.js";
 
 // The program a command line runs, without its directory or a Windows extension: `codex`,
@@ -20,6 +21,26 @@ import type { GuiMcpServer } from "../agents/codex-args.js";
 export function launcherProgram(command: string): string {
   const [first = ""] = command.trim().split(/\s+/, 1);
   return path.basename(first).replace(/\.(exe|cmd|bat)$/i, "");
+}
+
+/**
+ * Whether a launcher's command line runs one of the agents, so the one-session-per-worktree limit
+ * applies to it as it does to the agent toggle (#1207, raised by Codex on #1208: a launcher
+ * configured as `codex` was a way around the limit the three agent endpoints enforce).
+ *
+ * Only the agents. A launcher is also how `yarn dev`, `lazygit` or `htop` is run, and refusing
+ * THOSE in a worktree an agent is working in would take away the reason to have a worktree open at
+ * all. Same recogniser as the MCP injection above, so a command line reads as codex to both or to
+ * neither — and an unrecognised shape (`FOO=1 codex`, a wrapper script) is allowed, which is the
+ * direction that never blocks someone from their own tools.
+ */
+export const launcherRunsAgent = (command: string): boolean => isTerminalAgent(launcherProgram(command));
+
+/** What to RECORD for a launcher's session. The same answer as above, as the session kind — so a
+ *  launcher's codex is the worktree's occupant afterwards, not only refused on the way in. */
+export function launcherAgent(command: string): SessionAgent {
+  const program = launcherProgram(command);
+  return isTerminalAgent(program) ? program : "shell";
 }
 
 /**

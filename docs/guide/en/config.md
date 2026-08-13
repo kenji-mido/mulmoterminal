@@ -2,7 +2,7 @@
 title: Configuration
 layout: default
 parent: English
-nav_order: 4
+nav_order: 5
 description: Configuring MulmoTerminal — the settings modal, per-project colours and names, Enter behaviour, notification sounds, fonts, keyboard shortcuts and environment variables, findable by symptom.
 ---
 
@@ -87,7 +87,7 @@ setups see sixteen.
 | **Pull request repos** | The repos aggregated by the cross-repo PR/Issue view (`owner/repo`) |
 | **Launch commands** | Commands you can launch besides the agents in a grid cell (`{ label, command }`). A plain shell needs no entry — the launcher's **Shell** toggle opens `$SHELL` unconfigured |
 | **Phone quick commands** | Phrases offered as chips on the **phone's** terminal view. Tapping one fills the input box; it is sent when you press send (`quickCommands`) |
-| **MCP servers** | Your own MCP servers to add to single-view sessions |
+| **MCP servers** | Your own HTTP MCP servers (`userMcpServers`), merged into the sessions that carry the full GUI MCP — a cell whose working directory is the **workspace**, and any session the server starts on its own (the phone, a scheduled task). A cell in a project directory loads its own MCP config instead |
 | **Cost (estimated)** | Estimated cost readouts for Session / Today / Month |
 | **Keyboard shortcuts** | What is bound to what, read-only. **Everything starts as Not set** — "Set up shortcuts…" starts the `mulmoterminal-keys` skill to bind them in `keymap` (→ [Keyboard shortcuts](#keymap)) |
 | **Help & user guide** | Links into this guide |
@@ -1030,9 +1030,6 @@ it — you used to need an editor that can open a multi-folder workspace. Claude
   agent — otherwise the flag looks applied while the agent sees nothing. Up to 16 entries.
 - Listing the project itself does nothing: it is already the session's working directory.
 - **Claude only.** codex has no equivalent flag and ignores the key.
-- **In the Docker sandbox** each directory is bind-mounted at the same absolute path, so the
-  grant is real inside the container. That widens the sandbox beyond the workspace on
-  purpose — the list comes from your own config file, which is the same act as granting access.
 
 Take effect on the next session in that directory.
 

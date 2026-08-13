@@ -24,7 +24,7 @@ interface Item {
 }
 
 // Mount the composable with a history fetch we control the timing of.
-function mountFeed(respond: () => Promise<{ ok: boolean; json?: () => Promise<unknown> }>) {
+function mountFeed(respond: () => Promise<{ ok: boolean; json?: () => Promise<unknown> }>, reconcile?: (items: Item[], incoming: Item) => "store" | "skip") {
   const items = ref<Item[]>([]);
   const sessionId = ref<string | null>("s1");
   vi.stubGlobal("fetch", vi.fn().mockImplementation(respond));
@@ -37,6 +37,7 @@ function mountFeed(respond: () => Promise<{ ok: boolean; json?: () => Promise<un
           historyKey: "items",
           channel: (id) => `feed:${id}`,
           identify: (item) => item.id,
+          ...(reconcile ? { reconcile } : {}),
         });
         return () => h("div");
       },
@@ -128,5 +129,95 @@ describe("useSessionFeed — overlapping loads for the same session", () => {
     gates[0]?.(); // the stale one, arriving last
     await flushPromises();
     expect(items.value.map((item) => item.id)).toEqual(["new"]);
+  });
+});
+
+// The `reconcile` seam, added for the collection placeholder: a pair the identity cannot
+// relate — the card the browser seeds at spawn and the agent's own card for the same
+// collection — where the second must REPLACE the first rather than sit beside it.
+describe("useSessionFeed — reconcile", () => {
+  // Stand-in for reconcileCollectionCard, spelled in this spec's own Item shape: text is the
+  // subject, and a "seed:" id marks the placeholder.
+  const supersede = (items: Item[], incoming: Item): "store" | "skip" => {
+    const same = (candidate: Item) => candidate.text === incoming.text;
+    if (incoming.id.startsWith("seed:")) return items.some((candidate) => same(candidate) && !candidate.id.startsWith("seed:")) ? "skip" : "store";
+    const index = items.findIndex((candidate) => same(candidate) && candidate.id.startsWith("seed:"));
+    if (index >= 0) items.splice(index, 1);
+    return "store";
+  };
+
+  it("removes what an arriving item supersedes, instead of showing both", async () => {
+    const { items } = mountFeed(async () => ({ ok: true, json: async () => ({ items: [{ id: "seed:1", text: "invoices" }] }) }), supersede);
+    await vi.waitFor(() => expect(items.value.map((i) => i.id)).toEqual(["seed:1"]));
+
+    deliver("feed:s1", { id: "agent", text: "invoices" });
+    expect(items.value.map((i) => i.id)).toEqual(["agent"]);
+  });
+
+  it("drops an item the callback skips, without disturbing the list", async () => {
+    const { items } = mountFeed(async () => ({ ok: true, json: async () => ({ items: [{ id: "agent", text: "invoices" }] }) }), supersede);
+    await vi.waitFor(() => expect(items.value).toHaveLength(1));
+
+    deliver("feed:s1", { id: "seed:1", text: "invoices" });
+    expect(items.value.map((i) => i.id)).toEqual(["agent"]);
+  });
+
+  // Codex, on PR #1186. The buffer of live arrivals is replayed by IDENTITY once the history
+  // lands, and the pair `reconcile` relates has two different identities — so a placeholder the
+  // live path already superseded came back with the snapshot, and the cell showed two cards.
+  it("does not resurrect a superseded item when the history lands", async () => {
+    let release!: (value: { ok: boolean; json: () => Promise<unknown> }) => void;
+    const { items } = mountFeed(() => new Promise((resolve) => (release = resolve)), supersede);
+    await nextTick();
+
+    // Both arrive while the history request is in flight — the normal case here: the panel opens
+    // as the cell is placed, and the seed and the agent land moments apart.
+    deliver("feed:s1", { id: "seed:1", text: "invoices" });
+    deliver("feed:s1", { id: "agent", text: "invoices" });
+    expect(items.value.map((i) => i.id)).toEqual(["agent"]);
+
+    release({ ok: true, json: async () => ({ items: [] }) });
+    // Flushed rather than polled: waitFor would pass on the state BEFORE the merge ran, so the
+    // resurrection this guards against would never be observed (same trap as above).
+    await flushPromises();
+    await flushPromises();
+    expect(items.value.map((i) => i.id)).toEqual(["agent"]);
+  });
+
+  it("drops a placeholder the SNAPSHOT still holds when the real one arrived live", async () => {
+    // The mirror case: the history was read before the real card was stored, so the SNAPSHOT is
+    // the stale one. Merging by identity keeps both; the rule has to run over the merge.
+    let release!: (value: { ok: boolean; json: () => Promise<unknown> }) => void;
+    const { items } = mountFeed(() => new Promise((resolve) => (release = resolve)), supersede);
+    await nextTick();
+
+    deliver("feed:s1", { id: "agent", text: "invoices" });
+    release({ ok: true, json: async () => ({ items: [{ id: "seed:1", text: "invoices" }] }) });
+    await flushPromises();
+    await flushPromises();
+
+    expect(items.value.map((i) => i.id)).toEqual(["agent"]);
+  });
+
+  it("keeps a skipped item out of the replay too", async () => {
+    let release!: (value: { ok: boolean; json: () => Promise<unknown> }) => void;
+    const { items } = mountFeed(() => new Promise((resolve) => (release = resolve)), supersede);
+    await nextTick();
+
+    deliver("feed:s1", { id: "agent", text: "invoices" });
+    deliver("feed:s1", { id: "seed:1", text: "invoices" }); // skipped: the real card is already up
+    release({ ok: true, json: async () => ({ items: [] }) });
+    await flushPromises();
+    await flushPromises();
+
+    expect(items.value.map((i) => i.id)).toEqual(["agent"]);
+  });
+
+  it("leaves unrelated items alone", async () => {
+    const { items } = mountFeed(async () => ({ ok: true, json: async () => ({ items: [{ id: "seed:1", text: "invoices" }] }) }), supersede);
+    await vi.waitFor(() => expect(items.value).toHaveLength(1));
+
+    deliver("feed:s1", { id: "agent", text: "clients" });
+    expect(items.value.map((i) => i.id)).toEqual(["seed:1", "agent"]);
   });
 });

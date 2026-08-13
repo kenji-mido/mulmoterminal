@@ -1,17 +1,16 @@
 // Starting a claude session in a PTY and wiring it to the browser. The most entangled
-// piece of index.ts (#548 step 3c): it spans the sandbox decision, the CLI args, the
+// piece of index.ts (#548 step 3c): it spans the CLI args, the
 // sidebar's optimistic row, the draft typed into the input box, and teardown on exit.
 import type { WebSocket } from "ws";
-import { CLAUDE_CWD, PORT } from "../config/env.js";
+import { CLAUDE_CWD, PORT, isWorkspaceCwd } from "../config/env.js";
 import { guiMcpEnv } from "./mcp-config.js";
 import { getUserMcpServers, getPrWorkdirFooter, getAppendSystemPrompt, getTerminalSubmit } from "../config/config-routes.js";
 import { submitSequenceForAgent } from "../../common/terminalSubmit.js";
-import { SANDBOX_HOST } from "../infra/sandbox.js";
 import { buildClaudeArgs } from "../agents/claude-args.js";
 import { claudeAdapter } from "../agents/claude.js";
 import { appendedSystemPrompt } from "../agents/appended-prompt.js";
 import { hookedSessions, knownSessions, launchChoices, ptys, resetSessionToolGroups } from "./registry.js";
-import { ptySpawn, ptyWouldReattach, sandboxWouldRun, spawnSandboxEntry } from "./pty-spawn.js";
+import { ptySpawn, ptyWouldReattach } from "./pty-spawn.js";
 import { ptyExitLine, ptyStartLine } from "./pty-exit-log.js";
 import { attachDraftInjection } from "./draft-injection.js";
 import { sendExitAndClose, sendFrame } from "./ws-frames.js";
@@ -33,6 +32,9 @@ export interface SpawnClaudeOptions {
   // opens it. Mutually exclusive with `draft`.
   initialPrompt?: string;
   cwd?: string;
+  /** NOT a grid cell — the single view, or a chat spawned with no cell of its own yet. It is one
+   *  of the two ways a session earns the full GUI MCP; the other is running in the workspace
+   *  itself, which is derived from `cwd` rather than passed (see fullGuiMcp below). */
   attachGuiMcp?: boolean;
   // Typed into the input box once claude is ready, NOT submitted — the user reviews it.
   draft?: string;
@@ -74,7 +76,7 @@ function newSessionTitle(seed: string | undefined): string {
 //
 // Its own function because the spawn body is at its line budget and this is one decision made
 // from three sources, not part of spawning.
-function resolveSessionBackend(input: { cwd: string; sessionId: string; launch?: DirModelChoice | undefined; canResume: boolean; sandbox: boolean }) {
+function resolveSessionBackend(input: { cwd: string; sessionId: string; launch?: DirModelChoice | undefined; canResume: boolean }) {
   const dir = loadDirConfig(input.cwd);
   const choice = effectiveChoice({
     launch: input.launch,
@@ -82,12 +84,41 @@ function resolveSessionBackend(input: { cwd: string; sessionId: string; launch?:
     dir: { provider: dir.provider, model: dir.model },
     resuming: input.canResume,
   });
-  const resolved = requireResolution(resolveProvider(choice, getProviders(), process.env, input.sandbox));
+  const resolved = requireResolution(resolveProvider(choice, getProviders(), process.env));
   // Remembered so a later resume continues on the backend this session began on, instead of
   // silently moving to the directory's default mid-conversation.
   if (input.launch) launchChoices.set(input.sessionId, choice);
   return { dir, resolved };
 }
+
+/**
+ * The directories this session may read outside its cwd. A file dropped into the session is saved
+ * outside it, so the agent would meet a permission prompt on every Read without this. Granted at
+ * spawn rather than per drop because `--add-dir` is a spawn-time flag: a session already running
+ * cannot be given one later.
+ *
+ * Its own function for the same reason resolveSessionBackend is — the spawn body is at its line
+ * budget, and this is a value derived from two sources rather than part of spawning.
+ */
+function sessionAddDirs(sessionId: string, configured: string[] | null | undefined): string[] | null | undefined {
+  const dropsDirectory = ensureDropsDir(sessionId);
+  return dropsDirectory ? [...(configured ?? []), dropsDirectory] : configured;
+}
+
+/**
+ * Does this session carry the WHOLE GUI MCP on `--mcp-config`, the way the single view always
+ * has? Two ways to earn it, and they are different facts that used to be one flag:
+ *
+ *   `attachGuiMcp` — not a grid cell at all: the single view, or a chat spawned with no cell yet.
+ *   the CWD        — a grid cell running in the workspace itself. Starting a terminal there is
+ *                    all but the same thing as running the single view, and that equivalence is
+ *                    what lets the single view eventually go.
+ *
+ * A cell in a PROJECT directory is false on both counts and takes exactly the branch it takes
+ * today. Named and exported rather than left inline because that last sentence is the invariant
+ * this whole change is written around, and an invariant nothing can assert is just a hope.
+ */
+export const carriesFullGuiMcp = (attachGuiMcp: boolean, cwd: string | undefined): boolean => attachGuiMcp || isWorkspaceCwd(cwd);
 
 export function createClaudeSpawner(deps: SpawnDeps) {
   // Spawn a fresh claude PTY for this session, register it, and wire its output /
@@ -96,50 +127,41 @@ export function createClaudeSpawner(deps: SpawnDeps) {
   // reattaches.
   function spawnClaudePty(sessionId: string, resume: string | null, ws: WebSocket | null, options: SpawnClaudeOptions = {}): PtyEntry {
     const { initialPrompt, cwd = CLAUDE_CWD, attachGuiMcp = true, draft, launch } = options;
-    // attachGuiMcp picks the MCP mode (see buildClaudeArgs): the single view (default)
-    // attaches the GUI MCP + --strict-mcp-config (main's classic behavior); the grid's
-    // dev terminals attach neither, so the user's + project's MCP servers load normally.
+    const fullGuiMcp = carriesFullGuiMcp(attachGuiMcp, cwd);
+    // fullGuiMcp picks the MCP mode (see buildClaudeArgs, and its own doc for who earns it): the
+    // GUI MCP + --strict-mcp-config; a project-directory cell attaches neither, so its own load.
     // Only --resume when the session has an on-disk transcript — claude doesn't write
     // a session's .jsonl until its first prompt, so a started-but-unused session can't
     // be resumed; we restart fresh (reusing the id via --session-id) instead.
-    // Sandbox only the SINGLE-VIEW interactive session: attachGuiMcp=true excludes grid
-    // dev terminals (?gui=0), and ws!==null excludes hidden background/translation workers.
-    // Falls back to the host spawn if the Docker daemon isn't reachable.
-    const sandbox = sandboxWouldRun(attachGuiMcp) && ws !== null;
     const canResume = resume !== null && sessionExistsOnDisk(resume, cwd);
 
-    const { dir, resolved } = resolveSessionBackend({ cwd, sessionId, launch, canResume, sandbox });
+    const { dir, resolved } = resolveSessionBackend({ cwd, sessionId, launch, canResume });
 
-    // A file dropped into this session is saved outside its cwd, so the agent would meet a
-    // permission prompt on every Read without this. Granted here rather than per drop because
-    // --add-dir is a spawn-time flag: a session already running cannot be given one later.
-    const dropsDirectory = ensureDropsDir(sessionId);
-    const addDirs = dropsDirectory ? [...(dir.addDirs ?? []), dropsDirectory] : dir.addDirs;
+    const addDirs = sessionAddDirs(sessionId, dir.addDirs);
 
-    const hookSettings = deps.hookSettingsJson(sandbox ? SANDBOX_HOST : "localhost", sessionId, resolved.env);
-    const mcpJson = deps.mcpConfigJson(sessionId, sandbox ? SANDBOX_HOST : "127.0.0.1", sandbox);
-    // File-ized only when it is actually passed (attachGuiMcp), so a cell that never carries
+    const hookSettings = deps.hookSettingsJson("localhost", sessionId, resolved.env);
+    const mcpJson = deps.mcpConfigJson(sessionId, "127.0.0.1");
+    // File-ized only when it is actually passed (fullGuiMcp), so a cell that never carries
     // the GUI MCP leaves no file behind for reap to clean up.
-    const mcpConfig = attachGuiMcp ? mcpConfigArgument(sessionId, mcpJson) : mcpJson;
+    const mcpConfig = fullGuiMcp ? mcpConfigArgument(sessionId, mcpJson) : mcpJson;
     const args = buildClaudeArgs({
       model: resolved.model,
       sessionId,
       resume,
       canResume,
-      // In the sandbox the hooks + GUI MCP are reached over host.docker.internal. A
-      // provider session's settings carry its token, so they go to a 0600 file instead of
+      // A provider session's settings carry its token, so they go to a 0600 file instead of
       // argv — see session-settings.ts.
       settings: settingsArgument(sessionId, hookSettings, Object.keys(resolved.env).length > 0),
       permissionMode: deps.permissionMode,
-      attachGuiMcp,
+      attachGuiMcp: fullGuiMcp,
       mcpConfig,
-      // Single view: auto-allow the GUI tools + the user's own configured MCP servers
-      // (mcp__<id>), so their tools don't trip a permission prompt on every call.
-      // Grid: no --mcp-config at all, so there is nothing of ours to name — except the tool
-      // GROUPS the directory may have registered itself, which we pre-approve blind
-      // (see GRID_MCP_TOOLS). The user's own servers keep their normal prompts there, since
+      // Carrying the whole GUI MCP: auto-allow the GUI tools + the user's own configured MCP
+      // servers (mcp__<id>), so their tools don't trip a permission prompt on every call.
+      // A project-directory cell: no --mcp-config at all, so there is nothing of ours to name —
+      // except the tool GROUPS the directory may have registered itself, which we pre-approve
+      // blind (see GRID_MCP_TOOLS). The user's own servers keep their normal prompts there, since
       // that path never went through our allowlist before.
-      allowedTools: attachGuiMcp ? [deps.guiMcpTools, ...getUserMcpServers().map((s) => `mcp__${s.id}`)].join(",") : deps.gridMcpTools,
+      allowedTools: fullGuiMcp ? [deps.guiMcpTools, ...getUserMcpServers().map((s) => `mcp__${s.id}`)].join(",") : deps.gridMcpTools,
       addDirs,
       appendedPrompt: sessionAppendedPrompt(cwd, dir.appendSystemPrompt),
     });
@@ -172,12 +194,11 @@ export function createClaudeSpawner(deps: SpawnDeps) {
     // survives it is an over-reported group on a session that lost it — the next genuinely new
     // process clears that, whereas the reverse mistake could not be undone at all.
     function resetToolGroupsUnlessReattaching(): void {
-      if (sandbox || !ptyWouldReattach(sessionId, true)) resetSessionToolGroups(sessionId);
+      if (!ptyWouldReattach(sessionId, true)) resetSessionToolGroups(sessionId);
     }
 
     function spawnEntry(): PtyEntry {
       resetToolGroupsUnlessReattaching();
-      if (sandbox) return spawnSandboxEntry(sessionId, args, cwd, ws, addDirs);
       const spawnEnv = { unset: resolved.unset, env: guiMcpEnv(sessionId, PORT), binEnvVar: claudeAdapter.binEnvVar };
       const { term, tmux, reattached } = ptySpawn(sessionId, deps.claudeBin, args, cwd, true, spawnEnv);
       console.log(ptyStartLine({ agent: "claude", pid: term.pid, cwd, tmux, reattached, sessionId, note: canResume ? `resume ${resume}` : null }));

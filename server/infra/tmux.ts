@@ -414,6 +414,32 @@ export function tmuxAttachedClientCount(id: string): number | null {
   return r.status === 0 ? parseAttachedClientCount(r.stdout) : null;
 }
 
+// `list-clients -F '#{session_name}'` → how many clients each of OUR sessions carries. One line
+// per client, so a session with two holders appears twice and one with none does not appear at
+// all. Names outside our prefix belong to nobody here.
+export function parseTmuxClientSessions(stdout: string): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const line of splitLines(stdout)) {
+    const name = line.trim();
+    if (!name.startsWith(SESSION_PREFIX)) continue;
+    const id = name.slice(SESSION_PREFIX.length);
+    counts.set(id, (counts.get(id) ?? 0) + 1);
+  }
+  return counts;
+}
+
+// Every session's client count in ONE call, unlike tmuxAttachedClientCount's per-session probe.
+// A list of rows is the caller here (the launcher's worktrees, its resume list), and one spawn per
+// row is what this exists to avoid.
+//
+// Null — not an empty map — when tmux could not answer (not installed, no server running yet), so
+// the caller can tell "nobody holds these" from "nobody could say"; isSessionAttached is where
+// that distinction is spent.
+export function tmuxAttachedCounts(): Map<string, number> | null {
+  const r = tmux(["list-clients", "-F", "#{session_name}"]);
+  return r.status === 0 ? parseTmuxClientSessions(r.stdout) : null;
+}
+
 // Ids of sessions that survived (e.g. across a crash), for startup visibility.
 export function tmuxListSessionIds(): string[] {
   const r = tmux(["list-sessions", "-F", "#{session_name}"]);

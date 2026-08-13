@@ -8,11 +8,15 @@ description: A browser-terminal cockpit for running several AI coding agents (Cl
 
 # MulmoTerminal Guide (English)
 
-> **[What's new in 3.0.0](v3.0.0.html)** — the **PRs & Issues** view becomes somewhere to *start*: one button on an issue row cuts an `issue/<number>-…` worktree and opens Claude in it with the issue already in the input box. Plus **parking** a terminal you do not need to watch (as of 2026-07-31)
+> **[What's new in 4.0.0](v4.0.0.html)** — the **single terminal view is removed**: the grid is the app, focusing on one agent is zooming its cell, and the content surfaces get a **Collections** door in the toolbar. A **worktree now runs one agent session** and refuses a second. The Docker sandbox is gone (as of 2026-08-01)
 >
 > **Follow us on X** — new releases and features are announced **in Japanese** on X: [Singularity Society (@SingularitySoci)](https://x.com/SingularitySoci). That is where everything ships first, so [**follow @SingularitySoci**](https://x.com/SingularitySoci) to hear about it as it lands.
 >
+> **[❓ Frequently asked questions](faq.html)** — how it compares to VS Code, Cursor, tmux panes, Claude Squad and Conductor; **whether your existing Claude Code sessions carry over**; Windows; token cost. The things people ask before trying it
+>
 > **Something looks wrong?** Type `/mulmoterminal-bug-report` in any session. The bundled skill hears the symptom out, checks your **real** config and version to see whether it is configuration or by design, searches the existing issues — and only helps you file one if none of that explains it, with the environment collected and secrets masked.
+>
+> **Want to change something?** **Open an issue, not a pull request** — outside PRs are closed automatically, whatever their size. That is not a brush-off: the bug we cannot reach from our machines and the idea we have not had are exactly what we are short of. See [CONTRIBUTING.md](https://github.com/receptron/mulmoterminal/blob/main/CONTRIBUTING.md).
 
 **Run a whole team of AI coding agents (Claude Code / Codex) in parallel, on one board** —
 MulmoTerminal is the cockpit for that — a browser terminal, so it doesn't care which editor you use.
@@ -165,7 +169,6 @@ remaining row unlocks one feature.
 | Optional | `codex` | [Codex sessions](basics.html#claude-and-codex) in a cell, alongside Claude | `npm i -g @openai/codex` |
 | Optional | `ffmpeg` | video rendering from the [GUI panel](features.html)'s mulmo-script plugin | `brew install ffmpeg` · `sudo apt install ffmpeg` |
 | Optional | `ollama` | [claude-ollama](claude-ollama.html) — Claude Code against a fully local model | [ollama.com/download](https://ollama.com/download) |
-| Optional | `docker` | the experimental Docker sandbox (single view; can't be combined with [OpenRouter](providers.html)) | [docs.docker.com](https://docs.docker.com/get-started/get-docker/) |
 
 The server starts without the non-required ones — you only lose that row's feature. To see
 what's missing on this machine, run **`npx mulmoterminal@latest init`**: it reports every tool above,

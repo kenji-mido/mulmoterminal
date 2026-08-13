@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { resolveSession, type SessionFacts, resolveReattachableId, canStartLauncher } from "../../../server/session/session-resolve.js";
+import { resolveSession, type SessionFacts, resolveReattachableId, canStartLauncher, isContinuingSession } from "../../../server/session/session-resolve.js";
 
 const FIXED = "fresh-minted-id";
 const mint = () => FIXED;
@@ -72,6 +72,38 @@ describe("resolveReattachableId", () => {
 
   it("never reattaches without a requested id, whatever the facts say", () => {
     expect(resolveReattachableId(null, facts({ hasLivePty: true, tmuxAlive: true, canResume: true }), mint)).toEqual({ reattachId: null, sessionId: "FRESH" });
+  });
+});
+
+// What the worktree limit asks before refusing a spawn: is this connection creating a session, or
+// continuing one? Reading it off the resolved id is the point — Codex caught the first version
+// re-listing the ways a session can continue and missing tmux-only liveness, which turns a
+// reconnect after a server restart into a "new session" and refuses it (#1208).
+describe("isContinuingSession", () => {
+  it("is false when nothing was requested", () => {
+    expect(isContinuingSession(null, "FRESH")).toBe(false);
+  });
+
+  it("is false when the requested id could not be served and a fresh one was minted", () => {
+    const { sessionId } = resolveReattachableId("REQ", { hasLivePty: false, tmuxAlive: false, canResume: false }, () => "FRESH");
+    expect(isContinuingSession("REQ", sessionId)).toBe(false);
+  });
+
+  // The regression: a session that outlived the server exists only in tmux — no live pty, and for
+  // codex/antigravity no cold-resume id either, since `tmux new-session -A` reattaches the running
+  // program instead.
+  it("is true for a tmux-only reattach", () => {
+    const { sessionId } = resolveReattachableId("REQ", { hasLivePty: false, tmuxAlive: true, canResume: false }, () => "FRESH");
+    expect(isContinuingSession("REQ", sessionId)).toBe(true);
+  });
+
+  it("is true for every other way a session continues", () => {
+    const mintFresh = () => "FRESH";
+    const claude = resolveSession("REQ", facts({ tmuxAlive: true }), mintFresh);
+    expect(isContinuingSession("REQ", claude.sessionId)).toBe(true);
+    expect(isContinuingSession("REQ", resolveSession("REQ", facts({ hasLivePty: true }), mintFresh).sessionId)).toBe(true);
+    expect(isContinuingSession("REQ", resolveSession("REQ", facts({ onDisk: true }), mintFresh).sessionId)).toBe(true);
+    expect(isContinuingSession("REQ", resolveReattachableId("REQ", { hasLivePty: false, tmuxAlive: false, canResume: true }, mintFresh).sessionId)).toBe(true);
   });
 });
 

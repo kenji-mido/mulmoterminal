@@ -8,11 +8,15 @@ description: 複数の AI コーディングエージェント（Claude Code / C
 
 # MulmoTerminal ガイド（日本語）
 
-> **[3.0.0 で変わったこと](v3.0.0.html)** — **PRs & Issues** が「読む」場所から「**始める**」場所になった。issue の行のボタン1つで `issue/<番号>-…` の worktree を切り、issue を入力欄に入れた Claude を開く。あわせて、見なくていいターミナルを**沈める**機能（2026-07-31 時点）
+> **[4.0.0 で変わったこと](v4.0.0.html)** — **単一ターミナルビューを廃止**。グリッドがアプリそのものになり、1 体に集中するのは「セルを拡大する」こと。コンテンツ系の画面にはツールバーの **Collections** という入口ができた。**worktree は 1 セッションだけ**を持ち、2 つ目の起動を断る。Docker サンドボックスも削除（2026-08-01 時点）
 >
 > **X で最新情報を発信しています** — 新バージョンや新機能のお知らせは X の [Singularity Society（@SingularitySoci）](https://x.com/SingularitySoci) で流していきます。ここが一番早いので、[**@SingularitySoci をフォローしてください！**](https://x.com/SingularitySoci)
 >
+> **[❓ よくある質問（FAQ）](faq.html)** — VS Code / Cursor / tmux 分割との違い、**既存の Claude Code セッションはそのまま使えるのか**、Windows で動くのか、トークン代はどうなるのか。試す前に聞かれることをまとめました
+>
 > **「なんか変」と思ったら** — セッションで `/mulmoterminal-bug-report` と打ってください。同梱スキルが症状を聞き、**実際の**設定とバージョンを読んで仕様・設定で説明がつかないかを先に確かめ、既知の issue を検索し、それでも残ったものだけを報告にまとめます（環境情報は自動収集、鍵はマスク）。
+>
+> **直したいところがあったら** — **pull request ではなく issue を立ててください。**外部からの PR は規模によらず自動でクローズされます。冷たく聞こえるかもしれませんが、いま足りないのは手ではなく、こちらの環境では踏めないバグと、思いついていないアイデアです。詳細は [CONTRIBUTING.md](https://github.com/receptron/mulmoterminal/blob/main/CONTRIBUTING.md)。
 
 **複数の AI コーディングエージェント（Claude Code / Codex）を、1 つのボードで並行して回す**——
 MulmoTerminal はそのためのコックピットです。ブラウザのターミナルなので、エディタを選びません。
@@ -161,7 +165,6 @@ MulmoTerminal は普段の開発ツールを操縦するコックピットなの
 | 任意 | `codex` | セルで [Codex セッション](basics.html#claude-and-codex)を Claude と並べて動かす | `npm i -g @openai/codex` |
 | 任意 | `ffmpeg` | [GUI パネル](features.html)の mulmo-script プラグインからの動画生成 | `brew install ffmpeg` · `sudo apt install ffmpeg` |
 | 任意 | `ollama` | [claude-ollama](claude-ollama.html) — 完全ローカルのモデルで Claude Code を動かす | [ollama.com/download](https://ollama.com/download) |
-| 任意 | `docker` | 実験的な Docker サンドボックス（単一ビュー・[OpenRouter](providers.html) とは併用不可） | [docs.docker.com](https://docs.docker.com/get-started/get-docker/) |
 
 必須以外が無くてもサーバは起動します（その行の機能が使えないだけ）。今のマシンに何が
 足りないかは **`npx mulmoterminal@latest init`** で確認できます。上の全コマンドをチェックしたうえで、

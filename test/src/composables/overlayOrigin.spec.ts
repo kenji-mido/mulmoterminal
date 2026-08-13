@@ -20,7 +20,7 @@ const OVERLAYS = [
 
 describe("overlay return-to-origin", () => {
   beforeEach(async () => {
-    await router.push({ name: "chat" });
+    await router.push("/terminals");
     await settle();
   });
 
@@ -37,25 +37,20 @@ describe("overlay return-to-origin", () => {
     expect(router.currentRoute.value.name).toBe("terminals");
   });
 
-  it.each(OVERLAYS)("%s: opened from the single view, closes back to it", async (_name, open, close, routeName) => {
-    open();
-    await settle();
-    expect(router.currentRoute.value.name).toBe(routeName);
-
-    close();
-    await settle();
-    expect(router.currentRoute.value.name).toBe("chat");
-  });
-
-  // A direct load / a history-driven entry carries no origin. Chat is the fallback, NOT the
-  // literal "/" — that path is the default-view entry and would land on the grid (#883).
-  it.each(OVERLAYS)("%s: falls back to chat when the entry carries no origin", async (_name, _open, close, routeName) => {
+  // A direct load / a history-driven entry carries no origin.
+  //
+  // The fallback is the GRID (#1190). It used to be chat, on the reasoning that resolving by name
+  // rather than the literal "/" avoided landing on the grid (#883) — and that reasoning inverted
+  // once the grid became the view the single one is being replaced by. It is also where "/" itself
+  // sends a fresh load, and it now decides what renders BEHIND an origin-less overlay: pointing it
+  // at chat would put the single view back on screen under one opened from a link.
+  it.each(OVERLAYS)("%s: falls back to the grid when the entry carries no origin", async (_name, _open, close, routeName) => {
     await router.push(`/${routeName === "collections" ? "collections" : routeName}`);
     await settle();
 
     close();
     await settle();
-    expect(router.currentRoute.value.name).toBe("chat");
+    expect(router.currentRoute.value.name).toBe("terminals");
   });
 
   // Moving around INSIDE an overlay must not re-record the origin as the overlay itself,
@@ -111,7 +106,9 @@ describe("overlay return-to-origin", () => {
     expect(router.currentRoute.value.name).toBe("terminals");
   });
 
-  it("carries the single view across an overlay-to-overlay hop", async () => {
+  // The origin survives a hop between overlays: grid → collections → accounting closes back to
+  // the grid, not to the collection browser it passed through.
+  it("carries the origin across an overlay-to-overlay hop", async () => {
     browseGotoIndex("collection");
     await settle();
     accountingViewOpen();
@@ -119,6 +116,6 @@ describe("overlay return-to-origin", () => {
 
     accountingViewClose();
     await settle();
-    expect(router.currentRoute.value.name).toBe("chat");
+    expect(router.currentRoute.value.name).toBe("terminals");
   });
 });

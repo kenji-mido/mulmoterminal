@@ -10,8 +10,9 @@ import type { Express } from "express";
 import { CLAUDE_CWD, PORT } from "../config/env.js";
 import { messageOf } from "../errors.js";
 import { isRecord } from "../../common/isRecord.js";
-import { backgroundMarkers } from "../session/registry.js";
+import { backgroundMarkers, markFailedWorker, markUnplacedSession } from "../session/registry.js";
 import { runWithHiddenMarker } from "../session/hiddenMarker.js";
+import { registerCompletionHook } from "../session/completion-hooks.js";
 import { backgroundChatMessage, parseBackgroundChat, spawnModeFor } from "../session/background-chat.js";
 import { registeredGuiMcpGroups } from "../infra/gui-mcp-registration.js";
 import { TOOL_GROUPS } from "../../common/toolGroups.js";
@@ -63,7 +64,42 @@ export function mountPluginRoutes(app: Express, deps: PluginRouteDeps): void {
         else if (mode === "claude-draft") deps.spawnClaudePty(sessionId, null, null, { draft: message });
         else deps.spawnClaudePty(sessionId, null, null, { initialPrompt: message });
       });
-      if (hidden) deps.registerBackgroundSession(sessionId);
+      // Visible: somebody should be able to SEE this session. The browser that asked for it
+      // places it immediately (useChatLauncher), and this covers every other caller — an agent
+      // calling the tool from another session, with no tab open at all. The mark is cleared the
+      // moment any cell attaches, so the browser-placed case does not come back as a duplicate.
+      if (!hidden) markUnplacedSession(sessionId, agent);
+      if (hidden) {
+        deps.registerBackgroundSession(sessionId);
+        // A hidden worker is invisible on purpose, which is exactly why a FAILED one needs a
+        // record: nothing pulls the user's attention and nothing waits to be clicked, so the
+        // failure is otherwise never learned. The completion hook is the existing seam for it —
+        // a finished turn reports success first and this never fires; reaching teardown with no
+        // Stop means no turn ever completed (see completion-hooks.ts for why first-answer-wins).
+        //
+        // Registered AFTER the spawn: a launch that threw has no session to report on, and would
+        // leave a hook nothing will ever fire or clear. Safe against the feeds engine's own hook
+        // (last writer wins) because that dispatches through its own spawner, never this route.
+        //
+        // CLAUDE ONLY, and that is a correctness limit rather than a scope choice. The single
+        // success signal a PTY-hosted agent gives us is a finished turn reported by Claude Code's
+        // Stop hook (hook-routes.ts); codex and antigravity have no hook mechanism at all, so
+        // they can never report success. Registering for them would mean every SUCCESSFUL hidden
+        // codex worker reached reap unreported and was marked failed — a signal that is wrong
+        // more often than it is right, which is worse than the silence it replaced.
+        // (Codex, PR #1188.) A non-claude hidden worker therefore keeps today's behaviour: no
+        // failure signal. Giving it one needs a completion signal for those agents first.
+        //
+        // RECORDS ONLY, and synchronously. Announcing is reap's job: it publishes one teardown
+        // message carrying this outcome, which is what keeps the generic notification from
+        // racing ahead of the specific one. Staying synchronous is therefore a contract, not an
+        // implementation detail — reap reads the flag immediately after firing this.
+        if (agent === "claude") {
+          registerCompletionHook(sessionId, ({ didError }) => {
+            if (didError) markFailedWorker(sessionId);
+          });
+        }
+      }
     } catch (err) {
       console.error(`[spawnBackgroundChat] failed for ${sessionId}: ${messageOf(err)}`);
       return res.json({ message: `Failed to spawn a new session: ${messageOf(err)}` });

@@ -1,4 +1,7 @@
 import { shallowRef } from "vue";
+import type { PartialWorkerStatus } from "../../common/workerStatus";
+import type { PartialSessionOccupancy, SessionOccupancy } from "../../common/sessionOccupancy";
+import type { TerminalAgent } from "../../common/sessionAgent";
 
 // What the launch form can offer for the directory currently in its field: the sessions that can
 // be resumed there, the script.json entries that can be run there, and the worktrees the
@@ -10,7 +13,10 @@ import { shallowRef } from "vue";
 // - a read that fails clears the list, instead of leaving the previous directory's rows standing
 //   under a name they don't belong to.
 
-export interface ResumableSession {
+/** A row the launcher can resume into a cell. `hidden` / `failed` / `attached` come from shared
+ *  wire types the server fills — see common/workerStatus.ts and common/sessionOccupancy.ts for
+ *  why they are OPTIONAL on this side. */
+export interface ResumableSession extends PartialWorkerStatus, PartialSessionOccupancy {
   id: string;
   title: string;
   mtime: number;
@@ -27,6 +33,11 @@ export interface Worktree {
   branch: string | null;
   task: string;
   dirty: boolean;
+  /** The one session this worktree has, and whether anything is holding it — a worktree is one
+   *  branch, so the row starts / resumes / refuses on the strength of this (#1207). Absent when
+   *  there is none, and `undefined` from a server that predates the field, which reads the same
+   *  way: start a fresh one. */
+  session?: (SessionOccupancy & { id: string; agent: TerminalAgent }) | null;
 }
 
 export interface ResumableList {

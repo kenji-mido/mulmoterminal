@@ -4,6 +4,212 @@ Release notes for MulmoTerminal, mirrored from the [GitHub Releases](https://git
 
 This file records **what changed and why**. For **how to actually use** a new feature, a release may also ship a dated setup guide — linked at the top of its entry, and written as a snapshot of that moment. The living reference is always the [guide](https://receptron.github.io/mulmoterminal/).
 
+## mulmoterminal@4.0.0 — 2026-08-01
+
+> **Setup guide:** [The grid is the app](https://receptron.github.io/mulmoterminal/guide/en/v4.0.0.html) — written at release time. ([日本語](https://receptron.github.io/mulmoterminal/guide/ja/v4.0.0.html))
+
+**Two things are removed in this release**, which is why it is a major: the **single terminal
+view** and the **Docker sandbox**. Nothing you configured stops working — a stale `.env` key is
+ignored rather than an error, and `/chat` lands on the grid instead of 404ing — but a screen you
+may have bookmarked is gone, and everything it did now happens in the grid.
+
+### The single terminal view is gone — the grid is the app (#1201, #1202)
+
+Until 3.x there were two screens: the grid for supervising many agents, and a **single view** at
+`/chat` for focusing on one, with its own toolbar, its own session sidebar and the GUI panel
+(Canvas) on its right. That view is deleted. **Focusing on one agent is zooming its cell**, which
+gives it the window and opens the Canvas beside it.
+
+Everything the single view owned has a home:
+
+| The single view had | It lives in |
+|---|---|
+| the settings modal | the grid's own |
+| Canvas / tools panes | beside a zoomed cell |
+| the session list | the cockpit roster, and the launcher's resume list for sessions off the grid |
+| collections, wiki, accounting | the **Collections** door in the toolbar |
+| one terminal filling the window | a zoomed cell |
+
+**The content surfaces needed a door first**, and that is the other half of #1201. Collections,
+Feeds, Wiki, Accounting and Files were gated to the single view — deliberately, because the grid is
+for supervising agents and each of them replaces the whole screen anyway. With the view gone they
+would have had no way in at all. **Collections now sits beside Grid** in the toolbar as a peer of
+the views, and reveals Feeds / Wiki / Accounting / Files once you are inside: one button rather
+than five, so a terminal user's row does not grow by four for surfaces they are not in. **Pull
+requests is deliberately not content** — work under supervision belongs with the terminals.
+
+Two things were found while building that door. **Feeds was showing the collection list** (the
+overlay rendered the collections index for any index route, and that component filters feeds out);
+it renders the feeds view now. **Pinned shortcuts moved** onto the row the overlay already had,
+replacing the agent picker that was about to be deleted with the toolbar holding it — icon-only,
+with the name still reaching a screen reader and the pointer.
+
+**If you bookmarked `/chat`**, it now resolves like any other unknown URL: through `/`, to the
+grid. Nothing errors.
+
+### Everything the single view owned had to exist in the grid first (#1186, #1187, #1188, #1189, #1193)
+
+The deletion above was the last step of a sequence, and each step is a change you can see.
+
+**A workspace cell now carries the full GUI MCP (#1187).** One wire flag used to decide two
+unrelated things — *is this a grid cell* and *does it carry the GUI MCP* — and the single view only
+looked special because it answered both the same way. They are separated: `?gui=0` still means "a
+grid cell", while the MCP decision reads `attachGuiMcp || isWorkspaceCwd(cwd)`. A terminal started
+in the grid at the workspace is now all but the same thing as running the single view was. A cell in
+a project directory is unchanged and loads its own MCP config.
+
+**A chat started from a collection arrives with that collection already on the Canvas (#1186).**
+You were looking at something when you started the chat, and that is the context; there is no
+reason to blank it for the round trip until the agent calls `presentCollection`. The target is read
+from the seed prompt rather than the route, because the route is already gone by the time the spawn
+resolves — and the prompt travels with the chat.
+
+**Sessions the server started while nothing was open are adopted by the grid (#1189).** An agent
+calling `spawnBackgroundChat`, a scheduled task firing at 3am, the phone — three ways a *visible*
+chat starts with no tab open. They used to land in the chat sidebar, which no longer exists. The
+server marks them, and the next grid to load picks them up as cells.
+
+**Full-screen surfaces open over the grid instead of replacing it (#1193).** Every overlay is
+route-driven, so opening one left `/terminals` and the grid came off screen — with the single view
+mounting behind it. The grid is now the view underneath, which is what let the view behind it be
+deleted at all.
+
+**Background workers are findable, and ungrouped tools stopped being hidden (#1188).** A truly
+background chat has no cell and no bold row, so the launcher's session list is where it is found:
+it is labelled `background`, and one that **ended without finishing a turn** is labelled `● failed`
+— the only thing here nobody was ever told about, since it ran invisibly and pulled no attention on
+the way out. Separately, `narrowedTools` used "is this a grid cell?" as a stand-in for "does it have
+only what its directory registered?", which stopped being true once an adopted chat reported tool
+groups and a workspace cell got the whole GUI MCP; an ungrouped tool such as `spawnBackgroundChat`
+was dropped from cells that could call it.
+
+### One worktree, one session (#1207, #1208)
+
+A worktree is tied to a branch, so a second agent in it is not isolation — it is two agents editing
+one working tree. The launcher's worktree rows are now three-valued: **start** one when the worktree
+has none, **resume** the one it has, and **refuse** (`in use`) when that session is open somewhere.
+
+**The refusal follows the directory, not the row.** The same worktree pasted into the working
+directory field or picked from a recent-dir chip will not launch either, and the **server** refuses
+the spawn whichever client asks — so a path spelled another way (a trailing slash, a symlink) does
+not slip past. The limit is on **agents**: Claude, Codex or Antigravity, including an **OR LAUNCH**
+command that runs one of them. A Shell, and a launcher running anything else, stays free — a
+worktree an agent is working in is exactly where you want `yarn dev` or `lazygit`.
+
+**"Open somewhere" is now the server's answer.** The launcher used to decide it from the current
+page's own grid, which is blind to a second browser tab and to a second `mulmoterminal` process on
+the same machine — the two ways a running session got taken over with nothing warning first. The
+server answers from its own PTY table plus one `tmux list-clients` call.
+
+**What you lose:** the resume list used to let you confirm your way past `● open` and take a session
+over, detaching whoever had it. It now refuses instead. Close it where it is open, then resume it
+here.
+
+### Google Calendar collections actually sync (#1191, #1203, #1205)
+
+MulmoTerminal never registered the Google Calendar sync task, so a collection that declared
+`googleCalendar` had neither its **pull** nor its **autoPush** run. If you also ran MulmoClaude on
+the same workspace, that host did it — which made this "works for people running both, silently
+does nothing for MulmoTerminal alone". The task is registered now.
+
+`@mulmoclaude/core` went to 1.12.0 for the prerequisite: a per-calendar `lastSyncedAt` in the
+workspace, so `syncDueCalendarCollections` really does only the due ones rather than all of them.
+
+### A cell tells you its PR merged, and offers to tidy up (#1026, #1185)
+
+The pieces for cleaning up a worktree were already there; what was missing was anything that said
+the PR had merged, so the worktree and its session sat until somebody noticed. A merged worktree
+cell now says so in its header, and the button opens the **existing keep / remove confirmation** —
+no new destructive path, and the same guards on unsaved and unpushed work as before. It shows only
+on worktree cells (an ordinary cell has no room to clean up), has no default action, and the ×
+dismisses it per PR number rather than forever.
+
+### A scheduled task's chat is a background worker (#1196)
+
+A task the scheduler runs — the dev worklog, or anything else you have configured — now behaves
+like every other session nobody started by hand: it sits behind the **Background** filter rather
+than among your chats, never renders bold, and **takes no grid cell**.
+
+It was already half of one. Scheduled sessions have always been put on the background retention,
+whose whole reason is that nobody is waiting for them to finish; only the chat list still called
+them yours. The two agree now.
+
+The grid part is the one you would have noticed: a visible spawn is adopted as a cell the next time
+the grid loads, so an hourly task meant a cell per firing, indefinitely, without anyone asking for
+a terminal.
+
+**A failed one still tells you.** Being quiet is right while it works and wrong when it dies, so a
+scheduled task that ends without completing a turn is recorded and shows as `● failed` in the
+launcher's session list — the same signal a hidden `spawnBackgroundChat` gets. Turn the sound on
+under Settings → Notifications if you want to hear it.
+
+**Web Push still fires for it.** Being quiet means out of the chat list and off the grid, not
+unreachable: a background session's finished turn normally never reaches the phone, on the
+reasoning that it is not a real user task — and a task you configured to run while you are away is
+exactly that. If you have push on, a scheduled task notifies as before.
+
+**What you lose:** a scheduled task's session no longer goes bold/unread in the chat list when it
+finishes. If you were watching for that, look under the Background filter, in the launcher's list
+for the workspace — or turn push on.
+
+### The Docker sandbox is removed (#1194)
+
+`MULMOTERMINAL_SANDBOX` and its three companion variables — `MULMOTERMINAL_SANDBOX_IMAGE`,
+`SANDBOX_MOUNT_CONFIGS`, `SANDBOX_SSH_AGENT_FORWARD` — no longer do anything, and
+`Dockerfile.sandbox` is gone. **Setting them is now silently ignored rather than an error**, so an
+existing `.env` keeps working; the session simply runs on the host, which is what it already did
+whenever Docker was unavailable.
+
+**If you ever ran it**, startup now cleans up after it once: the `~/.mulmoterminal/sandbox`
+directory (which held an exported Keychain credential per session) and any `mulmoterminal-<id>`
+container still running with your workspace mounted. Both had only one deleter and it went with the
+feature. If you never turned the sandbox on, nothing runs — not even a `docker` call.
+
+It was opt-in, macOS-only, and only ever wrapped the single-view session — which this same release
+removes. Keeping the sandbox would have meant porting it to the grid, which is the opposite of the
+point: it existed to contain ONE interactive session, and the grid runs many.
+
+Nothing else changes. With the flag unset — the default, and how it shipped — every session already
+took the host path this now takes unconditionally.
+
+### Fixes
+
+- **A chat started from the Collection UI sat about ten seconds before its prompt appeared**
+  (#1206). The prompt is typed into Claude's input box rather than passed as an argument (a long
+  one overflows tmux's command-length limit), and the code waited for a readiness marker that never
+  painted — for two reasons. The marker string was stale (`shift+tab to cycle` returns zero hits in
+  the Claude Code 2.1.220 binary), and it was matched against raw PTY bytes, where a TUI redraws by
+  positioning the cursor between words so the characters never arrive adjacent. Every spawn fell
+  through to the 6-second quiet fallback. Markers are now matched against a squashed form of the
+  stream, with escapes and whitespace removed.
+- **A session started from the phone did not appear on the host until you forced a route change**
+  (#1204). The server marked it for adoption and the grid only adopted on *arriving* at
+  `/terminals` — which never happens while you are already sitting there. It now adopts on the push
+  as well.
+
+### Internal
+
+- `@mulmoclaude/core` to **1.11.0** and then **1.12.0**, with five other dependencies refreshed
+  alongside (#1190, #1203). 1.11.0 added two required fields to the calendar public types, which
+  four spec fixtures had to follow; 1.12.0 needed no source change at all.
+- The sandboxed-view **CDN allowlist** is imported from core instead of hand-maintained here
+  (#1192). That list decides the `Content-Security-Policy` for every LLM-generated HTML this host
+  serves, core declares itself its owner, and MulmoTerminal was the one host not following the
+  declaration. The served headers were measured byte-identical before and after.
+
+### Documentation
+
+- **An FAQ page, in both languages** (#1209) — 21 questions each, written from four user
+  interviews and the questions people actually ask before trying it: how it compares to VS Code,
+  Cursor, tmux panes, Claude Squad and Conductor; whether existing Claude Code sessions carry over;
+  Windows; token cost. Every factual answer was checked against the implementation.
+- **"Open an issue, not a pull request" is reachable from the front door** (#1199). The policy was
+  complete in `CONTRIBUTING.md` and enforced by a workflow, but the only things pointing at it were
+  the changelog and a dated guide snapshot — so someone who read the README and wanted to help had
+  no way to learn it before their PR was auto-closed.
+- The living guide and README caught up with this release: the single view, the session sidebar and
+  the resume-list confirmation are gone from them, and the GUI panel is documented where it now is.
+
 ## mulmoterminal@3.0.0 — 2026-07-31
 
 > **Setup guide:** [Start from the issue](https://receptron.github.io/mulmoterminal/guide/en/v3.0.0.html) — written at release time. ([日本語](https://receptron.github.io/mulmoterminal/guide/ja/v3.0.0.html))

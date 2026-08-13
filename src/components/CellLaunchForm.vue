@@ -7,8 +7,11 @@ import { orderByDirPriority } from "../../common/dirPriorityOrder";
 import { CHIP_IDLE, CHIP_RUNNING, CHIP_DOT_RUNNING } from "./dirChipColor";
 import { relativeTime as relativeTimeFrom } from "./cellDisplay";
 import { LAUNCH_TARGETS } from "./launchTargets";
+import { worktreeAction, worktreeLimitReason } from "../../common/worktreeSession";
+import { isSameDirPath } from "../../common/dirPathKey";
 import { TOOL_GROUPS, TOOL_GROUP_HEADINGS, toolGroupServerId, toolsInGroup, type ToolGroup } from "../../common/toolGroups";
 import type { LaunchAgent } from "../../common/launchAgent";
+import type { TerminalAgent } from "../../common/sessionAgent";
 import type { CwdPreset } from "./presets";
 import type { Launcher, LaunchPick } from "./launchers";
 import type { LaunchChoice } from "./wsUrl";
@@ -37,8 +40,9 @@ const props = defineProps<{
   presets: CwdPreset[];
   // Configured launch commands (shell/codex/…) offered next to Claude in this launcher.
   launchers?: Launcher[] | undefined;
-  // Session ids open in other grid cells. Resuming one of them would detach that cell, so the
-  // rows flag it and confirm before opening.
+  // Session ids open in other grid cells. Resuming one of them would detach that cell, so those
+  // rows are flagged and refused. The server's own `attached` sees more than this (another tab,
+  // another process); this stays because an older server sends no such field.
   openSessionIds?: string[] | undefined;
   // Dirs with a running session in another cell, so a preset chip whose dir is in use is tinted.
   openCwds?: string[] | undefined;
@@ -55,8 +59,10 @@ const emit = defineEmits<{
   // the dir field, a preset chip and a worktree alike — so the cell decides once what the picked
   // target means (a shell replaces the cell; an agent runs in it).
   (e: "start", dir: string | null): void;
-  // Attach to an existing session, in the cwd its row was listed for.
-  (e: "resume", value: { id: string; cwd: string | null }): void;
+  // Attach to an existing session, in the cwd its row was listed for. `agent` travels only for a
+  // worktree row, whose session may be one the cell's selector is not currently pointed at —
+  // resuming a codex conversation as Claude would connect the wrong endpoint to a live id.
+  (e: "resume", value: { id: string; cwd: string | null; agent?: TerminalAgent }): void;
   (e: "run", value: RunCommand): void;
   (e: "launch", value: LaunchPick): void;
   (e: "close"): void;
@@ -96,6 +102,31 @@ const isCwdRunning = (path: string): boolean => runningCwds.value.has(path);
 const { value: resumable, load: loadResumable } = useResumableSessions();
 const { value: scriptList, load: loadScripts } = useDirScripts();
 const { value: worktreeList, load: loadWorktrees } = useDirWorktrees();
+
+// A worktree can be launched into without touching its row: pasted into the field, or reached by a
+// preset chip (launching in one records it as a recent directory, so worktree paths DO become
+// chips). The one-session rule has to hold on every way in, not just the nearest one.
+//
+// This is the EXPLANATION, not the guarantee — the server refuses the spawn whatever the client
+// believes (session/worktree-session-limit.ts), which is what covers a symlinked path and a chip
+// pointing into a repo whose worktree list was never fetched. Here the job is only to grey the
+// control out before the click, so the comparison folds the spellings a person types.
+//
+// The list is the repo's: `git worktree list` reports the main tree first, so it is the same set
+// whether the field holds the repo or one of its worktrees.
+const worktreeAt = (dir: string | null) => worktreeList.value.worktrees.find((w) => isSameDirPath(w.path, dir))?.session;
+
+// A shell is not an agent session — the limit is on agents editing one working tree, and
+// dir-session.ts leaves shells out of the answer for the same reason.
+const takenWorktreeAt = (dir: string | null): string | null => {
+  const session = launchesAgent.value ? worktreeAt(dir) : null;
+  return session ? worktreeLimitReason(session) : null;
+};
+
+const startHere = (): void => {
+  if (!takenWorktreeAt(targetDir.value)) emit("start", targetDir.value);
+};
+
 const {
   dir: mcpGroupDir,
   enabled: mcpGroupEnabled,
@@ -173,11 +204,29 @@ function onDirPicked(dir: string): void {
 }
 
 // The chip's launch button: a one-click quick launch — fill the field and jump straight into a
-// fresh session in that dir.
+// fresh session in that dir. A chip on a worktree somebody is in fills the field without
+// launching, so the reason lands under it rather than nothing happening.
 function selectPreset(p: CwdPreset): void {
+  if (takenWorktreeAt(p.path)) return fillDir(p.path);
   emit("update:dir", p.path);
   emit("start", p.path);
 }
+
+const chipLaunchTitle = (p: CwdPreset): string => {
+  const taken = takenWorktreeAt(p.path);
+  if (taken) return taken;
+  return isCwdRunning(p.path) ? `${p.path} — a session is already running here in another terminal` : `Launch a new terminal in ${p.path} now`;
+};
+
+// The same three states as the hover, said with the LABEL rather than the path — the hover can
+// afford a full path and a screen reader cannot. It has to carry the refusal too, or the one user
+// who cannot see the greyed-out field below is told the click launches a terminal when it does not
+// (raised by CodeRabbit on #1208).
+const chipLaunchLabel = (p: CwdPreset): string => {
+  const taken = takenWorktreeAt(p.path);
+  if (taken) return `${p.label} — ${taken}`;
+  return isCwdRunning(p.path) ? `${p.label} — a session is already running here in another terminal` : `Launch a new terminal in ${p.label} now`;
+};
 
 // Launch a configured program (shell/codex/…) in this cell's chosen dir. The parent turns the
 // empty cell into a persistent launcher cell (index is the server allowlist position).
@@ -194,14 +243,17 @@ function runScript(index: number): void {
   if (script) emit("run", { source: "script", index: script.index, label: script.label, cwd: scriptList.value.cwd ?? targetDir.value });
 }
 
-// A session already live in another grid cell. Resuming it here detaches that cell (the server
-// supersedes the prior socket), so we warn before doing so. This cell has none of its own while
-// the form is up, so every listed id that is open is open somewhere else.
-const sessionOpenElsewhere = (id: string): boolean => (props.openSessionIds ?? []).includes(id);
+// A session somebody is holding — a cell in this grid, a second browser tab, a second
+// mulmoterminal process. Opening it here would detach whoever has it (the server supersedes the
+// prior socket, and a second process ends up fighting over the tmux window size), so the row is
+// refused rather than confirmed away.
+//
+// `attached` is the server's answer and the only one that sees the other two cases; the grid's own
+// list still counts, because a server that predates the field says nothing at all (#1207).
+const sessionBusy = (s: ResumableSession): boolean => s.attached === true || (props.openSessionIds ?? []).includes(s.id);
 
 function resume(s: ResumableSession): void {
-  if (sessionOpenElsewhere(s.id) && !window.confirm(`"${s.title}" is already open in another terminal. Opening it here will detach that one. Continue?`))
-    return;
+  if (sessionBusy(s)) return;
   // Use the cwd those rows were fetched for, not the (possibly-changed) input.
   emit("resume", { id: s.id, cwd: resumable.value.cwd ?? targetDir.value });
 }
@@ -242,9 +294,22 @@ async function createWorktreeAndLaunch(): Promise<void> {
   }
 }
 
-const reuseWorktree = async (w: Worktree): Promise<void> => {
+// One branch, one session: the row continues the worktree's session when it has one and nobody is
+// holding it, and starts a fresh one only when it has none. See common/worktreeSession.ts.
+const openWorktree = async (w: Worktree): Promise<void> => {
+  const action = worktreeAction(w.session);
+  if (action === "busy") return;
   await syncMcpGroupsInto(w.path);
-  emit("start", w.path);
+  if (action === "resume" && w.session) emit("resume", { id: w.session.id, cwd: w.path, agent: w.session.agent });
+  else emit("start", w.path);
+};
+
+// The hover, which is where the three-way rule is actually readable — the row itself can only
+// afford a word.
+const worktreeTitle = (w: Worktree): string => {
+  const where = w.branch ?? w.path;
+  if (worktreeAction(w.session) === "busy") return `${where} — its session is open in another terminal`;
+  return worktreeAction(w.session) === "resume" ? `${where} — resume this worktree's session` : `${where} — start a session here`;
 };
 
 // Remove a managed worktree (＋ its branch). A dirty one is confirmed first so work is never
@@ -317,8 +382,8 @@ async function removeWorktree(w: Worktree): Promise<void> {
           type="button"
           data-testid="cell-chip-launch"
           class="inline-flex cursor-pointer items-center border-0 border-l border-l-border bg-transparent px-[5px] text-secondary hover:bg-hover hover:text-fg"
-          :title="isCwdRunning(p.path) ? `${p.path} — a session is already running here in another terminal` : `Launch a new terminal in ${p.path} now`"
-          :aria-label="isCwdRunning(p.path) ? `${p.label} — a session is already running here in another terminal` : `Launch a new terminal in ${p.label} now`"
+          :title="chipLaunchTitle(p)"
+          :aria-label="chipLaunchLabel(p)"
           @click="selectPreset(p)"
         >
           <span class="material-symbols-outlined text-[14px]" aria-hidden="true">play_arrow</span>
@@ -367,7 +432,7 @@ async function removeWorktree(w: Worktree): Promise<void> {
           type="text"
           placeholder="/path/to/project"
           spellcheck="false"
-          @keydown.enter="emit('start', targetDir)"
+          @keydown.enter="startHere"
         />
         <button
           type="button"
@@ -382,14 +447,19 @@ async function removeWorktree(w: Worktree): Promise<void> {
           type="button"
           data-testid="cell-dir-go"
           class="inline-flex flex-none cursor-pointer items-center justify-center rounded-md border border-border bg-elevated px-2 text-secondary enabled:hover:border-accent enabled:hover:bg-hover enabled:hover:text-fg disabled:cursor-default disabled:opacity-40"
-          :disabled="!dir.trim()"
-          title="Start a new terminal here (or press Enter)"
+          :disabled="!dir.trim() || !!takenWorktreeAt(targetDir)"
+          :title="takenWorktreeAt(targetDir) ?? 'Start a new terminal here (or press Enter)'"
           aria-label="Start a new terminal here"
-          @click="emit('start', targetDir)"
+          @click="startHere"
         >
           <span class="material-symbols-outlined text-[18px]" aria-hidden="true">play_arrow</span>
         </button>
       </span>
+      <!-- The field can be pointed AT a worktree — pasted, or filled by a chip — which is the same
+           launch the worktree row refuses. Saying why beats a play button that just does nothing. -->
+      <span v-if="takenWorktreeAt(targetDir)" data-testid="cell-dir-busy" class="font-sans text-[11px] leading-snug text-amber">{{
+        takenWorktreeAt(targetDir)
+      }}</span>
     </label>
     <!-- Codex has its own model configuration and doesn't read this one. Keyed on the SELECTOR,
          not on the agent the cell will run: that reads "claude" while Shell is picked (a shell has
@@ -435,6 +505,13 @@ async function removeWorktree(w: Worktree): Promise<void> {
     </template>
     <div v-if="worktreeList.isGit && launchesAgent" data-testid="cell-worktrees" class="flex w-full max-w-[360px] flex-col items-stretch gap-1.5">
       <span class="font-sans text-[11px] uppercase tracking-[0.05em] text-dim">or isolate in a worktree (git repo)</span>
+      <!-- Said here rather than left to be inferred from a row that behaves differently each time:
+           the one-session rule is why a row resumes instead of launching, and why one of them
+           cannot be clicked at all. -->
+      <span data-testid="wt-note" class="font-sans text-[11px] leading-snug text-dim"
+        >A worktree is tied to a branch, so it runs one agent session and is never started twice: a row resumes the session it already has, and a row marked
+        <span class="text-amber">in use</span> is open in another terminal.</span
+      >
       <div class="flex gap-1.5">
         <input
           v-model="worktreeTask"
@@ -457,12 +534,20 @@ async function removeWorktree(w: Worktree): Promise<void> {
       </div>
       <div v-for="w in worktreeList.worktrees" :key="w.path" class="flex items-center gap-1.5">
         <button
-          class="flex-auto min-w-0 text-left rounded-md border border-border bg-elevated text-secondary cursor-pointer font-mono text-[12px] py-[5px] px-2.5 truncate hover:bg-hover hover:text-fg"
+          class="flex-auto min-w-0 text-left rounded-md border bg-elevated font-mono text-[12px] py-[5px] px-2.5 truncate"
+          :class="
+            worktreeAction(w.session) === 'busy'
+              ? 'border-amber text-dim cursor-not-allowed'
+              : 'border-border text-secondary cursor-pointer hover:bg-hover hover:text-fg'
+          "
           data-testid="worktree-reuse"
-          :title="w.branch ?? w.path"
-          @click="reuseWorktree(w)"
+          :disabled="worktreeAction(w.session) === 'busy'"
+          :title="worktreeTitle(w)"
+          @click="openWorktree(w)"
         >
           ⎇ {{ w.task }}<span v-if="w.dirty" data-testid="wt-dirty" class="ml-1.5 text-[var(--warn-text,#e0a030)]" title="uncommitted changes">●</span>
+          <span v-if="worktreeAction(w.session) === 'busy'" data-testid="wt-busy" class="ml-1.5 font-sans text-[11px] text-amber">in use</span>
+          <span v-else-if="worktreeAction(w.session) === 'resume'" data-testid="wt-resume" class="ml-1.5 font-sans text-[11px] text-dim">resume</span>
         </button>
         <button
           data-testid="wt-del"
@@ -484,17 +569,34 @@ async function removeWorktree(w: Worktree): Promise<void> {
           v-for="s in resumable.sessions"
           :key="s.id"
           data-testid="cell-resume-item"
-          class="flex cursor-pointer items-baseline justify-between gap-2 rounded-md border bg-deep px-2.5 py-[5px] text-left font-sans text-[12px] text-secondary hover:border-accent hover:bg-elevated"
-          :class="[{ 'is-open': sessionOpenElsewhere(s.id) }, sessionOpenElsewhere(s.id) ? 'border-amber' : 'border-border']"
-          :title="sessionOpenElsewhere(s.id) ? `${s.title} — already open in another terminal` : s.title"
+          class="flex items-baseline justify-between gap-2 rounded-md border bg-deep px-2.5 py-[5px] text-left font-sans text-[12px]"
+          :class="[
+            { 'is-open': sessionBusy(s) },
+            sessionBusy(s) ? 'border-amber text-dim cursor-not-allowed' : 'border-border text-secondary cursor-pointer hover:border-accent hover:bg-elevated',
+          ]"
+          :disabled="sessionBusy(s)"
+          :title="sessionBusy(s) ? `${s.title} — open in another terminal, close it there to continue it here` : s.title"
           @click="resume(s)"
         >
           <span data-testid="ri-title" class="truncate">{{ s.title }}</span>
+          <!-- A background worker is not the user's own chat, and a FAILED one is the only thing
+               here nobody was ever told about: it ran invisibly, ended badly, and pulled no
+               attention on the way. Naming it in the list is what makes it findable at all. -->
           <span
-            v-if="sessionOpenElsewhere(s.id)"
-            data-testid="ri-open"
-            class="flex-none whitespace-nowrap text-[11px] text-amber"
-            title="Already open in another terminal"
+            v-if="s.failed"
+            data-testid="ri-failed"
+            class="flex-none whitespace-nowrap text-[11px] text-err-text"
+            title="This background worker ended without finishing a turn"
+            >● failed</span
+          >
+          <span
+            v-else-if="s.hidden"
+            data-testid="ri-background"
+            class="flex-none whitespace-nowrap text-[11px] text-dim"
+            title="Ran in the background — not a chat you opened"
+            >background</span
+          >
+          <span v-if="sessionBusy(s)" data-testid="ri-open" class="flex-none whitespace-nowrap text-[11px] text-amber" title="Open in another terminal"
             >● open</span
           >
           <span class="flex-none text-[11px] text-dim">{{ relativeTime(s.mtime) }}</span>

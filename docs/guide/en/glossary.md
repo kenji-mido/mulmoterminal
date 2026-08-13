@@ -2,7 +2,7 @@
 title: Glossary
 layout: default
 parent: English
-nav_order: 5
+nav_order: 6
 description: Vibe coding, parallel agents, AI coding agents, git worktrees, the cockpit roster — the words this guide uses, tied to what you actually see on screen in MulmoTerminal.
 ---
 
@@ -66,11 +66,13 @@ where all the others stand.
 
 → [Basics](basics.html) · [Row length](config.html#cockpit-lines)
 
-## Single view / GUI panel (Canvas)
+## GUI panel (Canvas)
 
-The screen for one agent (`/chat`): conversation on the left, **GUI panel** on the right, where the
-agent's tool calls render as diagrams, forms, images, documents, HTML and slides rather than printed
-text.
+The pane beside a **zoomed cell**, where that agent's tool calls render as diagrams, forms, images,
+documents, HTML and slides rather than printed text.
+
+Until 3.x it belonged to a separate *single view* at `/chat`. That view was removed in 4.0.0 and the
+panel moved to the zoomed cell, which is the same thing — one agent with the window to itself.
 
 ## git worktree
 

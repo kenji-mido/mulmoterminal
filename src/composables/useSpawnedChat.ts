@@ -27,8 +27,20 @@ export interface SpawnedChatRequest {
   /** The prompt was typed into the input box without an Enter (spawnBackgroundChat draft:true)
    *  and is waiting for the user to review it — not a turn already running. */
   draft: boolean;
+  /** A collection card is ALREADY waiting in this session's Canvas, so the cell should arrive
+   *  enlarged with the pane open — otherwise the card sits behind two gestures nobody knows to
+   *  make.
+   *
+   *  OPT-IN, not a field every caller answers: revealing is right only when something is already
+   *  in the pane, and taking over the screen to show an EMPTY one is worse than leaving the grid
+   *  as the user arranged it. A spawn with no canvas to show (an issue being started, a skill
+   *  button, cron) says nothing here and gets the grid's ordinary behaviour. */
+  canvas?: boolean;
 }
-type Handler = (req: SpawnedChatRequest) => void;
+/** Returns whether the grid actually took it. `false` means the grid was FULL and fell back to
+ *  showing the session in the single view — the one case where bringing the grid on screen would
+ *  take the user away from where the session just appeared. */
+type Handler = (req: SpawnedChatRequest) => boolean;
 
 let handler: Handler | null = null;
 let pending: SpawnedChatRequest[] = [];
@@ -49,12 +61,19 @@ export function registerSpawnedChatHandler(h: Handler): () => void {
 
 /** Show a spawned chat as a grid cell. If the grid isn't mounted yet, queue it and switch to it. */
 export function placeSpawnedChat(req: SpawnedChatRequest): void {
-  if (handler) {
-    handler(req);
-    return;
-  }
-  pending.push(req);
-  router.push({ name: "terminals" }).catch(() => {});
+  // `true` for a queued request too: the grid will have it as soon as it registers, so the grid is
+  // still where the user should be looking.
+  const goingToTheGrid = handler ? handler(req) : (pending.push(req), true);
+  // Then SHOW the grid. Mounted is not the same as on screen: since #1190 the grid stays alive
+  // UNDERNEATH a full-screen overlay, so a chat started from the collections browser is placed
+  // into a grid the user cannot see. Navigating is also what closes that overlay — before the grid
+  // survived one, the queue-and-navigate path did this by accident, and it stopped happening the
+  // moment the grid stopped unmounting.
+  //
+  // NOT when the grid refused it. A full grid falls back to the single view, and pushing here
+  // would drag the user off the view the session was just shown in (Codex, PR #1193).
+  if (!goingToTheGrid) return;
+  if (router.currentRoute.value.name !== "terminals") router.push({ name: "terminals" }).catch(() => {});
 }
 
 /** Test seam: drop anything queued by a previous case. Not used by the app. */

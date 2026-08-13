@@ -18,7 +18,7 @@ describe("toCollectionPushResult", () => {
   it("carries a successful push's counts through", () => {
     const outcome: CalendarPushOutcome = {
       kind: "pushed",
-      result: { slug: "meetings", created: 3, updated: 2, conflicts: 1, localDeletes: 4, skipped: ["r7: no start time"], errors: [] },
+      result: { slug: "meetings", created: 3, updated: 2, conflicts: 1, localDeletes: 4, skipped: ["r7: no start time"], errors: [], unpushedIds: ["r4"] },
     };
     expect(toCollectionPushResult(outcome)).toEqual({
       pushed: true,
@@ -28,7 +28,7 @@ describe("toCollectionPushResult", () => {
       localDeletes: 4,
       skipped: ["r7: no start time"],
       errors: [],
-      // `slug` is the engine's, not the wire's — toEqual fails if it leaks through.
+      // `slug` and `unpushedIds` are the engine's, not the wire's — toEqual fails if either leaks through.
     });
   });
 
@@ -37,7 +37,16 @@ describe("toCollectionPushResult", () => {
   it("keeps per-record reasons on a push that partly succeeded", () => {
     const result = toCollectionPushResult({
       kind: "pushed",
-      result: { slug: "meetings", created: 1, updated: 0, conflicts: 0, localDeletes: 0, skipped: ["r2: end before start"], errors: ["r9: 403"] },
+      result: {
+        slug: "meetings",
+        created: 1,
+        updated: 0,
+        conflicts: 0,
+        localDeletes: 0,
+        skipped: ["r2: end before start"],
+        errors: ["r9: 403"],
+        unpushedIds: ["r9"],
+      },
     });
     expect(result.skipped).toEqual(["r2: end before start"]);
     expect(result.errors).toEqual(["r9: 403"]);

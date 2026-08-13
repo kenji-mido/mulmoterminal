@@ -28,7 +28,6 @@ import {
   tmuxRedrawClient,
   tmuxWindowSize,
 } from "./infra/tmux.js";
-import { sandboxEnabled, sandboxPlatformSupported, dockerAvailable, ensureSandboxImage } from "./infra/sandbox.js";
 import { bindSecurityWarning, browserOriginHostnames, createIsAllowedOrigin } from "./infra/allowed-origin.js";
 import { serverErrorExit } from "./infra/server-exit.js";
 import { PORT, BIND_HOST, CLAUDE_CWD, MULMOTERMINAL_HOME, SESSION_ID_RE } from "./config/env.js";
@@ -44,6 +43,7 @@ import { hasBinary } from "./infra/has-binary.js";
 import { newProbeSessionId } from "./agents/probe-session.js";
 import { removeProbeTranscript, sweepLegacyProbeTranscriptsOnce } from "./agents/probe-transcript.js";
 import { sweepOrphanHeadlessTranscripts } from "./session/headless-session.js";
+import { removeLegacySandboxCredentials, removeLegacySandboxContainers } from "./infra/fs-cleanup.js";
 import { newestRolloutFile, codexSessionsDir, readRolloutTail } from "./agents/codex-rollout.js";
 import { latestRateLimitsInRollout } from "./agents/codex-rate-limits.js";
 import { rateLimitCacheFile, readRateLimitCache, createRateLimitCacheWriter } from "./agents/rate-limit-persist.js";
@@ -67,10 +67,12 @@ import {
   sessionCwd,
   sessionMemos,
   sessionMemosHydrated,
+  markUnplacedSession,
 } from "./session/registry.js";
 import { hydrateClearedTranscripts } from "./session/cleared-transcripts.js";
 import { runWithHiddenMarker } from "./session/hiddenMarker.js";
 import { registerCompletionHook } from "./session/completion-hooks.js";
+import { spawnScheduledWorker } from "./session/scheduled-chat.js";
 import { createToolStores } from "./session/tool-store.js";
 import { writeDecisionDigest } from "./session/decision-digest-file.js";
 import { createScheduledSessionRegistry, scheduledSessionInUse, scheduledSessionsDir } from "./session/scheduled-sessions.js";
@@ -106,7 +108,7 @@ import { HOST_ID as REMOTE_HOST_ID, initRemoteHostBackend } from "./backends/rem
 import { createSessionActivityPublisher, firestoreSessionActivityStore } from "./backends/remoteHost/sessionActivity.js";
 import { createWorkPhaseTracker } from "./session/work-phase-tracker.js";
 import { currentFirestore, currentUid } from "./backends/remoteHost/session.js";
-import { feedRefreshTaskDef, type AgentWorkerRunner } from "@mulmoclaude/core/feeds/server";
+import { type AgentWorkerRunner } from "@mulmoclaude/core/feeds/server";
 import { initWorkspaceSetup } from "./backends/workspaceSetup.js";
 import { installBundledSkills } from "./infra/install-bundled-skills.js";
 import { initFileChangePublisher } from "./backends/fileChange.js";
@@ -114,8 +116,7 @@ import { initNotifier } from "./backends/notifier.js";
 import { stopWhisperSidecar } from "./backends/whisper.js";
 import { startCollectionCompletionWatchers } from "./backends/collectionWatchers.js";
 import { initUserTaskScheduler } from "./backends/scheduler.js";
-import { worklogSystemTask } from "./backends/worklog.js";
-import type { TaskDefinition } from "@mulmoclaude/core/scheduler";
+import { buildSystemTasks } from "./backends/system-tasks.js";
 import { initMulmoScriptBackend } from "./backends/mulmoscript.js";
 import { createSessionLifecycle, SESSIONS_CHANNEL } from "./session/lifecycle.js";
 import { mountAppRoutes } from "./routes/app-routes.js";
@@ -301,7 +302,7 @@ const spawnDeps: SpawnDeps = {
   outputBufferLimit: OUTPUT_BUFFER_LIMIT,
   hookSettingsJson: (host, sessionId, env) => hookSettingsJson({ host, port: PORT, sessionId, env }),
   // The user's MCP servers are read per spawn, so a settings edit applies to the next session.
-  mcpConfigJson: (sessionId, host, sandbox) => mcpConfigJson({ sessionId, host, port: PORT, userMcpServers: getUserMcpServers(), sandbox }),
+  mcpConfigJson: (sessionId, host) => mcpConfigJson({ sessionId, host, port: PORT, userMcpServers: getUserMcpServers() }),
   reap: (id) => reap(id),
   setWorking: (id, working, event) => setWorking(id, working, event),
   setWaiting: (id, waiting, event) => setWaiting(id, waiting, event),
@@ -428,6 +429,14 @@ const startClaudeRateLimitProbe = (): void => {
 // window in which that matters is closed rather than reopened on every boot (Codex review on
 // #1030). It also means a 500MB transcript directory is read once, not once per `yarn dev` save.
 void sweepLegacyProbeTranscriptsOnce(CLAUDE_CWD, MULMOTERMINAL_HOME).catch(() => {});
+// The removed Docker sandbox left two things behind when a server was killed or upgraded
+// mid-session: a per-session export of the Keychain credential on disk, and a container still
+// running with the workspace and ~/.claude mounted. Both deleters went with the feature.
+//
+// The directory is the EVIDENCE that this machine ever ran the sandbox, so the container sweep is
+// gated on it: nearly every install never turned it on (opt-in, macOS-only) and never invokes
+// docker here at all (Codex, PR #1195).
+if (removeLegacySandboxCredentials(MULMOTERMINAL_HOME)) void removeLegacySandboxContainers(MULMOTERMINAL_HOME).catch(() => {});
 
 // A headless run deletes its own transcript when it ends, so whatever is left belongs to one that
 // never got to: the server was killed mid-title, or the delete failed. Every boot, not once ever —
@@ -567,6 +576,9 @@ initFeedsBackend({ workspace: CLAUDE_CWD, spawnWorker: feedsSpawnWorker });
 const remoteHostSpawnChat = (message: string) => {
   const sessionId = randomUUID();
   spawnClaudePty(sessionId, null, null, { initialPrompt: message });
+  // Started from the PHONE, so by definition no browser placed it. Marked so the next grid to
+  // load adopts it instead of leaving a live agent with nowhere to appear.
+  markUnplacedSession(sessionId);
   return { chatId: sessionId };
 };
 // The phone's remote terminal view (#435). Both accessors live here because the PTY table
@@ -776,27 +788,27 @@ function refreshDecisionDigests(): void {
 refreshDecisionDigests();
 setInterval(refreshDecisionDigests, DECISION_DIGEST_INTERVAL_MS).unref();
 
+// A user's scheduled task runs as a BACKGROUND WORKER — see scheduled-chat.ts for why, and for
+// what follows from it (no grid cell, but a failed one still says so).
 function spawnScheduledChat(message: string): void {
   const sessionId = randomUUID();
   try {
-    spawnClaudePty(sessionId, null, null, { initialPrompt: message });
-    scheduledSessions.register(sessionId);
+    spawnScheduledWorker(sessionId, {
+      spawn: (id) => spawnClaudePty(id, null, null, { initialPrompt: message }),
+      retain: (id) => scheduledSessions.register(id),
+    });
   } catch (err) {
     console.error(`[scheduler] failed to spawn chat for a scheduled task: ${messageOf(err)}`);
   }
 }
 try {
-  // Register the shared hourly feed-refresh system task so a STANDALONE MulmoTerminal
-  // (no MulmoClaude running) still refreshes due feed/agent-ingest collections. The feeds
-  // host is already configured above (initFeedsBackend), so refreshDue can run. When both
-  // apps run on the shared workspace, the engine's shared `lastFetchedAt` soft-dedups —
-  // whoever refreshes first stamps it, the other's isFeedDue skips (plan: soft-dedup v1).
-  // Built-in system tasks: the shared feed-refresh, plus the opt-in dev worklog
-  // (registered only when worklog.enabled). null (worklog off) is filtered out.
-  const systemTasks: TaskDefinition[] = [
-    feedRefreshTaskDef({ workspaceRoot: CLAUDE_CWD }),
-    worklogSystemTask({ ...getWorklogConfig(), spawnChat: spawnScheduledChat }),
-  ].filter((task): task is TaskDefinition => task !== null);
+  // Which tasks and why: system-tasks.ts. Both hosts are already configured above
+  // (initFeedsBackend, initGoogleBackend, initCollectionsBackend), so both engines can run.
+  const systemTasks = buildSystemTasks({
+    workspaceRoot: CLAUDE_CWD,
+    worklog: getWorklogConfig(),
+    spawnChat: spawnScheduledChat,
+  });
   initUserTaskScheduler({
     workspace: CLAUDE_CWD,
     spawnChat: spawnScheduledChat,
@@ -871,19 +883,7 @@ server.listen(Number(PORT), BIND_HOST, () => {
     const where = peers.map((p) => (p.port === null ? `pid ${p.pid}` : `port ${p.port}`)).join(", ");
     console.warn(`[instances] ${peers.length} other MulmoTerminal server(s) running (${where}) — they share ~/.mulmoterminal, which is not a supported setup`);
   }
-  if (sandboxEnabled()) {
-    if (!sandboxPlatformSupported()) {
-      console.log("[sandbox] MULMOTERMINAL_SANDBOX set but only supported on macOS for now — using host spawn");
-    } else if (!dockerAvailable()) {
-      console.log("[sandbox] MULMOTERMINAL_SANDBOX set but Docker daemon unreachable — using host spawn");
-    } else if (ensureSandboxImage()) {
-      console.log("[sandbox] on — single-view Claude runs in a Docker container");
-    } else {
-      console.log(
-        "[sandbox] sandbox image unavailable (build failed?) — using host spawn. Build it with: docker build -f Dockerfile.sandbox -t mulmoterminal-sandbox .",
-      );
-    }
-  }
+
   // Run the update check for the header badge (best-effort, non-blocking). Works under
   // `yarn dev` too, where the launcher — which used to be the only checker — isn't involved.
   void refreshUpdateStatus();

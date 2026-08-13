@@ -2,7 +2,7 @@
 title: 応用編
 layout: default
 parent: 日本語
-nav_order: 2
+nav_order: 3
 description: 並列エージェントの実践シナリオ。git worktree で隔離する、複数リポジトリを横断する、スクリプトの失敗を AI に要約させる、Claude と Codex を併用する。
 ---
 

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
-import { h, KeepAlive, type Component } from "vue";
+import { router } from "../../../src/router";
+import { defineComponent, h, KeepAlive, type Component } from "vue";
 
 // App.vue renders GridView inside <KeepAlive>, and the grid registers its openers (new terminal,
 // spawned-chat placement) on ACTIVATE so a cached-but-hidden grid is never mutated behind the
@@ -8,9 +9,39 @@ import { h, KeepAlive, type Component } from "vue";
 // silently exercises a grid that registered nothing — which is not the component the app runs.
 const mountActivated = (component: Component, options: Parameters<typeof mount>[1]) => mount({ render: () => h(KeepAlive, null, [h(component)]) }, options);
 
-// The grid subscribes to the pub/sub socket on mount — stub it so no real socket opens.
+// The grid subscribes to the pub/sub socket on mount — stub it so no real socket opens. The
+// handlers are kept so a test can push on a channel the way the server would.
+const pubsub = vi.hoisted(() => {
+  const handlers = new Map<string, Set<(data: unknown) => void>>();
+  const reconnects = new Set<() => void>();
+  return {
+    handlers,
+    reconnects,
+    push(channel: string, data: unknown) {
+      handlers.get(channel)?.forEach((cb) => cb(data));
+    },
+    reconnect() {
+      reconnects.forEach((cb) => cb());
+    },
+    reset() {
+      handlers.clear();
+      reconnects.clear();
+    },
+  };
+});
 vi.mock("../../../src/composables/usePubSub", () => ({
-  usePubSub: () => ({ subscribe: () => () => {}, onReconnect: () => () => {} }),
+  usePubSub: () => ({
+    subscribe: (channel: string, cb: (data: unknown) => void) => {
+      const set = pubsub.handlers.get(channel) ?? new Set();
+      set.add(cb);
+      pubsub.handlers.set(channel, set);
+      return () => set.delete(cb);
+    },
+    onReconnect: (cb: () => void) => {
+      pubsub.reconnects.add(cb);
+      return () => pubsub.reconnects.delete(cb);
+    },
+  }),
 }));
 
 // Session ids for the roster-ordering test (must be valid UUIDs or parseGridState drops them).
@@ -27,9 +58,18 @@ vi.mock("../../../src/composables/useGridActivity", () => ({
 type FetchUrl = string | URL | Request; // what a fetch stub's first argument can be
 
 // Config GET hydrates pushEnabled=true; capture POSTs so we can assert the toggle saves.
+// The grid is mounted here without the router plugin, and several of its behaviours now ask the
+// singleton where the user actually IS — shortcuts and the unplaced sweep only apply while
+// /terminals is on screen, since the grid stays mounted underneath an overlay (#1193).
+beforeEach(async () => {
+  await router.push("/terminals");
+  await flushPromises();
+});
+
 const posts: Array<{ url: string; body: unknown }> = [];
 beforeEach(() => {
   posts.length = 0;
+  pubsub.reset();
   localStorage.clear();
   globalThis.fetch = vi.fn(async (url: FetchUrl, init?: RequestInit) => {
     const u = String(url);
@@ -467,16 +507,6 @@ describe("GridView skill launch (#1111)", () => {
       launchAgent.value = "claude"; // a module singleton — leaving it set would follow later tests
     }
   });
-
-  // The regression itself: handing the session to the single-view opener is what yanked the user
-  // out of the grid. The grid must adopt it instead, so that opener stays untouched.
-  it("does not hand the session to the single view's opener", async () => {
-    const openSession = vi.fn();
-    (await import("../../../src/composables/useChatLauncher")).registerChatOpener(openSession);
-    const { w } = await mountWithSpawn();
-    expect(openSession).not.toHaveBeenCalled();
-    w.unmount();
-  });
 });
 
 // Two conditions the launch depends on, varied — neither is exercised by the happy path above, and
@@ -518,37 +548,272 @@ describe("GridView skill launch — capacity and placement (#1111)", () => {
     w.unmount();
   });
 
-  // At the cap insertCellAfter drops the cell, so adopting it here would spawn a live agent with
-  // nowhere in the grid to appear. It falls back to the single view's opener instead of vanishing.
-  it("falls back to the single view rather than losing the session when the grid is full", async () => {
-    const openSession = vi.fn();
-    (await import("../../../src/composables/useChatLauncher")).registerChatOpener(openSession);
+  // At the cap insertCellAfter drops the cell. It used to fall back to the single view; with that
+  // gone the session WAITS — the server clears its unplaced mark only when a cell attaches, so the
+  // next load with room adopts it. What must not happen is a cell appearing anyway, which would
+  // put two sessions on one slot.
+  it("adds no cell when the grid is full, leaving the session to wait", async () => {
     const w = await launchFrom(filledGrid(81)); // MAX_TERMINALS
-    expect(openSession).toHaveBeenCalledWith(SPAWNED, expect.objectContaining({ agent: "claude" }));
+    const cells = w.findComponent(CellsStub).props("cells") as Array<{ session: string | null }>;
+    expect(cells.filter((c) => c.session === SPAWNED)).toEqual([]);
     w.unmount();
   });
 
-  // The full-grid fallback is the ONE path where `draft` still has to reach the single view, and
-  // it is the easiest to drop: the cell it would otherwise have made needs no such flag (the
-  // server types the draft into the PTY), so nothing else here carries one. Without it a
-  // startNewChatDraft at MAX_TERMINALS silently loses the "preparing your draft…" hint and reads
-  // as a turn already running.
-  it("carries `draft` into the single-view fallback when the grid is full", async () => {
-    const openSession = vi.fn();
-    (await import("../../../src/composables/useChatLauncher")).registerChatOpener(openSession);
-    const { placeSpawnedChat } = await import("../../../src/composables/useSpawnedChat");
-    localStorage.setItem("grid_v2", filledGrid(81)); // MAX_TERMINALS
+  // PR3b: the durable half. A chat spawned while no tab was open — a scheduled task at 3am, the
+  // phone, an agent calling the tool from another session — has nowhere to appear once the single
+  // view is gone. The grid asks for those on activate and adopts them.
+  it("adopts sessions the server spawned while nothing was open", async () => {
+    const UNPLACED = "44444444-4444-4444-4444-444444444444";
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url: FetchUrl, init?: RequestInit) => {
+      if (String(url).includes("/api/sessions/unplaced"))
+        return { ok: true, json: async () => ({ sessions: [{ id: UNPLACED, agent: "codex", cwd: "/proj" }] }) } as Response;
+      return realFetch(url, init);
+    }) as typeof fetch;
     const w = mountActivated((await import("../../../src/components/GridView.vue")).default, {
       global: { stubs: { TerminalGrid: CellsStub, AppToolbar: ToolbarStub, SettingsModal: SkillSettingsStub } },
     });
     await flushPromises();
 
-    // Straight through the placement seam: a draft spawn is startNewChatDraft's, and going via a
-    // skill button would only ever produce draft:false.
-    placeSpawnedChat({ id: SPAWNED, agent: "claude", draft: true });
+    const cells = w.findComponent(CellsStub).props("cells") as Array<{ session: string | null; agent?: string; cwd?: string | null }>;
+    const adopted = cells.find((c) => c.session === UNPLACED);
+    expect(adopted).toBeDefined();
+    // The agent travels with it, or the cell reconnects on the wrong endpoint; so does the cwd it
+    // was actually spawned in, rather than this grid's default.
+    expect(adopted?.agent).toBe("codex");
+    expect(adopted?.cwd).toBe("/proj");
+    w.unmount();
+  });
+
+  // The live half of the same thing, and the one the user actually hits: the phone starts a chat
+  // while the host is SITTING on the grid. The route never changes, so the sweep above never runs
+  // and the live agent has no cell until something else forces a route change or a reload. The
+  // spawn publishes `event: "created"` on the sessions channel — sweep on that.
+  it("adopts a session spawned while the user is already on the grid", async () => {
+    const LIVE = "66666666-6666-6666-6666-666666666666";
+    let rows: Array<{ id: string; agent: string; cwd: string }> = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url: FetchUrl, init?: RequestInit) => {
+      if (String(url).includes("/api/sessions/unplaced")) return { ok: true, json: async () => ({ sessions: rows }) } as Response;
+      return realFetch(url, init);
+    }) as typeof fetch;
+    const w = mountActivated((await import("../../../src/components/GridView.vue")).default, {
+      global: { stubs: { TerminalGrid: CellsStub, AppToolbar: ToolbarStub, SettingsModal: SkillSettingsStub } },
+    });
+    await flushPromises(); // the mount sweep: nothing waiting yet
+    expect((w.findComponent(CellsStub).props("cells") as Array<{ session: string | null }>).some((c) => c.session === LIVE)).toBe(false);
+
+    // The phone starts a chat: the server marks it unplaced and publishes the spawn.
+    rows = [{ id: LIVE, agent: "claude", cwd: "/proj" }];
+    pubsub.push("sessions", { id: LIVE, working: false, event: "created" });
     await flushPromises();
 
-    expect(openSession).toHaveBeenCalledWith(SPAWNED, expect.objectContaining({ agent: "claude", draft: true }));
+    const cells = w.findComponent(CellsStub).props("cells") as Array<{ session: string | null; cwd?: string | null }>;
+    expect(cells.find((c) => c.session === LIVE)?.cwd).toBe("/proj");
+    w.unmount();
+  });
+
+  // Codex, on this PR. A create landing while a sweep is already in flight used to be dropped by
+  // the one-at-a-time guard — and the in-flight answer was generated BEFORE the session was marked,
+  // so it does not contain it either. The session then waits for a route change or a reload, which
+  // is the bug this whole path exists to remove. The deferred trigger must be re-asked.
+  it("re-sweeps for a create that arrived while a sweep was in flight", async () => {
+    const LATE = "77777777-7777-7777-7777-777777777777";
+    // Each sweep takes the next answer: the first was generated before the phone's spawn.
+    const answers: Array<Array<{ id: string; agent: string; cwd: string }>> = [[], [{ id: LATE, agent: "claude", cwd: "/proj" }]];
+    let release: (() => void) | null = null;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url: FetchUrl, init?: RequestInit) => {
+      if (String(url).includes("/api/sessions/unplaced")) {
+        const sessions = answers.shift() ?? [];
+        // Hold the FIRST sweep open so the push below lands mid-flight.
+        if (release === null && sessions.length === 0) await new Promise<void>((r) => (release = r));
+        return { ok: true, json: async () => ({ sessions }) } as Response;
+      }
+      return realFetch(url, init);
+    }) as typeof fetch;
+    const w = mountActivated((await import("../../../src/components/GridView.vue")).default, {
+      global: { stubs: { TerminalGrid: CellsStub, AppToolbar: ToolbarStub, SettingsModal: SkillSettingsStub } },
+    });
+    await flushPromises(); // the mount sweep is now parked inside its fetch
+
+    pubsub.push("sessions", { id: LATE, working: false, event: "created" }); // refused, but remembered
+    await flushPromises();
+    expect((w.findComponent(CellsStub).props("cells") as Array<{ session: string | null }>).some((c) => c.session === LATE)).toBe(false);
+
+    (release as unknown as () => void)(); // the stale answer lands — empty, as the server saw it
+    await flushPromises();
+
+    const cells = w.findComponent(CellsStub).props("cells") as Array<{ session: string | null }>;
+    expect(cells.some((c) => c.session === LATE)).toBe(true);
+    w.unmount();
+  });
+
+  // CodeRabbit, on this PR. pub/sub replays room membership on reconnect but not the events missed
+  // while the socket was down, so a spawn during the outage raises no "created" anyone still hears.
+  it("sweeps on pub/sub reconnect", async () => {
+    const MISSED = "88888888-8888-8888-8888-888888888888";
+    let rows: Array<{ id: string; agent: string; cwd: string }> = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url: FetchUrl, init?: RequestInit) => {
+      if (String(url).includes("/api/sessions/unplaced")) return { ok: true, json: async () => ({ sessions: rows }) } as Response;
+      return realFetch(url, init);
+    }) as typeof fetch;
+    const w = mountActivated((await import("../../../src/components/GridView.vue")).default, {
+      global: { stubs: { TerminalGrid: CellsStub, AppToolbar: ToolbarStub, SettingsModal: SkillSettingsStub } },
+    });
+    await flushPromises();
+
+    rows = [{ id: MISSED, agent: "claude", cwd: "/proj" }]; // spawned while the socket was down
+    pubsub.reconnect();
+    await flushPromises();
+
+    const cells = w.findComponent(CellsStub).props("cells") as Array<{ session: string | null }>;
+    expect(cells.some((c) => c.session === MISSED)).toBe(true);
+    w.unmount();
+  });
+
+  // The same channel carries every working/waiting/closed push — several a turn, per session. A
+  // sweep on each would refetch constantly to learn nothing.
+  it("does not sweep on activity pushes, only on a spawn", async () => {
+    let asked = 0;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url: FetchUrl, init?: RequestInit) => {
+      if (String(url).includes("/api/sessions/unplaced")) {
+        asked++;
+        return { ok: true, json: async () => ({ sessions: [] }) } as Response;
+      }
+      return realFetch(url, init);
+    }) as typeof fetch;
+    const w = mountActivated((await import("../../../src/components/GridView.vue")).default, {
+      global: { stubs: { TerminalGrid: CellsStub, AppToolbar: ToolbarStub, SettingsModal: SkillSettingsStub } },
+    });
+    await flushPromises();
+    expect(asked).toBe(1); // the mount sweep
+
+    pubsub.push("sessions", { id: SPAWNED, working: true, event: null });
+    pubsub.push("sessions", { id: SPAWNED, working: false, waiting: true, event: "Notification" });
+    pubsub.push("sessions", { id: SPAWNED, working: false, event: "closed" });
+    await flushPromises();
+
+    expect(asked).toBe(1);
+    w.unmount();
+  });
+
+  // CodeRabbit, on this PR. onActivated fires again when the user leaves the grid and comes
+  // straight back. Both runs read `cells` before either inserts, so the per-row guard cannot see
+  // the other — and the same unplaced session gets two cells fighting over one socket.
+  it("runs one adoption sweep at a time", async () => {
+    let asked = 0;
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url: FetchUrl, init?: RequestInit) => {
+      if (String(url).includes("/api/sessions/unplaced")) {
+        asked++;
+        return new Promise<Response>(() => {}); // never resolves: both activations are in flight
+      }
+      return realFetch(url, init);
+    }) as typeof fetch;
+
+    const GridView = (await import("../../../src/components/GridView.vue")).default;
+    const holder = defineComponent({
+      props: { show: { type: Boolean, default: true } },
+      render() {
+        return h(KeepAlive, null, [this.show ? h(GridView) : h("div")]);
+      },
+    });
+    const w = mount(holder, {
+      props: { show: true },
+      global: { stubs: { TerminalGrid: CellsStub, AppToolbar: ToolbarStub, SettingsModal: SkillSettingsStub } },
+    });
+    await flushPromises();
+    expect(asked).toBe(1);
+
+    await w.setProps({ show: false }); // deactivate
+    await w.setProps({ show: true }); // ...and straight back
+    await flushPromises();
+
+    expect(asked).toBe(1); // the first sweep is still in flight, so the second is refused
+    w.unmount();
+  });
+
+  it("does not adopt a session it already has a cell for", async () => {
+    // The server clears the mark when a cell attaches, but this tab may still be holding a cell
+    // whose attach has not landed. Two cells for one session fight over its socket.
+    const DUPE = "55555555-5555-5555-5555-555555555555";
+    localStorage.setItem("grid_v2", JSON.stringify({ cells: [{ uid: 3, session: DUPE, cwd: "/w" }], expanded: null, page: 0, sortMode: "manual" }));
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn(async (url: FetchUrl, init?: RequestInit) => {
+      if (String(url).includes("/api/sessions/unplaced"))
+        return { ok: true, json: async () => ({ sessions: [{ id: DUPE, agent: "claude", cwd: "/w" }] }) } as Response;
+      return realFetch(url, init);
+    }) as typeof fetch;
+    const w = mountActivated((await import("../../../src/components/GridView.vue")).default, {
+      global: { stubs: { TerminalGrid: CellsStub, AppToolbar: ToolbarStub, SettingsModal: SkillSettingsStub } },
+    });
+    await flushPromises();
+
+    const cells = w.findComponent(CellsStub).props("cells") as Array<{ session: string | null }>;
+    expect(cells.filter((c) => c.session === DUPE)).toHaveLength(1);
+    w.unmount();
+  });
+
+  // What the seeded collection is FOR: the Canvas pane exists only beside an enlarged cell, so a
+  // card placed into a tiled one is two gestures away and invisible until both are made. Reported
+  // live — the card was landing correctly and looked like a feature that did nothing.
+  it("enlarges the placed cell and opens its Canvas when a collection was seeded", async () => {
+    const { placeSpawnedChat } = await import("../../../src/composables/useSpawnedChat");
+    const opened: number[] = [];
+    const CanvasGridStub = {
+      name: "TerminalGrid",
+      props: ["cells", "expandedUid"],
+      template: '<div class="canvas-stub" />',
+      setup: (_: unknown, { expose }: { expose: (api: Record<string, unknown>) => void }) => {
+        expose({ openCanvasFor: (uid: number) => opened.push(uid) });
+        return () => {};
+      },
+    };
+    const w = mountActivated((await import("../../../src/components/GridView.vue")).default, {
+      global: { stubs: { TerminalGrid: CanvasGridStub, AppToolbar: ToolbarStub, SettingsModal: SkillSettingsStub } },
+    });
+    await flushPromises();
+
+    placeSpawnedChat({ id: SPAWNED, agent: "claude", draft: false, canvas: true });
+    await flushPromises();
+
+    // The uid of the cell just placed for THIS session — not a guess at the counter.
+    const cells = w.findComponent(CanvasGridStub).props("cells") as Array<{ uid: number; session: string | null }>;
+    const placedUid = cells.find((c) => c.session === SPAWNED)?.uid;
+    expect(placedUid).toBeDefined();
+    expect(opened).toEqual([placedUid]);
+    w.unmount();
+  });
+
+  it("leaves the grid alone for a spawn that asks for no canvas", async () => {
+    // Every other spawn — a skill button, a template card, cron, an issue being started. Taking
+    // over the screen to show an empty pane is worse than leaving the grid as the user arranged it.
+    //
+    // The field is OMITTED here, not set false: `canvas` is opt-in precisely so a caller with no
+    // canvas to show says nothing. A required field broke useIssueStart the day it landed.
+    const { placeSpawnedChat } = await import("../../../src/composables/useSpawnedChat");
+    const opened: number[] = [];
+    const CanvasGridStub = {
+      name: "TerminalGrid",
+      props: ["cells", "expandedUid"],
+      template: '<div class="canvas-stub" />',
+      setup: (_: unknown, { expose }: { expose: (api: Record<string, unknown>) => void }) => {
+        expose({ openCanvasFor: (uid: number) => opened.push(uid) });
+        return () => {};
+      },
+    };
+    const w = mountActivated((await import("../../../src/components/GridView.vue")).default, {
+      global: { stubs: { TerminalGrid: CanvasGridStub, AppToolbar: ToolbarStub, SettingsModal: SkillSettingsStub } },
+    });
+    await flushPromises();
+
+    placeSpawnedChat({ id: SPAWNED, agent: "claude", draft: false });
+    await flushPromises();
+
+    expect(opened).toEqual([]);
     w.unmount();
   });
 });

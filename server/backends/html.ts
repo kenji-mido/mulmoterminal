@@ -18,6 +18,7 @@
 import path from "node:path";
 import type { Express, Request, Response, NextFunction } from "express";
 import { executeHtmlDispatch, HTML_FILE_MOUNT } from "@mulmoclaude/html-plugin";
+import { SANDBOXED_VIEW_CDN_ALLOWLIST } from "@mulmoclaude/core/remote-view";
 import { artifactsFileOps } from "./artifacts.js";
 import { htmlByPath, resolveHtmlRequest } from "./openPath.js";
 import { publishFileChange } from "./fileChange.js";
@@ -25,16 +26,12 @@ import { statFileOr404 } from "./statFileOr404.js";
 import { streamFileToResponse } from "./streamFile.js";
 import { isWithin } from "../infra/path-within.js";
 
-// Curated CDN allowlist (matches the collection custom-view policy) for an
-// LLM-authored page that may pull a charting/util lib or font from a CDN.
-const ALLOWED_CDNS = [
-  "https://cdn.jsdelivr.net",
-  "https://unpkg.com",
-  "https://cdnjs.cloudflare.com",
-  "https://fonts.googleapis.com",
-  "https://fonts.gstatic.com",
-  "https://cdn.plot.ly",
-].join(" ");
+// Curated CDN allowlist for an LLM-authored page that may pull a charting/util lib or font
+// from a CDN. Core owns the list so this policy and the remote-view CSP can't drift — widen
+// it THERE, never here. Every entry is a supply-chain surface, so html.spec.ts pins the
+// resolved set: a core release that adds an origin fails that spec rather than silently
+// widening what this host trusts.
+const ALLOWED_CDNS = SANDBOXED_VIEW_CDN_ALLOWLIST.join(" ");
 
 // Preview CSP for a presentHtml page. This HTML is LLM-authored, so the RESPONSE
 // itself must sandbox it — not just the embedding iframe. `sandbox allow-scripts`

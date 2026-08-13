@@ -16,16 +16,22 @@ import { getHeaderConfig } from "../config/config-routes.js";
 import { buildHeaderContext, loadHeaderConfig } from "../config/header-context.js";
 import { resolveButtonCommand, shellQuoteFor } from "../config/header-resolve.js";
 import { resolveScript } from "../files/scripts.js";
-import { refreshHostKeychainIfExpired, writeSandboxCredentials } from "../infra/sandbox.js";
 import { tmuxHasSession } from "../infra/tmux.js";
 import { launchChoiceFromParams } from "../session/launch-choice.js";
 import { codexSessionsRoot } from "../agents/codex-session.js";
 import { antigravityBrainRoot, antigravityConversationExists } from "../agents/antigravity-session.js";
 import { codexRolloutExists } from "../agents/codex-sessions.js";
-import { antigravityConversations, antigravityConversationsHydrated, codexRolloutIds, markDevTerminalSession, ptys } from "../session/registry.js";
-import { sandboxWouldRun, SpawnRefusedError } from "../session/pty-spawn.js";
+import {
+  antigravityConversations,
+  antigravityConversationsHydrated,
+  codexRolloutIds,
+  markDevTerminalSession,
+  markAttachedSessionPlaced,
+  ptys,
+} from "../session/registry.js";
+import { SpawnRefusedError } from "../session/pty-spawn.js";
 import { bufferEarlyFrames, type EarlyFrames } from "../session/early-frames.js";
-import { launcherCommandWithGuiMcp } from "../session/launcher-gui-mcp.js";
+import { launcherCommandWithGuiMcp, launcherRunsAgent } from "../session/launcher-gui-mcp.js";
 import { codexGuiMcpServers } from "../session/mcp-config.js";
 import { registeredGuiMcpGroups } from "../infra/gui-mcp-registration.js";
 import { TOOL_GROUPS, type ToolGroup } from "../../common/toolGroups.js";
@@ -34,12 +40,14 @@ import { handleCommandFrame } from "../session/pty-connection.js";
 import { closeWithError } from "../session/ws-frames.js";
 import { ProviderRefusedError } from "../session/provider-env.js";
 import { sessionExistsOnDisk } from "../session/session-reads.js";
-import { canStartLauncher, resolveReattachableId, resolveSession, type SessionResolution } from "../session/session-resolve.js";
+import { canStartLauncher, isContinuingSession, resolveReattachableId, resolveSession, type SessionResolution } from "../session/session-resolve.js";
 import type { PtyEntry } from "../session/types.js";
 import type { SpawnClaudePty, SpawnCodexPty, SpawnAntigravityPty, SpawnCommandPty, SpawnLauncherPty, ResolveLauncher } from "../session/spawners.js";
 import { terminalWsKind, type TerminalWsKind } from "./terminal-ws-path.js";
 import { normalizeAgent, parseIndexParam } from "./routeParams.js";
 import { agentResumeId } from "../agents/agent-resume.js";
+import { claimLaunch, worktreeOccupancy } from "../session/worktree-session-limit.js";
+import { worktreeRefusal } from "../../common/worktreeSession.js";
 
 export interface WsRouteDeps {
   /** The http server these endpoints hang their `upgrade` handler off. */
@@ -155,6 +163,42 @@ export function refuseUnusableWorkspace(ws: WebSocket, kind: TerminalWsKind, unu
   }
   console.warn(`[ws/${kind}] refusing to start — ${unusable}`);
   closeWithError(ws, unusable);
+  return true;
+}
+
+/**
+ * Refuse a FRESH agent session in a worktree that already has one (#1207).
+ *
+ * Only a fresh one: reattaching or resuming a session that already exists is the whole point of
+ * the rule, not a violation of it. The refusal has to happen before the browser is told a session
+ * id, or a cell adopts an id for a terminal that is about to be closed under it.
+ *
+ * "Fresh" is read off the id the resolver settled on rather than re-listing the ways a session can
+ * continue: every resolver here keeps the REQUESTED id exactly when something can serve it (a live
+ * pty, a surviving tmux session, a transcript or rollout to resume) and mints a new one otherwise.
+ * Codex caught the first version spelling that list out per call site and omitting tmux-only
+ * liveness — which reads a reconnect after a server restart as a brand-new session (#1208).
+ */
+async function refuseSecondWorktreeSession(
+  ws: WebSocket,
+  kind: TerminalWsKind,
+  cwd: string,
+  session: { requested: string | null; sessionId: string },
+): Promise<boolean> {
+  if (isContinuingSession(session.requested, session.sessionId)) return false;
+  // Claimed BEFORE the occupancy read, which is asynchronous: two launches aimed at one worktree
+  // would otherwise both read it as free and both spawn (#1208, found by Codex). The claim is
+  // dropped with the socket, which covers every early return below as well as a client that leaves
+  // mid-check; a claim held past the spawn costs nothing, since the pty then occupies the worktree
+  // on its own account.
+  const claim = claimLaunch(cwd);
+  ws.once("close", claim.release);
+  const { isWorktree, session: occupied } = await worktreeOccupancy(cwd);
+  if (!isWorktree) return false;
+  const reason = worktreeRefusal(occupied, claim.contended);
+  if (!reason) return false;
+  console.warn(`[ws/${kind}] refusing a second session in ${cwd} — ${reason}`);
+  closeWithError(ws, reason);
   return true;
 }
 
@@ -318,12 +362,14 @@ async function handleClaudeConnection(deps: WsRouteDeps, ws: WebSocket, req: WsU
   // re-persists, so the reload just reopens a working terminal seamlessly.
   const { reattachId, resume, sessionId } = resolveClaudeSession(requested, cwd);
   const live = reattachId ? ptys.get(reattachId) : undefined;
+  if (await refuseSecondWorktreeSession(ws, "claude", cwd, { requested, sessionId })) return;
 
   // A dev terminal (gui=0) is a multi-terminal GRID cell: remember its session id so
   // it's excluded from the chat sidebar (see devTerminalSessions). This is the single
   // choke point for every grid attach — new, resumed, or reattached — so the mark is
   // recorded (and re-recorded after a reboot when the cell reconnects) exactly once.
   if (!attachGuiMcp) markDevTerminalSession(sessionId, effectiveSessionCwd(live?.cwd, cwd));
+  markAttachedSessionPlaced(sessionId, requested);
 
   // Tell the browser which session this is (it learns the id of new sessions) and
   // the EFFECTIVE cwd — where claude really runs. On reattach that's the live
@@ -335,17 +381,6 @@ async function handleClaudeConnection(deps: WsRouteDeps, ws: WebSocket, req: WsU
   // was the one route that let it fall on the floor (#1178, see early-frames.ts).
   const early = announceSession(ws, sessionId, reportedCwd);
 
-  // Before touching the Keychain for a sandbox session, refresh it if the token expired
-  // (macOS refreshes into the Keychain, not the file — so an untouched export can be a
-  // stale token the container 401s on). No-op unless a sandbox spawn/reattach applies.
-  if (live?.sandbox || sandboxWouldRun(attachGuiMcp)) {
-    await refreshHostKeychainIfExpired(deps.claudeBin);
-    // Renewal can block for seconds (it drives the host CLI). If the client vanished
-    // during that window the close handlers aren't wired yet, so spawning now would
-    // leak a PTY nobody reaps — bail instead.
-    if (!clientStillConnected(ws, "claude", sessionId, early)) return;
-  }
-
   // A provider refusal already says exactly what is wrong with the directory's config (#579), and a
   // refused spawn already names the binary and the PATH it searched, or the directory that is gone
   // (#1063, #1078); a generic hint would bury either.
@@ -353,10 +388,6 @@ async function handleClaudeConnection(deps: WsRouteDeps, ws: WebSocket, req: WsU
     err instanceof ProviderRefusedError || err instanceof SpawnRefusedError ? err.message : `Failed to start Claude: ${messageOf(err)}`;
 
   startAndWire(deps, ws, { id: sessionId, tag: "claude", early, startFailureMessage, size }, () => {
-    // A sandbox session's credential is snapshotted at spawn onto its mounted per-session
-    // file. On reconnect, re-sync it from the (now-refreshed) Keychain so a token that
-    // rotated since spawn doesn't leave the reattached session stuck at "Not logged in".
-    if (live?.sandbox) writeSandboxCredentials(sessionId);
     const entry = live ? deps.reattachPty(live, ws, sessionId) : deps.spawnClaudePty(sessionId, resume, ws, { cwd, attachGuiMcp, launch });
     // Single view (gui) = the attached session IS the actively-viewed pane, so mark it
     // read. A grid dev-terminal cell (gui=0) is only "viewed" once focused/zoomed (the
@@ -456,7 +487,12 @@ async function handleLaunchConnection(deps: WsRouteDeps, ws: WebSocket, req: WsU
   const resolved = resolveLaunchSession(deps, requested, index, shell);
   if (!resolved) return closeWithError(ws, "Launcher not found — check Settings → Launch commands.");
   const { sessionId, live, command } = resolved;
+  // A launcher is a command line, so the limit follows what it RUNS: a launcher configured as
+  // `codex` is the agent toggle by another name and is held to the same rule, while `yarn dev` or
+  // a shell is not an agent editing the tree and stays free (see launcherRunsAgent).
+  if (launcherRunsAgent(command) && (await refuseSecondWorktreeSession(ws, "launch", cwd, { requested, sessionId }))) return;
   markDevTerminalSession(sessionId, effectiveSessionCwd(live?.cwd, cwd));
+  markAttachedSessionPlaced(sessionId, requested);
   const early = announceSession(ws, sessionId, live?.cwd ?? cwd);
 
   // A launcher that runs codex gets the directory's registered tool groups too. The chip and the
@@ -484,7 +520,9 @@ async function handleCodexConnection(deps: WsRouteDeps, ws: WebSocket, req: WsUp
   const attachGuiMcp = url.searchParams.get("gui") !== "0";
 
   const { sessionId, live, resumeRolloutId } = resolveCodexSession(requested);
+  if (await refuseSecondWorktreeSession(ws, "codex", cwd, { requested, sessionId })) return;
   if (!attachGuiMcp) markDevTerminalSession(sessionId, effectiveSessionCwd(live?.cwd, cwd));
+  markAttachedSessionPlaced(sessionId, requested);
   const early = announceSession(ws, sessionId, live?.cwd ?? cwd);
 
   // A grid cell's GUI tools are whatever its DIRECTORY registered — the same switches claude's
@@ -553,7 +591,9 @@ async function handleAntigravityConnection(deps: WsRouteDeps, ws: WebSocket, req
   // conversation that is right there — which is the restart case this exists for.
   await antigravityConversationsHydrated;
   const { sessionId, live, resumeConversationId } = resolveAntigravitySession(requested);
+  if (await refuseSecondWorktreeSession(ws, "antigravity", cwd, { requested, sessionId })) return;
   if (!attachGuiMcp) markDevTerminalSession(sessionId, effectiveSessionCwd(live?.cwd, cwd));
+  markAttachedSessionPlaced(sessionId, requested);
   const early = announceSession(ws, sessionId, live?.cwd ?? cwd);
 
   // The directory's registered groups, read here because the lookup reads Claude Code's config

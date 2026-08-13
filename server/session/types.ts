@@ -3,6 +3,7 @@
 // modules that read it can name them without importing the boot module (#548).
 import type { IPty } from "node-pty";
 import type { WebSocket } from "ws";
+import type { WorkerStatus } from "../../common/workerStatus.js";
 import type { SessionAgent } from "../../common/sessionAgent.js";
 
 export interface Activity {
@@ -31,9 +32,6 @@ export interface PtyEntry {
   // (see tmuxRedrawClient). Cleared by the first resize frame after the reattach — waiting for it
   // is the point, since that frame is where the client tells us the size it actually settled at.
   redrawPending?: boolean;
-  // True when `term` is a `docker run` client (single-view sandbox): reap force-removes
-  // the container, since killing the client alone can leave it running.
-  sandbox?: boolean;
   // What is running in this PTY. Recorded at spawn because nothing else can recover it
   // later, and the phone needs it to offer input that suits the session (mulmoserver#84).
   agent: SessionAgent;
@@ -64,7 +62,7 @@ export interface ToolCall {
 }
 
 // A sidebar session row (resolved from disk or a pending in-memory session).
-export interface SessionMeta {
+export interface SessionMeta extends WorkerStatus {
   id: string;
   title: string;
   mtime: number;
@@ -74,10 +72,6 @@ export interface SessionMeta {
    *  Lets the client split `waiting` into "done, unreviewed" (Stop) vs "blocked on
    *  input" (Notification). */
   event: string | null;
-  /** Spawned as a hidden background worker (spawnBackgroundChat hidden:true). The
-   *  tab still lists, but it never renders bold/unread — a background helper
-   *  finishing shouldn't pull the user's attention. */
-  hidden: boolean;
 }
 
 // Recency rank for an on-disk .jsonl, before its contents are read.

@@ -184,7 +184,9 @@ describe("worktree routes: create → list → remove lifecycle", () => {
       await r["GET /api/worktrees"]({ headers: {}, query: { cwd: repo } }, listed);
       const body = listed.payload as { isGit: boolean; base: string; worktrees: { task: string; dirty: boolean }[] };
       expect(body.isGit).toBe(true);
-      expect(body.worktrees).toEqual([{ path: wt.path, branch: "agent/fix-login", head: expect.any(String), task: "fix-login", dirty: false }]);
+      // `session: null` is what makes the row start a fresh one: a worktree created a moment ago
+      // has no conversation to resume and nobody holding it (#1207).
+      expect(body.worktrees).toEqual([{ path: wt.path, branch: "agent/fix-login", head: expect.any(String), task: "fix-login", dirty: false, session: null }]);
 
       writeFileSync(path.join(wt.path, "new.txt"), "x");
       const listed2 = makeRes();

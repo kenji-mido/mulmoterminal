@@ -6,6 +6,7 @@ import type { IPty } from "node-pty";
 import type { WebSocket } from "ws";
 import { getLaunchers } from "../config/config-routes.js";
 import { launcherAt, shellInvocation } from "./shell-command.js";
+import { launcherAgent } from "./launcher-gui-mcp.js";
 import { ptys } from "./registry.js";
 import { ptySpawn, spawnPty } from "./pty-spawn.js";
 import { ptyExitLine, ptyStartLine } from "./pty-exit-log.js";
@@ -55,7 +56,10 @@ export function createShellSpawners(deps: SpawnDeps) {
     // there — so naming it on that line would describe a program nobody started.
     console.log(ptyStartLine({ agent: "launcher", pid: term.pid, cwd, tmux, reattached, sessionId, note: reattached ? null : command }));
 
-    const entry: PtyEntry = { term, ws, buffer: "", cwd, tmux, active: false, agent: "shell" };
+    // A launcher that runs an agent IS that agent, and recording it says so: the worktree limit
+    // then counts this session as the worktree's occupant, the phone offers input that suits it,
+    // and a draft is submitted the way that agent expects. Anything else stays a shell (#1208).
+    const entry: PtyEntry = { term, ws, buffer: "", cwd, tmux, active: false, agent: launcherAgent(command) };
     ptys.set(sessionId, entry);
 
     term.onData((data) => {

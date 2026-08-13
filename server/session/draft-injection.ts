@@ -6,6 +6,7 @@ import type { IPty } from "node-pty";
 import { claudeAdapter } from "../agents/claude.js";
 import type { PtyEntry } from "./types.js";
 import { sanitizeDraftText } from "./pty-text.js";
+import { squashForMarker } from "./pty-scan.js";
 import { planDraftInjection } from "./draft-plan.js";
 import { submittableLineForAgent } from "../../common/terminalSubmit.js";
 
@@ -15,8 +16,17 @@ type DraftTarget = Pick<PtyEntry, "agent"> & { term: Pick<IPty, "write"> };
 
 // Claude must have its input box + bracketed-paste mode up before it will capture a
 // typed `draft`; too early and the bytes are echoed into the scrollback instead. We
-// wait for its status line to paint (the "shift+tab to cycle" mode hint), settle
-// briefly, then type. A fallback fires if that marker never shows (UI string drift).
+// wait for its status line to paint (the mode hint — "? for shortcuts" on current
+// versions), settle briefly, then type. A fallback fires if that marker never shows
+// (UI string drift).
+//
+// Every marker below is matched against the SQUASHED stream, never the raw bytes: a TUI
+// redraws by positioning the cursor between words, so the readiness hint reaches us as
+// "?ESC[24GforESC[28Gshortcuts" and the trust dialog as "Yes,ESC[12GIESC[14Gtrust…".
+// Both were written as spaced regexes over raw data and therefore matched NOTHING — the
+// readiness one silently cost every claude spawn the full DRAFT_QUIET_MS below (~10s to a
+// visible prompt in a chat started from the collection UI), and the trust guard was
+// holding only because a dialog screen is also a quiet one.
 const DRAFT_READY_MARKER = claudeAdapter.draftReadyMarker;
 const DRAFT_SETTLE_MS = 250;
 // The drift fallback waits for the stream to go QUIET for this long, not for this long since the
@@ -37,7 +47,35 @@ const DRAFT_QUIET_MS = 6000;
 // new screen together, and then the screen stops changing — so a scanner that waited forever for
 // proof would never type at all. Observed doing exactly that.
 const TRUST_QUIET_MS = 60_000;
-const TRUST_PROMPT_MARKER = /Yes, I trust this folder|project you created or one you trust/i;
+const TRUST_PROMPT_MARKER = /yes,itrustthisfolder|projectyoucreatedoroneyoutrust/g;
+
+// Which is why the dialog's text ALONE is not the question — "was it painted" and "is it still on
+// screen" are different facts, and the long window is only right for the second. An answering
+// repaint carries the dismissed dialog and the new screen in one burst, so text-alone re-arms the
+// full minute at the exact moment the input box appears. With a readiness hint in that same burst
+// the marker above wins and none of this is reached; in a pane too narrow for the hint there is
+// nothing else to go on, and a fresh-worktree draft waits a minute for a box already waiting for it.
+//
+// What separates the two is what FOLLOWS the dialog. Up, it is the last thing painted: a couple of
+// short lines (the second option, the confirm hint) and then the stream stops, since nothing paints
+// while it waits for an answer. Answered, a whole screen is drawn after it. So the long window is
+// armed only when little enough follows the LAST match for the dialog to still be what is showing.
+//
+// The threshold is deliberately far below a screen and comfortably above the dialog's own tail
+// (~40 characters squashed): the failure it must not have is reading an ANSWERED dialog as an open
+// one, which is the minute-long wait this exists to remove. Erring the other way costs the guard on
+// a pane so narrow that the repaint squashes to under this — the behaviour before this rule, so
+// nothing regresses.
+const TRUST_TAIL_MAX = 120;
+
+// Is the trust dialog what the screen is CURRENTLY showing? Scans for the last match because a
+// repaint can hold several: the answered dialog earlier in the burst, and any older one still in
+// the tail we keep.
+const trustDialogIsUp = (screen: string): boolean => {
+  let end = -1;
+  for (const match of screen.matchAll(TRUST_PROMPT_MARKER)) end = match.index + match[0].length;
+  return end !== -1 && screen.length - end <= TRUST_TAIL_MAX;
+};
 // Claude's TUI commits a bracketed paste to its input box asynchronously; a CR glued
 // onto the same write can arrive before the paste lands and be dropped — leaving an
 // auto-run prompt typed-but-unsent. Send the submitting Enter as a SEPARATE chunk a
@@ -99,9 +137,9 @@ export function attachDraftInjection(
       // pty already gone — nothing to draft into
     }
   };
-  // Fallback: type even if the readiness marker never appears (UI string drift, or a mode whose
-  // status line does not carry it — v2.1.220's manual mode reads "? for shortcuts"). Re-armed on
-  // every burst below, so it measures silence rather than elapsed time.
+  // Fallback: type even if the readiness marker never appears — a further UI string drift, or a
+  // status line too narrow for the hint (claude drops it for the context meter in a small pane).
+  // Re-armed on every burst below, so it measures silence rather than elapsed time.
   let quiet = setTimeout(typeDraft, DRAFT_QUIET_MS);
   const waitFor = (ms: number) => {
     clearTimeout(quiet);
@@ -111,18 +149,24 @@ export function attachDraftInjection(
     if (done) return;
     // Type the draft once claude's input box has painted (its mode-hint status line),
     // then settle briefly so the paste lands in the input rather than the scrollback.
+    // Squashed, not raw: the words of both markers arrive with cursor moves between them. The tail
+    // kept is the RAW one, so a sequence split across two reads still squashes correctly once its
+    // second half arrives.
     scan = (scan + data).slice(-4096);
+    const screen = squashForMarker(scan);
     // Checked before the dialog: answering it repaints the dismissed dialog and the new prompt in
     // ONE burst, and the marker is the stronger fact — it means an input box exists now.
-    if (DRAFT_READY_MARKER.test(scan)) {
+    if (DRAFT_READY_MARKER.test(screen)) {
       scan = "";
       clearTimeout(quiet);
       setTimeout(typeDraft, DRAFT_SETTLE_MS);
       return;
     }
     // The one quiet screen that must not be typed into: hold much longer than usual. `scan` is
-    // cleared so a repaint does not keep re-arming the long window forever.
-    if (TRUST_PROMPT_MARKER.test(scan)) {
+    // cleared so a repaint does not keep re-arming the long window forever — and the repaint that
+    // ANSWERS it then arrives against an empty buffer, where the new screen it draws is all the
+    // tail there is and trustDialogIsUp reads it as gone.
+    if (trustDialogIsUp(screen)) {
       scan = "";
       waitFor(TRUST_QUIET_MS);
       return;

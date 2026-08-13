@@ -16,6 +16,11 @@ import {
   activityStateHydrated,
   aiTitles,
   backgroundSessionsHydrated,
+  failedWorkersHydrated,
+  unplacedSessionsHydrated,
+  placedSessionsHydrated,
+  unplacedSessionRows,
+  ptys,
   devTerminalSessions,
   devTerminalSessionsHydrated,
   isBackgroundSession,
@@ -37,6 +42,8 @@ import {
 import { formatHandoff, type HandoffShape } from "../session/handoff-text.js";
 import { projectSessionsDir } from "../session/project-dir.js";
 import { isUserHidden } from "../session/hidden-store.js";
+import { sessionAttached } from "../session/dir-session.js";
+import { tmuxAttachedCounts } from "../infra/tmux.js";
 import { codexSessionsRoot } from "../agents/codex-session.js";
 import { listCodexSessions } from "../agents/codex-sessions.js";
 import type { SessionMeta } from "../session/types.js";
@@ -168,10 +175,15 @@ async function sessionList(req: Request, res: Response) {
     const includePending = !req.query.cwd;
     // Wait for the persisted grid-session set before filtering (below), so a chat
     // request racing server boot can't leak previously-hidden grid transcripts. The
-    // background set is awaited for BOTH queries — it decides a flag on the row rather
-    // than whether the row is listed, and that flag is answered either way.
+    // background and failed sets are awaited for BOTH queries — they decide a flag on the row
+    // rather than whether the row is listed, and those flags are answered either way.
+    //
+    // `failed` especially: the whole value of persisting it is finding out LATER, and the most
+    // likely "later" is the first list after a restart. Serving it as false while its log is
+    // still being read would lose exactly the case the record exists for (Codex, PR #1188).
     if (includePending) await devTerminalSessionsHydrated;
     await backgroundSessionsHydrated;
+    await failedWorkersHydrated;
     await sessionMemosHydrated; // the memo is the row's TITLE when there is one — a race shows the agent's words instead
     const dir = projectSessionsDir(cwd);
     let files: string[] = [];
@@ -202,7 +214,7 @@ async function sessionList(req: Request, res: Response) {
       await Promise.all(
         top.map((s) =>
           s.kind === "pending"
-            ? { id: s.id, title: s.title, mtime: s.mtime, working: s.working, waiting: s.waiting, event: s.event, hidden: s.hidden }
+            ? { id: s.id, title: s.title, mtime: s.mtime, working: s.working, waiting: s.waiting, event: s.event, hidden: s.hidden, failed: s.failed }
             : readSessionMeta(dir, s.file).catch(() => null),
         ),
       )
@@ -211,7 +223,12 @@ async function sessionList(req: Request, res: Response) {
       .filter((s) => !isUserHidden(s.id)) // user hid it from the sidebar (transcript kept)
       .sort((a, b) => b.mtime - a.mtime);
 
-    res.json({ cwd, sessions });
+    // Who is HOLDING each row, from one `list-clients` call for the whole list (#1207). The
+    // picker used to answer this from the current page's own grid, which is blind to a second
+    // browser tab and to a second mulmoterminal process — the two ways a running session got
+    // taken over without anything warning first.
+    const tmuxCounts = tmuxAttachedCounts();
+    res.json({ cwd, sessions: sessions.map((s) => ({ ...s, attached: sessionAttached(s.id, tmuxCounts) })) });
   } catch (err) {
     console.error("[api] /api/sessions failed:", err);
     res.status(500).json({ error: String(err) });
@@ -239,5 +256,28 @@ export function mountSessionRoutes(app: Express, deps: SessionRouteDeps): void {
   app.get("/api/transcript/timeline", toolTimeline);
   app.get("/api/transcript/last-turn", lastTurn);
   app.get("/api/sessions", sessionList);
+  // The sessions a loading grid should adopt: spawned VISIBLE by the server and never taken by a
+  // cell (a scheduled task's chat, one the phone started, one an agent started from another
+  // session). Deliberately its own endpoint answering a server-side marker, rather than the grid
+  // diffing "all sessions" against its own state: a diff would sweep up ordinary sessions and
+  // change what a reload does to a normal cell, which is the one thing this whole line of work
+  // must not do.
+  //
+  // Hidden workers are absent by construction — the mark is only ever set for a visible spawn —
+  // and a spec pins that, since "it happens not to be marked" and "it cannot be marked" read the
+  // same until someone adds a caller.
+  app.get("/api/sessions/unplaced", async (_req, res) => {
+    await Promise.all([unplacedSessionsHydrated, placedSessionsHydrated]);
+    const sessions = unplacedSessionRows().map(({ id, agent }) => {
+      const entry = ptys.get(id);
+      // A session whose PTY is gone (the server restarted, tmux ended) is still worth adopting —
+      // the cell resumes it from disk. The AGENT comes from the mark rather than the entry for
+      // exactly that case: a codex session adopted as claude reconnects on the wrong endpoint, and
+      // the entry that would have said so is what is missing (Codex, PR #1189). The live entry
+      // still wins when there is one — it is the process actually running.
+      return { id, agent: entry?.agent ?? agent, cwd: entry?.cwd ?? null };
+    });
+    res.json({ sessions });
+  });
   app.get("/api/codex/sessions", codexSessionList);
 }

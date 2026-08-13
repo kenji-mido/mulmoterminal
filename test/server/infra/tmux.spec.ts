@@ -6,6 +6,7 @@ import {
   isResumableTmuxSession,
   parseTmuxEnvironment,
   parseAttachedClientCount,
+  parseTmuxClientSessions,
   parseTmuxTerminalModes,
   parseTmuxWindowSize,
   redrawTargets,
@@ -230,6 +231,34 @@ describe("parseAttachedClientCount", () => {
     expect(parseAttachedClientCount("no server running")).toBeNull();
     expect(parseAttachedClientCount("-1")).toBeNull();
     expect(parseAttachedClientCount("1.5")).toBeNull();
+  });
+});
+
+describe("parseTmuxClientSessions", () => {
+  // One line per CLIENT, so the count of a session is how many times its name appears — two
+  // mulmoterminal processes on one session is exactly the case this has to see (#1207).
+  it("counts the clients on each of our sessions", () => {
+    expect(parseTmuxClientSessions("mt-a\nmt-b\nmt-a\n")).toEqual(
+      new Map([
+        ["a", 2],
+        ["b", 1],
+      ]),
+    );
+  });
+
+  it("ignores sessions that are not ours, and empty output", () => {
+    expect(parseTmuxClientSessions("someone-elses\nmt-a\n")).toEqual(new Map([["a", 1]]));
+    expect(parseTmuxClientSessions("")).toEqual(new Map());
+  });
+
+  // A session with no client does not appear at all, which is what makes "absent" mean zero
+  // rather than unknown — the caller can only tell the two apart from the CALL failing.
+  it("has no entry for a session nobody holds", () => {
+    expect(parseTmuxClientSessions("mt-a\n").has("b")).toBe(false);
+  });
+
+  it("survives CRLF", () => {
+    expect(parseTmuxClientSessions("mt-a\r\nmt-a\r\n")).toEqual(new Map([["a", 2]]));
   });
 });
 

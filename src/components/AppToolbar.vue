@@ -6,9 +6,9 @@ import NotificationBell from "./NotificationBell.vue";
 import RateLimitGauge from "./RateLimitGauge.vue";
 import RemoteHostControl from "./RemoteHostControl.vue";
 import LauncherButton from "./LauncherButton.vue";
-import { useShortcuts } from "../composables/useShortcuts";
-import { viewIsGrid } from "../composables/overlayOrigin";
-import { useCollectionBrowse, browseGotoIndex, browseGotoDetail } from "../composables/useCollectionBrowse";
+import { CONTENT_ROUTES } from "../composables/overlayOrigin";
+import { useCollectionBrowse, browseGotoIndex } from "../composables/useCollectionBrowse";
+import { filesGotoIndex } from "../composables/useFilesView";
 import { useAccountingView, accountingViewOpen } from "../composables/useAccountingView";
 import { useWikiBrowse, wikiGotoIndex, wikiGotoTag } from "../composables/useWikiBrowse";
 import { usePrsView, prsGotoIndex } from "../composables/usePrsView";
@@ -19,7 +19,6 @@ import { useUpdateStatus } from "../composables/useUpdateStatus";
 import { useGithubStar } from "../composables/useGithubStar";
 import { useDropdownMenu } from "../composables/useDropdownMenu";
 import { parseTagQuery } from "./wikiTagFilter";
-import type { Shortcut } from "../../common/shortcuts";
 import type { SortMode, StatusCounts } from "./gridTabs";
 import { gridStatusSummary } from "./gridTabs";
 import { sortModeButton } from "./sortModeButton";
@@ -48,7 +47,6 @@ const route = useRoute();
 const summary = computed(() => gridStatusSummary(props.statusCounts));
 const summaryTitle = computed(() => summary.value.title);
 const hasSummary = computed(() => summary.value.show);
-const { shortcuts } = useShortcuts();
 const { view: browseView } = useCollectionBrowse();
 const { isOpen: accountingOpen } = useAccountingView();
 const { isOpen: wikiOpen } = useWikiBrowse();
@@ -86,32 +84,38 @@ async function copyUpdateCommand(): Promise<void> {
 //     grid keeps the grid's buttons instead of hiding the one just clicked
 //   - which button is HIGHLIGHTED, and whether the grid is the screen: the route itself,
 //     because an open overlay is not the grid even when the grid is underneath
-const inGrid = viewIsGrid;
 const onGridRoute = computed(() => route.name === "terminals");
-const inSingle = computed(() => !onGridRoute.value);
-const chatActive = computed(() => inSingle.value && browseView.value.mode === "closed" && !accountingOpen.value && !wikiOpen.value && !prsOpen.value);
-const collectionsActive = computed(() => browseView.value.mode === "index" && browseView.value.kind === "collection");
+// Lit on the DETAIL pages too, not just the index. A door that goes dark the moment you open one
+// of the things behind it leaves the toolbar with nothing selected while you are plainly still
+// inside that section — and since the grid's own controls hide under an overlay, nothing else
+// would be lit either (Codex, PR #1201). The index/detail distinction belongs to the view, not to
+// which section you are in.
+const collectionsActive = computed(() => browseView.value.mode !== "closed" && browseView.value.kind === "collection");
+const feedsActive = computed(() => browseView.value.mode !== "closed" && browseView.value.kind === "feed");
+const filesActive = computed(() => route.name === "files");
+// Inside the content section — which is what reveals the siblings below. Answered from the ROUTE
+// rather than from "is some overlay open", so moving between them (collections → wiki → files)
+// never blinks the row that got you there.
+const inContent = computed(() => CONTENT_ROUTES.has(String(route.name)));
 const accountingActive = computed(() => accountingOpen.value);
 const wikiActive = computed(() => wikiOpen.value);
 const prsActive = computed(() => prsOpen.value);
-function favActive(s: Shortcut): boolean {
-  return browseView.value.mode === "detail" && browseView.value.kind === s.kind && browseView.value.slug === s.slug;
-}
-
-function showChat(): void {
-  router.push({ name: "chat" });
-}
 function showGrid(): void {
   router.push("/terminals");
 }
 function showCollections(): void {
   browseGotoIndex("collection");
 }
-function showFavorite(s: Shortcut): void {
-  browseGotoDetail(s.kind, s.slug);
-}
 function showAccounting(): void {
   accountingViewOpen();
+}
+function showFeeds(): void {
+  browseGotoIndex("feed");
+}
+// No cwd: from here the Files view opens on the workspace, where a terminal header's Files button
+// opens on that terminal's own directory. The route carries the difference (`?cwd=`).
+function showFiles(): void {
+  filesGotoIndex(null);
 }
 function showWiki(): void {
   wikiGotoIndex();
@@ -137,55 +141,48 @@ function showPrs(): void {
            within the current one, and a flat row of equal buttons hid that (#941). Same rule
            treatment as the status tally at the other end of the nav. -->
       <span class="mr-1.5 inline-flex flex-none items-center gap-[3px] border-r border-border pr-2.5" role="group" aria-label="Switch view">
-        <LauncherButton icon="chat" title="Chat" label="Chat" :active="chatActive" @click="showChat" />
         <LauncherButton icon="grid_view" title="Grid (multiple terminals)" label="Grid view" :active="onGridRoute" @click="showGrid" />
+        <!-- The way IN to the workspace's own data, beside the views it is a peer of — the content
+             surfaces used to be reachable only from the single view (#886), which left them with
+             no door at all once that view goes. One button here rather than four: the rest appear
+             below once you are inside, so the row a terminal user sees does not grow by four. -->
+        <LauncherButton icon="apps" title="Collections" label="Collections" :active="collectionsActive" @click="showCollections" />
       </span>
-      <!-- Single view only (#886): the content surfaces. The grid is for supervising agents,
-           and every one of these replaces the whole screen anyway. -->
-      <LauncherButton v-if="!inGrid" icon="apps" title="Collections" label="Collections" :active="collectionsActive" @click="showCollections" />
-      <LauncherButton v-if="!inGrid" icon="account_balance" title="Accounting" label="Accounting" :active="accountingActive" @click="showAccounting" />
-      <LauncherButton v-if="!inGrid" icon="menu_book" title="Wiki" label="Wiki" :active="wikiActive" @click="showWiki" />
-      <!-- `template` wrapper rather than v-if on the v-for: the two directives on one element
-           is a Vue anti-pattern (v-if wins and is evaluated per item). -->
-      <template v-if="!inGrid">
-        <LauncherButton
-          v-for="s in shortcuts"
-          :key="`${s.kind}:${s.slug}`"
-          :icon="s.icon || 'bookmark'"
-          :title="s.title"
-          :label="s.title"
-          :active="favActive(s)"
-          @click="showFavorite(s)"
-        />
+      <!-- The other content surfaces, revealed by being IN the section rather than always present.
+           Same reasoning as the fence above: everything here acts within the view you are in. -->
+      <template v-if="inContent">
+        <LauncherButton icon="rss_feed" title="Feeds" label="Feeds" :active="feedsActive" @click="showFeeds" />
+        <LauncherButton icon="menu_book" title="Wiki" label="Wiki" :active="wikiActive" @click="showWiki" />
+        <LauncherButton icon="account_balance" title="Accounting" label="Accounting" :active="accountingActive" @click="showAccounting" />
+        <LauncherButton icon="folder_open" title="Files" label="Files" :active="filesActive" @click="showFiles" />
       </template>
-      <!-- Grid only (#886): branches under supervision are a grid concern. -->
-      <LauncherButton v-if="inGrid" icon="call_merge" title="Pull requests" label="Pull requests" :active="prsActive" @click="showPrs" />
-      <LauncherButton
-        v-if="inGrid"
-        icon="history_edu"
-        title="Worklog — the dev work log in the wiki (#worklog)"
-        label="Worklog"
-        :active="worklogActive"
-        @click="showWorklog"
-      />
-      <LauncherButton
-        v-if="inGrid"
-        icon="add"
-        :title="addTerminalActive ? 'Cancel adding a terminal' : 'New terminal (overflows to a new tab when full)'"
-        label="New terminal"
-        :active="addTerminalActive"
-        @click="emit('add-terminal')"
-      />
-      <LauncherButton
-        v-if="inGrid"
-        :icon="sortButton.icon"
-        :title="sortButton.title"
-        :label="sortButton.label"
-        :active="sortButton.active"
-        @click="emit('toggle-sort')"
-      />
+      <!-- The grid's OWN controls, and only while the grid is on screen. They act on cells the user
+           cannot see once a full-screen overlay covers them — a new terminal appearing behind the
+           wiki, an ordering change nobody watches — and the rate gauge below is status for a view
+           that is not showing. The switch group above never hides, so this never strands anyone:
+           Grid view brings the terminals back and these with them.
+           Work under supervision: PRs and the worklog sit with the terminals rather than behind the
+           Collections door, which is why they are not in CONTENT_ROUTES. -->
+      <template v-if="onGridRoute">
+        <LauncherButton icon="call_merge" title="Pull requests" label="Pull requests" :active="prsActive" @click="showPrs" />
+        <LauncherButton
+          icon="history_edu"
+          title="Worklog — the dev work log in the wiki (#worklog)"
+          label="Worklog"
+          :active="worklogActive"
+          @click="showWorklog"
+        />
+        <LauncherButton
+          icon="add"
+          :title="addTerminalActive ? 'Cancel adding a terminal' : 'New terminal (overflows to a new tab when full)'"
+          label="New terminal"
+          :active="addTerminalActive"
+          @click="emit('add-terminal')"
+        />
+        <LauncherButton :icon="sortButton.icon" :title="sortButton.title" :label="sortButton.label" :active="sortButton.active" @click="emit('toggle-sort')" />
+      </template>
       <span
-        v-if="inGrid && hasSummary && statusCounts"
+        v-if="hasSummary && statusCounts"
         class="ml-1.5 inline-flex flex-none items-center gap-2 border-l border-border pl-2.5"
         role="img"
         :aria-label="`Grid status — ${summaryTitle}`"
@@ -201,7 +198,7 @@ function showPrs(): void {
           <span class="h-2 w-2 rounded-full bg-current" />{{ statusCounts.working }}
         </span>
       </span>
-      <RateLimitGauge v-if="inGrid" />
+      <RateLimitGauge v-if="onGridRoute" />
     </nav>
     <NotificationBell class="ml-auto" />
     <RemoteHostControl />
@@ -240,7 +237,7 @@ function showPrs(): void {
     </div>
     <!-- Grid only: star this project on GitHub. It retires itself once starred (or once the
          user has opened the repo page), so it is a one-time ask rather than a fixture. -->
-    <LauncherButton v-if="inGrid && starVisible" icon="star" :title="starTitle" :label="starTitle" :active="starConfirming" @click="activateStar" />
+    <LauncherButton v-if="starVisible" icon="star" :title="starTitle" :label="starTitle" :active="starConfirming" @click="activateStar" />
     <LauncherButton
       :icon="soundButton.icon"
       :title="soundButton.label"

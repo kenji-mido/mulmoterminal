@@ -60,7 +60,11 @@ export function worktreesRoot(repoToplevel: string): string {
 // Canonicalize a path by realpath-resolving its deepest EXISTING ancestor and
 // re-attaching the missing leaf segments. So a symlink anywhere along the path
 // (even when the leaf itself doesn't exist) is resolved before containment checks.
-function canonicalPath(p: string): string {
+//
+// Exported because it is also the KEY two concurrent launches must agree on to be recognised as
+// aiming at the same directory (session/worktree-session-limit.ts), and it is sync — which is what
+// lets that check happen before anything awaits.
+export function canonicalPath(p: string): string {
   const resolved = path.resolve(p);
   const missing: string[] = [];
   let cur = resolved;

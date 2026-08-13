@@ -162,6 +162,32 @@ Pure deletion, independent of everything else, no user-visible change with the f
   are documented, so README / docs guide / `mulmoterminal-model` + `-bug-report` skills need the
   same sweep. Removing a documented env var is a changelog line.
 
+### PR2 — the workspace cell gets the full GUI MCP — **DONE**
+
+Implemented as described below, with three changes to what was planned:
+
+1. **The wire flag was NOT renamed.** `attachGuiMcp` keeps its name and its meaning ("not a grid
+   cell"); the derivation is a named, exported predicate instead —
+   `carriesFullGuiMcp(attachGuiMcp, cwd)` in `spawn-claude.ts`. Exported so the invariant is
+   assertable: `test/server/session/full-gui-mcp.spec.ts` pins that a project-directory cell is
+   false. A rename would have touched the codex and antigravity paths for no behaviour change.
+2. **`--strict-mcp-config` stays on for the workspace cell**, which means its directory's OWN
+   `.mcp.json` servers do not load there — the single view's behaviour exactly. This is the one
+   real trade in PR2 and it was not called out in the original plan. It is right because the
+   point is parity with the view being deleted, and because dropping strict would double-register
+   the GUI MCP for a workspace directory that had also registered group URLs: the agent would see
+   `mcp__mulmoterminal-gui__presentChart` AND `mcp__mulmoterminal-render__presentChart`.
+3. **codex and antigravity are deliberately left grid-only**, with the reason in a comment at
+   `spawn-codex.ts`. The rule exists to make a workspace cell equivalent to the SINGLE VIEW, and
+   the single view only ever ran claude — so there is no codex behaviour to preserve, and applying
+   it would be a new capability rather than a migrated one.
+
+Confirmed rather than assumed: the per-session MCP config file is already reaped for every kind of
+session — `cleanupSessionSettings` removes it and runs from `lifecycle.ts` reap plus the boot
+sweep, so the extra files a workspace cell now writes need no new cleanup.
+
+---
+
 ### PR2 — the workspace cell gets the full GUI MCP
 
 Small and server-side. The wire flag keeps its current meaning; what changes is that the MCP
@@ -231,16 +257,56 @@ result)` (`tool-store.ts:160`) is host-callable, deduped by uuid, disk-backed an
 the panel — the same store the broker writes through. Placing a cell can append a synthetic
 `presentCollection` result for the new session, and the panel replays it like any other.
 
-**Proposed rule — seed with what the chat was started FROM** (confirm before building):
+**The rule — parse the subject out of the SEED PROMPT, not the route.** This replaces an earlier
+proposal here to read `browseRouteSlug()` / `browseRouteSelectedId()` at spawn time. That would
+have worked, but MulmoClaude already ships this exact feature (its #1768) and takes the subject
+from the prompt, which is better on three counts:
 
-| Started from | Canvas seed |
-|---|---|
-| a collection record view | that record |
-| a collection | that collection |
-| the collections index / a template card | nothing — there is no subject yet |
-| a Settings skill button, cron, feeds, the phone | nothing |
+- **It survives navigation.** `placeSpawnedChat` pushes to `/terminals` when no grid is mounted,
+  and the route watcher in `useCollectionBrowse.ts:34` clears the open record on any path change.
+  Route-derived state is gone by the time the spawn resolves; the prompt travels with it.
+- **It covers every entry point with one rule**, including the ones that have no route to read —
+  a custom view's iframe button, a template card.
+- **It cannot disagree with what the agent does.** The seed prompt is what the agent acts on, so
+  parsing the same string is the same subject by construction.
 
-**Two blockers, both real:**
+It works because a collection IS a skill: the shared `CollectionView.buildChatSeed` builds
+`/<slug> <message>` (and `/<slug> id=<itemId> …` for a record). A **feed** gets prose with no
+slash command, and the collections index / template cards / skill buttons / cron send no slash
+command either — so "no subject yet" falls out of the parse rather than needing a case.
+
+| Started from | Seed prompt | Canvas seed |
+|---|---|---|
+| a collection record | `/<slug> id=<itemId> …` | that record |
+| a collection | `/<slug> …` | that collection |
+| a feed | prose naming the data path | nothing |
+| the index / a template card / a skill button / cron | no slash command | nothing |
+
+**Follow `../mulmoclaude/src/utils/collections/presentSeed.ts`.** Per the reference-host rule, that
+file is the authority, and three of its decisions are behaviour rather than style:
+
+- **The payload is tiny** — `{ collectionSlug, itemId? }`. The card SELF-FETCHES from the slug, so
+  seeding needs no collection data at all. `PresentCollectionData` and the tool name both come from
+  `@mulmoclaude/core/collection`, which we already depend on: **no upstream change is needed.**
+- **Validate the slug against the real collection list before seeding.** Otherwise a non-collection
+  slash command flashes a "not found" canvas.
+- **The placeholder is superseded, not stacked.** When the agent's real `presentCollection` lands,
+  the synthetic one for that slug is dropped.
+
+**Where MulmoTerminal must diverge, and it is not optional.** MulmoClaude holds tool results in an
+in-memory `ActiveSession` and reconciles in `eventDispatch`. MulmoTerminal's live server-side in
+`toolResultsStore`, deduped **by uuid** (`tool-store.ts:160`). So:
+
+- seeding is a POST to `/api/agent/toolResult` for the new `chatId`, not a client-side array push;
+- the real result carries its own uuid, so uuid-dedupe will NOT collapse the pair — the reconcile
+  has to be written, in `storeToolResult`, dropping a synthetic entry with the same
+  `collectionSlug` when a real `presentCollection` arrives. Skipping it stacks two cards.
+
+Mark the synthetic entry so it is identifiable (MulmoClaude uses a `syntheticCollection: true`
+flag). Unlike there, ours is persisted to disk, so the flag has to survive a round trip through the
+store — it is not client-only here.
+
+**Blockers — both now resolved:**
 
 1. ~~**`presentCollection` is in the `data` group, not `canvas`**~~ — **RESOLVED, and it was not
    the gate that was wrong.** Reported live: a chat started from the collections UI landed in the
@@ -256,13 +322,46 @@ the panel — the same store the broker writes through. Placing a cell can appen
    out. `data` therefore comes along with the rest and needs no per-cell widening, and
    `hasCanvasGroup` is untouched. Normal grid cells never reach that URL, so the invariant holds
    by construction rather than by a conditional.
-2. **The renderer has to be mounted on the grid path.** `collectionUi.ts:3` / `main.ts:5` mount
-   the collection engine "once, before any presentCollection card mounts", and that has only ever
-   been exercised from the single view's `GuiPanel`. **Verify this before committing to the
-   seed** — if the grid's Canvas cannot render a `presentCollection` result today, that is its own
-   piece of work and should be established first, not discovered mid-PR.
+2. ~~**The renderer has to be mounted on the grid path.**~~ — **RESOLVED: it already is, and there
+   is no grid-specific path to mount.** Checked rather than assumed, as this section demanded:
 
-#### PR3b — the durable half
+   - the grid's Canvas renders the **same component** as the single view — `TerminalGrid.vue:849`
+     mounts `<GuiPanel>`, the one `App.vue:398` mounts;
+   - `GuiPanel` takes only `sessionId` and reads the shared plugin registry — it has no notion of
+     which view it is in;
+   - the collection engine is configured **globally at app boot** by `main.ts:6` importing
+     `./composables/collectionUi` for its side effect, not per view or per panel.
+
+   So a `presentCollection` result renders in a grid cell exactly as it does in the single view.
+   Nothing to build here; the seeding work is all that is left.
+
+#### PR3b — the durable half — **DONE**
+
+Implemented, with two departures from what is written below:
+
+1. **No new pub/sub channel.** The plan opened with a `publishToOne` sibling of
+   `LAUNCH_TERMINAL_CHANNEL`. It is not needed: reconciliation runs on **activate**, not mount, so
+   switching to the grid picks up everything spawned while the user was elsewhere — and if the grid
+   is not mounted there is nothing to deliver to anyway. A channel would only shorten the window
+   for a chat spawned while the user is *already sitting on* `/terminals`, at the cost of a second
+   mechanism that has to be kept from double-placing what the browser just placed. Worth adding
+   later if that window proves annoying; not worth it up front.
+2. **The marker needs a second log, not one.** `MULMOTERMINAL_HOME` is shared between server
+   instances so these logs are append-only, and hydration reads the unplaced log as it was —
+   including ids that a later line has since answered. A single log would therefore re-adopt, on
+   every load, every session any grid has ever taken. So "placed" is its own append-only log and
+   `unplacedSessionIds()` is the difference. A spec pins exactly that (`does not hand back a
+   session that was placed BEFORE this process started`).
+
+Also worth recording: the mark is cleared on **any** attach, not just a grid one — "unplaced" means
+nobody is looking, and a viewer is a viewer. That is what stops a browser-placed chat coming back
+as a duplicate on the next load, and it lands at `ws-routes`' four attach points, the same choke
+points `markDevTerminalSession` uses.
+
+The cap policy is still unanswered, and this PR does not force it: a full grid simply leaves the
+session marked, so the next load with room adopts it. PR5 is where it has to be decided.
+
+---
 
 The server-side unplaced marker + reconciliation on grid load, i.e. the case where no tab was
 open at all. Details below.
@@ -294,7 +393,32 @@ open at all. Details below.
   background worker; the skill button's use of it is a workaround, not the same thing. Do not
   collapse the two while removing the workaround.
 
-### PR4 — make the grid self-sufficient
+### PR4 — make the grid self-sufficient — **DONE**
+
+Three of the six bullets below needed no work, and the one real change was bigger than "hoist":
+
+- **The hoist alone does nothing.** Every overlay is ROUTE-driven, so opening one leaves
+  `/terminals` — and `isGrid` was `route.name === "terminals"`, which meant the grid came off
+  screen and the single view mounted behind the overlay. Moving the overlays out of the `!isGrid`
+  block only helps if the grid can also BE the backdrop, so `App.vue` now binds to `viewIsGrid`
+  (the existing "which view is underneath" answer, which follows the overlay's origin). The two
+  halves had to travel together, exactly as the comment at `App.vue:39` warned.
+- **`viewIsGrid` had no tests**, and it now decides which shell renders rather than which buttons
+  show. Six cases added, verified to fail against a broken predicate.
+- **`AppSettingsModal` must NOT be hoisted** — `GridView` renders its own, so a hoist would show
+  two on `/terminals`. Five overlays moved, not six.
+- **`ToolsPane` is already beside the zoomed cell** (`TerminalGrid.vue:867`). The open question in
+  this section was already answered by earlier work.
+- **The AppToolbar `{name:"chat"}` switch STAYS**, deferred to PR5. Removing it here would strand
+  the single view — unreachable but still present — which is PR5's job, not this one's.
+
+**One regression this introduced, and fixed.** With the grid surviving under an overlay, a chat
+started from the collections browser was placed into a grid the user could not see: the
+queue-and-navigate path used to close the overlay *by accident*, and it stopped being taken the
+moment the grid stopped unmounting. `placeSpawnedChat` now navigates whenever the user is not
+already on `/terminals`, whether or not a mounted grid took the request.
+
+---
 
 Everything the single view currently owns has to exist in the grid *before* PR4.
 
@@ -310,6 +434,26 @@ Everything the single view currently owns has to exist in the grid *before* PR4.
 - The session list: `Sidebar` / `SessionTabBar` filter + selection has no grid equivalent
   beyond the cockpit roster. Confirm the roster covers it (it does show every cell) — and note
   it does NOT show off-grid sessions (`GridView.vue:102`).
+
+### PR5 — delete the single view — **DONE**
+
+The 81-cell question that had been deferred through four PRs answered itself: with hidden workers
+and scheduled tasks both excluded from placement (#1196), nothing fills the grid on its own, so
+reaching the cap takes 81 terminals opened BY HAND. A full grid therefore parks the session — it
+stays marked unplaced, so the next load with room adopts it — rather than needing a policy.
+
+One thing the plan never recorded, and it was the real blocker: the toolbar's Collections,
+Accounting and Wiki buttons were gated `v-if="!inGrid"` by design (#886), so deleting the view
+would have left those surfaces with **no way in at all**. This section listed the overlays and not
+the buttons that open them. Answered first, in #1201, by the Collections door.
+
+Two lifecycle consequences that were not obvious:
+
+- **GridView's `onActivated` stops firing.** With the grid mounted for the life of the page there
+  is no activate/deactivate cycle, so the new-terminal opener and the spawned-chat placer moved to
+  `onMounted`, and the roster poll follows the ROUTE (it still goes off screen under an overlay).
+- **`viewIsGrid` became a constant** and was deleted. Every route is either the grid or an overlay
+  whose origin resolves to it, so every `inGrid` gate in the toolbar was dead.
 
 ### PR5 — delete the single view
 

@@ -101,6 +101,25 @@ describe("html preview route", () => {
     expect(csp).toMatch(/script-src 'unsafe-inline'/);
   });
 
+  // The origins themselves are core's (SANDBOXED_VIEW_CDN_ALLOWLIST), so this is a canary, not a
+  // second copy: it reads the SERVED header, and a core release that widens the trusted set fails
+  // here instead of silently widening what this host's CSP allows. Read what was added, then pin it.
+  const AUDITED_CDNS = [
+    "https://cdn.jsdelivr.net",
+    "https://unpkg.com",
+    "https://cdnjs.cloudflare.com",
+    "https://fonts.googleapis.com",
+    "https://fonts.gstatic.com",
+    "https://cdn.plot.ly",
+  ];
+
+  it("trusts exactly the audited CDN origins", async () => {
+    const csp = (await fetch(`${base}/${REL}`)).headers.get("content-security-policy") ?? "";
+    // Bare `https:` in img-src/media-src is a scheme, not an origin — the `//` keeps it out.
+    const served = [...new Set(csp.match(/https:\/\/[^\s;]+/g) ?? [])].sort();
+    expect(served).toEqual([...AUDITED_CDNS].sort());
+  });
+
   it("403s a path that escapes artifacts/html", async () => {
     const res = await fetch(`${base}/artifacts/html/${encodeURIComponent("../../etc/passwd")}`);
     expect([403, 404]).toContain(res.status); // blocked either by containment or non-.html

@@ -2,7 +2,7 @@
 title: スマホから使う
 layout: default
 parent: 日本語
-nav_order: 10
+nav_order: 11
 description: スマホから Claude Code / Codex のセッションを見る・返信する・新しいターミナルを起動する。
 ---
 
