@@ -1,8 +1,9 @@
 ---
-title: Mobile notifications (Web Push)
+title: Phone notifications when a coding agent needs you
+nav_title: Mobile notifications
 layout: default
 parent: English
-nav_order: 9
+nav_order: 7
 description: Web Push to your phone when a turn finishes or an agent stops to ask — how to leave your desk while parallel agents keep working.
 ---
 

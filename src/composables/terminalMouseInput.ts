@@ -5,14 +5,18 @@
 import type { Terminal } from "@xterm/xterm";
 import {
   cellFromPoint,
+  clearResetModes,
   clickReportSequences,
   createWheelTicker,
   isClickGesture,
+  recordSwallowedModes,
   TouchScrollTracker,
   wantsMouseReports,
   wheelNotches,
   wheelReportSequence,
 } from "./mouseReports";
+import { swallowsMouseTracking } from "./mouseTrackingModes";
+import { getTerminalScrollSpeed } from "./useTerminalScrollSpeed";
 import type { GridCell, PointerPosition } from "./mouseReports";
 
 // xterm's Linkifier marks the screen element while a link is under the pointer. That click
@@ -137,7 +141,8 @@ export function guardTouchScroll(term: Terminal, host: HTMLElement, swallowedMou
   host.addEventListener(
     "touchstart",
     (ev) => {
-      if (converting() && ev.touches.length === 1) tracker.start(ev.touches[0].clientY);
+      const touch = ev.touches.length === 1 ? ev.touches[0] : undefined;
+      if (converting() && touch) tracker.start(touch.clientY);
       else tracker.end();
     },
     { passive: true },
@@ -145,8 +150,9 @@ export function guardTouchScroll(term: Terminal, host: HTMLElement, swallowedMou
   host.addEventListener(
     "touchmove",
     (ev) => {
-      if (!converting() || ev.touches.length !== 1) return tracker.end();
-      const steps = tracker.move(ev.touches[0].clientY, cellHeightOf(term));
+      const touch = ev.touches.length === 1 ? ev.touches[0] : undefined;
+      if (!converting() || !touch) return tracker.end();
+      const steps = tracker.move(touch.clientY, cellHeightOf(term));
       const seq = wheelReportSequence(steps, TOP_LEFT_CELL.col, TOP_LEFT_CELL.row);
       if (seq) for (let i = Math.abs(steps); i > 0; i--) term.input(seq, false);
       ev.preventDefault(); // the app consumes the drag — don't also rubber-band the page
@@ -156,4 +162,17 @@ export function guardTouchScroll(term: Terminal, host: HTMLElement, swallowedMou
   const stop = () => tracker.end();
   host.addEventListener("touchend", stop);
   host.addEventListener("touchcancel", stop);
+}
+
+export function guardMouseTracking(term: Terminal, swallowedMouseModes: Set<number>): void {
+  term.parser.registerCsiHandler({ prefix: "?", final: "h" }, (params) => {
+    const swallowed = swallowsMouseTracking(params);
+    if (swallowed) recordSwallowedModes(swallowedMouseModes, params);
+    return swallowed;
+  });
+  term.parser.registerCsiHandler({ prefix: "?", final: "l" }, (params) => {
+    clearResetModes(swallowedMouseModes, params);
+    return false;
+  });
+  guardMouseWheel(term, swallowedMouseModes, getTerminalScrollSpeed);
 }

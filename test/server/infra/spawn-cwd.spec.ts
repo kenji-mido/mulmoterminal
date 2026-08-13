@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 
 import { cwdProblemMessage, diagnoseSpawnCwd, fsCwdProbe, type CwdKind, type CwdProbe } from "../../../server/infra/spawn-cwd";

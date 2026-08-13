@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { makeTempDirAsync } from "../../support/tempDir.js";
 import { promises as fs } from "node:fs";

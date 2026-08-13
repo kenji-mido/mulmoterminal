@@ -1,9 +1,12 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import {
   createRateLimitStore,
   claudeStatusVerdict,
+  currentClaudeLimits,
   shouldProbe,
   probeRetryDelay,
+  CLAUDE_READING_MAX_AGE_MS,
   PROBE_RETRY_BASE_MS,
   PROBE_RETRY_MAX_MS,
   RATE_LIMIT_STALE_MS,
@@ -83,7 +86,7 @@ describe("shouldProbe", () => {
 // budget the gauge exists to report. The gap between attempts is what stops that, so it belongs
 // with the rule rather than with the caller.
 describe("shouldProbe after a failure", () => {
-  const failed = (failures: number): ProbeState => ({ kind: "no-report", failures });
+  const failed = (failures: number): ProbeState => ({ kind: "no-report", failures, stall: "unknown" });
 
   it("does NOT probe again immediately after one came back empty", () => {
     expect(shouldProbe(NOW, gate({ state: failed(1), lastProbeAt_ms: NOW - 1000 }))).toBe(false);
@@ -191,6 +194,36 @@ describe("createRateLimitStore", () => {
   });
 });
 
+// #1293. While probing was broken the header went on showing the last reading, and a 7d window is
+// only dropped when its own reset passes — so a figure could be days old and read as current. Usage
+// only grows within a window, so an old percentage understates at exactly the moment someone is
+// checking whether they are near the limit.
+describe("currentClaudeLimits", () => {
+  const heldAt = (reportedAt_ms: number) => ({ claude: { limits, reportedAt_ms } });
+
+  it("draws a reading taken just now", () => {
+    expect(currentClaudeLimits(heldAt(NOW), NOW)).toEqual(limits);
+  });
+
+  it("still draws one from within the age it can vouch for", () => {
+    expect(currentClaudeLimits(heldAt(NOW - CLAUDE_READING_MAX_AGE_MS + 1000), NOW)).toEqual(limits);
+  });
+
+  // The boundary itself is not "too old" — the rule is OLDER than the age, and the two disagreed by
+  // a millisecond until Codex review pointed at it.
+  it("still draws one exactly at the age", () => {
+    expect(currentClaudeLimits(heldAt(NOW - CLAUDE_READING_MAX_AGE_MS), NOW)).toEqual(limits);
+  });
+
+  it("drops one older than that, so the gauge explains itself instead", () => {
+    expect(currentClaudeLimits(heldAt(NOW - CLAUDE_READING_MAX_AGE_MS - 1), NOW)).toBeNull();
+  });
+
+  it("has nothing to draw when nothing was ever read", () => {
+    expect(currentClaudeLimits({}, NOW)).toBeNull();
+  });
+});
+
 // The four things that can go wrong are not interchangeable, and the store is where they are told
 // apart (#1011). Getting this wrong is what made every one of them retry at 90 seconds.
 describe("probe outcomes", () => {
@@ -229,7 +262,7 @@ describe("probe outcomes", () => {
     expect(s.probeState()).toEqual({ kind: "ok" });
 
     s.noteProbeFailedIfNoReport(NOW + 90_000);
-    expect(s.probeState()).toEqual({ kind: "no-report", failures: 1 });
+    expect(s.probeState()).toEqual({ kind: "no-report", failures: 1, stall: "unknown" });
     expect(s.wantsProbe(NOW + 90_000 + PROBE_RETRY_BASE_MS + 1)).toBe(true);
   });
 
@@ -249,7 +282,7 @@ describe("probe outcomes", () => {
     s.noteProbeFailedIfNoReport(NOW - 1500);
     s.noteProbeStarted(NOW - 1000);
     s.noteProbeFailedIfNoReport(NOW);
-    expect(s.probeState()).toEqual({ kind: "no-report", failures: 2 });
+    expect(s.probeState()).toEqual({ kind: "no-report", failures: 2, stall: "unknown" });
   });
 
   // Codex review on #1019: `no-claude` refuses to probe, so a check that only ran inside the probe
@@ -271,7 +304,7 @@ describe("probe outcomes", () => {
     s.noteProbeStarted(NOW - 1000);
     s.noteProbeFailedIfNoReport(NOW);
     s.setClaudeAvailable(true);
-    expect(s.probeState()).toEqual({ kind: "no-report", failures: 1 });
+    expect(s.probeState()).toEqual({ kind: "no-report", failures: 1, stall: "unknown" });
   });
 
   // The gap runs from when the attempt ENDED. Measured from the start it would be no gap at all
@@ -285,6 +318,28 @@ describe("probe outcomes", () => {
     s.noteProbeFailedIfNoReport(NOW + PROBE_RETRY_BASE_MS);
     expect(s.wantsProbe(NOW + PROBE_RETRY_BASE_MS + 1)).toBe(false);
     expect(s.wantsProbe(NOW + 2 * PROBE_RETRY_BASE_MS + 1)).toBe(true);
+  });
+
+  // #1293. The probe's terminal is the only evidence a silence leaves, and the trust prompt is the
+  // one cause a user can clear — so it has to survive as far as the gauge rather than dissolving
+  // into "no answer".
+  it("keeps what the probe's screen proved about the silence", () => {
+    const s = store();
+    s.noteProbeStarted(NOW - 1000);
+    s.noteProbeFailedIfNoReport(NOW, "trust-prompt");
+    expect(s.probeState()).toEqual({ kind: "no-report", failures: 1, stall: "trust-prompt" });
+  });
+
+  // Told to the caller so the screen is kept for exactly the probes that failed. Read from the
+  // state instead, a successful probe would overwrite the useful screen with its own — `no-report`
+  // is also what the PREVIOUS failure left behind.
+  it("says whether the silence was counted", () => {
+    const s = store();
+    s.noteProbeStarted(NOW - 1000);
+    expect(s.noteProbeFailedIfNoReport(NOW)).toBe(true);
+    s.noteProbeStarted(NOW + 1000);
+    s.reportClaudeStatus(answered, NOW + 2000);
+    expect(s.noteProbeFailedIfNoReport(NOW + 3000)).toBe(false);
   });
 
   // The whole point of stamping the attempt: without it the next poll starts another probe.

@@ -96,8 +96,8 @@ function stripQuotes(text: string): string {
   const chars = [...text];
   let start = 0;
   let end = chars.length;
-  while (start < end && EDGE_QUOTES.has(chars[start])) start++;
-  while (end > start && EDGE_QUOTES.has(chars[end - 1])) end--;
+  while (start < end && EDGE_QUOTES.has(chars[start] ?? "")) start++;
+  while (end > start && EDGE_QUOTES.has(chars[end - 1] ?? "")) end--;
   return chars.slice(start, end).join("").trim();
 }
 

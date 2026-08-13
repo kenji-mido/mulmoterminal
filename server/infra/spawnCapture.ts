@@ -1,5 +1,6 @@
 import { spawnSync, execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { isRecord } from "../../common/isRecord.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -41,11 +42,14 @@ export async function spawnCaptureAsync(bin: string, args: string[], options: { 
   } catch (e) {
     // A non-zero exit and a timeout both land here; both carry whatever the child managed to
     // print, which is what the caller reports to the user.
-    const err = e as { code?: unknown; stdout?: string; stderr?: string; message?: string };
+    // execFileSync attaches code/stdout/stderr to what it throws, but a thrown value is
+    // `unknown` — read each field only when it really is the type this reports.
+    const err = isRecord(e) ? e : {};
+    const text = (value: unknown): string => (typeof value === "string" ? value : "");
     return {
       status: typeof err.code === "number" ? err.code : 1,
-      stdout: err.stdout ?? "",
-      stderr: err.stderr || err.message || "",
+      stdout: text(err.stdout),
+      stderr: text(err.stderr) || text(err.message),
     };
   }
 }

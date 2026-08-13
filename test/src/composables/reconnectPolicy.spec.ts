@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { reconnectDelayMs, shouldReconnect, type ReconnectFacts } from "../../../src/composables/reconnectPolicy";
+import { connectionWillReturn, reconnectDelayMs, shouldReconnect, type ReconnectFacts } from "../../../src/composables/reconnectPolicy";
 
 // A live Claude/codex session whose socket just dropped for no good reason — the one case
 // that SHOULD come back.
@@ -52,5 +52,29 @@ describe("reconnectDelayMs", () => {
 
   it("never returns a negative or zero delay", () => {
     for (const attempts of [0, 1, 10]) expect(reconnectDelayMs(attempts)).toBeGreaterThan(0);
+  });
+});
+
+describe("connectionWillReturn", () => {
+  const live = { released: false, sawExit: false, isCommand: false };
+
+  it("says yes for an ordinary drop", () => {
+    expect(connectionWillReturn(live)).toBe(true);
+  });
+
+  // The distinction this function exists for. `shouldReconnect` answers "arm another timer?" and
+  // says no while one is already armed — which is precisely when a reconnect is most certainly on
+  // its way. A message that asked the wrong one would tell the user to stop waiting mid-backoff.
+  it("still says yes while a retry is already armed, where shouldReconnect says no", () => {
+    expect(connectionWillReturn(live)).toBe(true);
+    expect(shouldReconnect({ ...live, reconnectPending: true })).toBe(false);
+  });
+
+  it.each([
+    ["released", { ...live, released: true }],
+    ["an ended session", { ...live, sawExit: true }],
+    ["a Run cell", { ...live, isCommand: true }],
+  ])("says no for %s — nothing is coming back", (_label, facts) => {
+    expect(connectionWillReturn(facts)).toBe(false);
   });
 });

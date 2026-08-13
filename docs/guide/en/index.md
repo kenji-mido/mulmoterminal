@@ -8,6 +8,24 @@ description: A browser-terminal cockpit for running several AI coding agents (Cl
 
 # MulmoTerminal Guide (English)
 
+**New here?** Opening a terminal, installing Node.js / Claude Code / git / gh on macOS and
+Windows, the start command, and what to do when it doesn't work — **installing and launching
+is one page**, written so someone who doesn't write code for a living still ends up with a
+running grid. Already set up? `npx mulmoterminal@latest` is the whole thing.
+
+[Getting started — from zero to running](getting-started.html){: .btn .btn-purple .fs-5 .mb-4 .mb-md-0 .mr-2 }
+[Basics — how to read the screen](basics.html){: .btn .fs-5 .mb-4 .mb-md-0 }
+
+> **[What's new in 4.4.0](v4.4.0.html)** — **every cell keeps its own right pane**, the Files pane can **open a document or a story in the Canvas without an agent**, your **claude.ai connectors work in the workspace** again, and the session list stops re-reading whole transcripts (8.7 s to 1 ms on a 2.1 GB project). The cell header's **path became a menu** and six permanent icons moved into it (as of 2026-08-04)
+>
+> **[What's new in 4.3.1](v4.3.1.html)** — the launcher's workspace chip is labelled **`WORKSPACE`** by its role rather than by its folder name, and the **git chip refreshes when you come back to the tab** instead of up to ten seconds later. Nothing to configure (as of 2026-08-04)
+>
+> **[What's new in 4.3.0](v4.3.0.html)** — the **workspace** reaches the same GUI tools however you start a terminal there, and the launcher **always offers it** as its first chip. The single-view GUI MCP server id is now **`mt`**, so tool names an agent sees are shorter. And an **Enter that confirms a Japanese IME candidate** stays with the IME, in the session note and in the terminal. Nothing to configure (as of 2026-08-04)
+>
+> **[What's new in 4.2.0](v4.2.0.html)** — a **self-hosted GitLab** works once you name it in `gitlabHosts`, the **Canvas and Tools panes** can take the whole terminal area, a new **worktree inherits its project's settings** one hue step off, and a terminal that stops taking input **repairs itself as you type** or says why it cannot. One key to configure (as of 2026-08-03)
+>
+> **[What's new in 4.1.1](v4.1.1.html)** — the header's **usage** figure stops sticking at `n/a` on machines where the TUI is slow to start, the phone's terminal returns **300 lines** of scrollback instead of one screenful, and GitLab worktrees get the **PR phase pill** and **⧉ Open PR** that GitHub ones already had. Nothing to configure (as of 2026-08-02)
+>
 > **[What's new in 4.0.0](v4.0.0.html)** — the **single terminal view is removed**: the grid is the app, focusing on one agent is zooming its cell, and the content surfaces get a **Collections** door in the toolbar. A **worktree now runs one agent session** and refuses a second. The Docker sandbox is gone (as of 2026-08-01)
 >
 > **Follow us on X** — new releases and features are announced **in Japanese** on X: [Singularity Society (@SingularitySoci)](https://x.com/SingularitySoci). That is where everything ships first, so [**follow @SingularitySoci**](https://x.com/SingularitySoci) to hear about it as it lands.
@@ -32,7 +50,7 @@ MulmoTerminal is the cockpit for that — a browser terminal, so it doesn't care
 ![A board of parallel AI-agent terminals](../images/grid-2x2.png)
 
 One independent agent per cell. **Status colors** (working = blue / awaiting input = amber /
-done-review = blue ring) and an **attention sound** mean you pick up only the cells that call
+done-review = green ring) and an **attention sound** mean you pick up only the cells that call
 you — no babysitting. → [Basics](basics.html)
 
 ### The cockpit roster — everyone's progress, one row each
@@ -130,10 +148,10 @@ The bottleneck isn't the CPU or the terminal — it's **your attention**.
 
 | The moment | In MulmoTerminal |
 |---|---|
-| Can't tell the **status** of many terminals | Lay them out in a grid; **status colors** (working = blue / awaiting input = amber / done-review = blue ring) + a sound, at a glance (→ [Basics](basics.html)) |
+| Can't tell the **status** of many terminals | Lay them out in a grid; **status colors** (working = blue / awaiting input = amber / done-review = green ring) + a sound, at a glance (→ [Basics](basics.html)) |
 | Don't know **which directory** | Each cell shows its dir, a **project name badge, and colors**. Color-code to tell them apart (→ [Config](config.html#per-dir)) |
 | **Forget the instruction** | The cell header always shows the **latest instruction / what it's doing**; **Activity timeline** shows the **tool-call history** (→ [Feature reference](features.html)) |
-| Want to **know it's done** | Input-waiting turns **amber**, a finished turn gets a **blue ring**, both **play a sound** — plus a **Web Push to your phone** (→ [Mobile notifications](notifications.html)) |
+| Want to **know it's done** | Input-waiting turns **amber**, a finished turn gets a **green ring**, both **play a sound** — plus a **Web Push to your phone** (→ [Mobile notifications](notifications.html)) |
 | Want the **session to survive** | **tmux persistence** keeps it alive across reload, reconnect, and server restart |
 | Open **git / a dir** quickly | A git status chip; open **the OS file manager (Finder/Explorer) / the in-app files / a PR** in one click |
 | Work with the **terminal as the hub** | All of the above on top of a terminal, and **extend it to your workflow with a DSL** (→ [Config](config.html#header)) |
@@ -145,7 +163,7 @@ The bottleneck isn't the CPU or the terminal — it's **your attention**.
 3. **Automate & investigate** — run scripts in one click (in a **spare cell** next to a running session); when one fails, **turn a wall of logs into a short AI diagnosis**.
 4. **Extend (DSL)** — header buttons/chips, launchers, and per-project config via **a small DSL** — it fits any developer.
 
-## Get started
+## Get started {#cli-tools}
 
 If the [`claude`](https://claude.com/claude-code) CLI (Claude Code) runs on your machine and you have **Node ≥ 22.9**,
 one command starts it:
@@ -154,37 +172,26 @@ one command starts it:
 npx mulmoterminal@latest    # opens http://localhost:34567
 ```
 
-### The CLIs it drives {#cli-tools}
-
-MulmoTerminal is a cockpit over the tools you already develop with, so what you have on your
-`PATH` decides how much of it lights up. `claude`, `git` and `gh` carry the core grid; each
-remaining row unlocks one feature.
-
-| | Tool | What it gives you | Install |
-| --- | --- | --- | --- |
-| **Required** | `claude` | every Claude session | `npm i -g @anthropic-ai/claude-code`, then run `claude` once to log in |
-| **Required** | `git` | [worktree isolation](features.html), each cell's branch / unsaved-dot / diff readout, the PR footer | `brew install git` · `sudo apt install git` · Windows: [git-scm.com](https://git-scm.com/download/win) |
-| **Required** | `gh` | the [cross-repo PRs & Issues view](github.html) and one-click PR creation | [cli.github.com](https://cli.github.com), then `gh auth login` |
-| Recommended | `tmux` | [session persistence](features.html) — terminals survive a server restart | `brew install tmux` · `sudo apt install tmux` · no native Windows build (plain terminals instead) |
-| Optional | `codex` | [Codex sessions](basics.html#claude-and-codex) in a cell, alongside Claude | `npm i -g @openai/codex` |
-| Optional | `ffmpeg` | video rendering from the [GUI panel](features.html)'s mulmo-script plugin | `brew install ffmpeg` · `sudo apt install ffmpeg` |
-| Optional | `ollama` | [claude-ollama](claude-ollama.html) — Claude Code against a fully local model | [ollama.com/download](https://ollama.com/download) |
-
-The server starts without the non-required ones — you only lose that row's feature. To see
-what's missing on this machine, run **`npx mulmoterminal@latest init`**: it reports every tool above,
-then seeds the launcher's directory presets from your Claude Code history.
+If that didn't work, or you don't know what to install in the first place, everything is on
+**[Getting started — from zero to running](getting-started.html)**: opening a terminal,
+installing Node.js / Claude Code / git / gh on macOS and Windows, the
+[full list of CLIs it drives](getting-started.html#cli-tools), and
+[what to do when it doesn't work](getting-started.html#troubleshooting) — one page.
 
 ## How to read this guide
 
-1. [Basics — what you can do in the grid](basics.html)
-2. [Scenarios — workflows by example](scenarios.html)
-3. [Feature reference](features.html) (grouped by the four pillars)
-4. [Configuration](config.html) (settings modal · `config.json` · `.mulmoterminal.json` · the **DSL**)
-5. [Mobile notifications (Web Push)](notifications.html) (iPhone / Android setup)
-6. [From your phone](phone.html) (watch, reply with your own chips, start a terminal)
-7. [GitHub — cross-repo PRs & Issues](github.html) (open PRs and issues from your registered repos on one screen)
-8. [Using another model via OpenRouter](providers.html) (run Kimi / DeepSeek / Gemini, with measured data)
-9. [Local models with claude-ollama](claude-ollama.html) (fully local, offline, via Ollama)
-10. [Always on](always-on.html) (run the server as a service, across logout and reboot)
+1. [Getting started — from zero to running](getting-started.html) (**install and launch, start to finish**)
+2. [Basics — what you can do in the grid](basics.html)
+3. [FAQ](faq.html) (existing sessions, Windows, token cost, how it compares)
+4. [Scenarios — workflows by example](scenarios.html)
+5. [Feature reference](features.html) (grouped by the four pillars)
+6. [Configuration](config.html) (settings modal · `config.json` · `.mulmoterminal.json` · the **DSL**)
+7. [Mobile notifications (Web Push)](notifications.html) (iPhone / Android setup)
+8. [From your phone](phone.html) (watch, reply with your own chips, start a terminal)
+9. [GitHub — cross-repo PRs & Issues](github.html) (open PRs and issues from your registered repos on one screen)
+10. [Using another model via OpenRouter](providers.html) (run Kimi / DeepSeek / Gemini, with measured data)
+11. [Local models with claude-ollama](claude-ollama.html) (fully local, offline, via Ollama)
+12. [Always on](always-on.html) (run the server as a service, across logout and reboot)
+13. [Glossary](glossary.html)
 
 > The Japanese guide is here: [日本語ガイド](../ja/).

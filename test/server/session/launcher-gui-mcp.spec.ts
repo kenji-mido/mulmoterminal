@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import { launcherProgram, launcherCommandWithGuiMcp, launcherRunsAgent, launcherAgent } from "../../../server/session/launcher-gui-mcp.js";
 

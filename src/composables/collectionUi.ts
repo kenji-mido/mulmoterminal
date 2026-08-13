@@ -49,6 +49,8 @@ import {
 import PinToggle from "../components/PinToggle.vue";
 import { startCollectionChat } from "./useChatLauncher";
 import { browserLocale } from "../utils/browserLocale";
+import { isRecord } from "../../common/isRecord";
+import { fetchWithTimeout } from "../utils/fetchWithTimeout";
 
 // ── Modal teleport target (Shadow DOM) ──
 // PluginFrame mounts each card inside a per-instance shadow root, but
@@ -67,12 +69,18 @@ export function popCollectionTeleportTarget(target: HTMLElement | ShadowRoot): v
   if (i >= 0) teleportStack.splice(i, 1);
 }
 
+// The plugin package declares the generic — the collection package's `CollectionApiResult<T>` seam — so the PLUGIN chooses T and the host has to produce it from a body
+// nothing has checked. Unprovable by construction, exactly like gui-chat-protocol's `dispatch<T>`
+// (see the type-assertion allowlist in eslint.config.js). The claim is made HERE, at the seam,
+// rather than hidden inside fetchJson where it would apply to every caller.
+const asDeclared = <T>(raw: unknown): T => raw as T;
+
 // Read helper: normalise fetch into the package's CollectionApiResult (the view
 // treats `ok:false` with `status` 404 as not-found, any other failure as a skip).
-const apiGet = <T>(url: string): Promise<CollectionApiResult<T>> => fetchJson<T>(url);
+const apiGet = <T>(url: string): Promise<CollectionApiResult<T>> => fetchJson<T>(url, asDeclared);
 
 const apiSend = <T>(method: "POST" | "PUT", url: string, body: unknown): Promise<CollectionApiResult<T>> =>
-  fetchJson<T>(url, { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  fetchJson<T>(url, asDeclared, { method, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 const apiPost = <T>(url: string, body: unknown) => apiSend<T>("POST", url, body);
 const apiPut = <T>(url: string, body: unknown) => apiSend<T>("PUT", url, body);
 
@@ -81,7 +89,7 @@ const apiPut = <T>(url: string, body: unknown) => apiSend<T>("PUT", url, body);
 // like "preset collections can't be deleted") instead of a bare status code.
 async function apiDelete(url: string): Promise<{ ok: true } | { ok: false; error: string }> {
   try {
-    const res = await fetch(url, { method: "DELETE" });
+    const res = await fetchWithTimeout(url, { method: "DELETE" });
     if (res.ok) return { ok: true };
     return { ok: false, error: errorMessage(await readErrorBody(res), res.status) };
   } catch (err) {
@@ -97,13 +105,17 @@ async function apiDelete(url: string): Promise<{ ok: true } | { ok: false; error
 // falls back to the English source. English is short-circuited server-side.
 async function postTranslation(req: TranslateRequest): Promise<TranslateResponse | null> {
   try {
-    const res = await fetch("/api/translation", {
+    const res = await fetchWithTimeout("/api/translation", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(req),
     });
     if (!res.ok) return null;
-    return (await res.json()) as TranslateResponse;
+    const body: unknown = await res.json();
+    // `null` is the transport's documented miss — the caller falls back to the English source —
+    // so a malformed body takes that path rather than handing the cache a bad shape.
+    if (!isRecord(body) || !Array.isArray(body.translations) || !body.translations.every((line) => typeof line === "string")) return null;
+    return { translations: body.translations };
   } catch {
     return null;
   }
@@ -159,7 +171,7 @@ configureCollectionUi({
   mintViewToken: (slug, viewId) => apiPost<CollectionViewToken>(`/api/collections/${encodeURIComponent(slug)}/view-token`, { viewId }),
   fetchViewHtml: async (slug, viewId) => {
     try {
-      const res = await fetch(`/api/collections/${encodeURIComponent(slug)}/view-file?id=${encodeURIComponent(viewId)}`);
+      const res = await fetchWithTimeout(`/api/collections/${encodeURIComponent(slug)}/view-file?id=${encodeURIComponent(viewId)}`);
       return res.ok ? { ok: true as const, html: await res.text() } : { ok: false as const, status: res.status };
     } catch {
       return { ok: false as const, status: 0 };
@@ -244,7 +256,8 @@ configureCollectionUi({
   //    new-collection starter modal's localized cards; omitted ⇒ English fallback. ──
   translate: postTranslation,
 
-  // ── Shadow-DOM modal target ── ShadowRoot is a valid Teleport target at runtime
-  //    though the declared type is string | HTMLElement.
-  modalTeleportTarget: () => (teleportStack[teleportStack.length - 1] ?? "body") as unknown as string | HTMLElement,
+  // ── Shadow-DOM modal target ── the innermost open Shadow root, or the body when none is open.
+  //    The package types this `string | HTMLElement | ShadowRoot` as of 1.2.3, so the value this
+  //    host has always passed no longer needs a cast to be expressible (mulmoclaude#2721).
+  modalTeleportTarget: () => teleportStack[teleportStack.length - 1] ?? "body",
 });

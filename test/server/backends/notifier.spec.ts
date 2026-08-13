@@ -4,7 +4,7 @@ import express from "express";
 import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { Server } from "node:http";
+import { appRequest } from "../../helpers/appRequest.js";
 import { publish, resetNotifier } from "@mulmoclaude/core/notifier";
 import { initNotifier, mountNotificationRoutes, NOTIFIER_CHANNEL } from "../../../server/backends/notifier.js";
 
@@ -14,8 +14,7 @@ interface Published {
 }
 let events: Published[] = [];
 let workspace: string;
-let server: Server;
-let base: string;
+let request: ReturnType<typeof appRequest>;
 const tempDirs: string[] = [];
 
 function activeFile(): string {
@@ -35,15 +34,10 @@ beforeEach(async () => {
   const app = express();
   app.use(express.json());
   mountNotificationRoutes(app);
-  await new Promise<void>((resolve) => {
-    server = app.listen(0, () => resolve());
-  });
-  const addr = server.address();
-  base = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`;
+  request = appRequest(app);
 });
 
 afterEach(() => {
-  server?.close();
   resetNotifier();
   for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
@@ -58,7 +52,7 @@ describe("notifier backend", () => {
     expect(events[0].data).toMatchObject({ type: "published", entry: { id, title: "Heads up" } });
 
     // REST list returns the active entry.
-    const listRes = await fetch(`${base}/api/notifications`);
+    const listRes = await request("/api/notifications");
     expect(listRes.status).toBe(200);
     const { active } = (await listRes.json()) as { active: Array<{ id: string; title: string }> };
     expect(active).toHaveLength(1);
@@ -70,10 +64,10 @@ describe("notifier backend", () => {
     expect(Object.keys(onDisk.entries)).toContain(id);
 
     // Dismiss via REST → 204, removed from the active list, "cleared" event fired.
-    const clearRes = await fetch(`${base}/api/notifications/${encodeURIComponent(id)}/clear`, { method: "POST" });
+    const clearRes = await request(`/api/notifications/${encodeURIComponent(id)}/clear`, { method: "POST" });
     expect(clearRes.status).toBe(204);
 
-    const afterRes = await fetch(`${base}/api/notifications`);
+    const afterRes = await request("/api/notifications");
     expect(((await afterRes.json()) as { active: unknown[] }).active).toHaveLength(0);
     expect(events.some((event) => (event.data as { type?: string }).type === "cleared")).toBe(true);
   });

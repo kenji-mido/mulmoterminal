@@ -22,6 +22,8 @@ import { ref, watch } from "vue";
 import { asTerminalAgent, type TerminalAgent } from "../../common/sessionAgent";
 import { placeSpawnedChat } from "./useSpawnedChat";
 import { seedCollectionCanvas } from "./seedCollectionCanvas";
+import { isRecord } from "../../common/isRecord";
+import { fetchWithTimeout, SLOW_COMMAND_TIMEOUT_MS } from "../utils/fetchWithTimeout";
 
 export type Agent = TerminalAgent;
 
@@ -53,17 +55,23 @@ export async function startCollectionChat(prompt: string, opts: { hidden?: boole
   const draft = agent === "claude" && opts.draft === true;
   let chatId: string | undefined;
   try {
-    const res = await fetch("/api/plugin/spawnBackgroundChat", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ message, draft, agent }),
-    });
+    const res = await fetchWithTimeout(
+      "/api/plugin/spawnBackgroundChat",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ message, draft, agent }),
+      },
+      SLOW_COMMAND_TIMEOUT_MS,
+    );
     if (!res.ok) {
       console.error(`[startChat] spawn failed: HTTP ${res.status}`);
       return null;
     }
-    const data = (await res.json()) as { jsonData?: { chatId?: unknown } };
-    chatId = typeof data?.jsonData?.chatId === "string" ? data.jsonData.chatId : undefined;
+    const data: unknown = await res.json();
+    const jsonData = isRecord(data) ? data.jsonData : undefined;
+    const id = isRecord(jsonData) ? jsonData.chatId : undefined;
+    chatId = typeof id === "string" ? id : undefined;
   } catch (err) {
     console.error("[startChat] spawn failed", err);
     return null;

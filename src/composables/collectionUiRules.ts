@@ -24,7 +24,7 @@ export function htmlPreviewUrl(value: string): string | null {
 // The `?offset=…&limit=…&fields=…` suffix (or "") for a remote-view items page. `offset`
 // is kept when it is 0 (a valid first-page offset), so the test uses `!= null` rather
 // than a truthy check; an empty `fields` array is dropped.
-export function remoteViewItemsQuery(req: { offset?: number; limit?: number; fields?: string[] }): string {
+export function remoteViewItemsQuery(req: { offset?: number | undefined; limit?: number | undefined; fields?: string[] | undefined }): string {
   const query = new URLSearchParams();
   if (req.offset != null) query.set("offset", String(req.offset));
   if (req.limit != null) query.set("limit", String(req.limit));

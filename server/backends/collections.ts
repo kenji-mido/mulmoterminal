@@ -60,12 +60,14 @@ import {
   remoteViewItems,
   remoteViewItemsFailureMessage,
 } from "./remoteView.js";
-import { clampCapabilities, mintViewToken, requireViewToken, type ViewCapability } from "./viewToken.js";
+import { clampCapabilities, isCapability, mintViewToken, requireViewToken } from "./viewToken.js";
 // The shared manageCollection binding — the query route reuses its queryItems
 // action so a view can never do more than the agent's own data plane.
 import { manageCollectionHandler } from "../infra/collection-tool.js";
 import { hostLogger } from "./hostLogger.js";
 import { mutateStatus, mutateWriteApplied } from "./mutateStatus.js";
+import { isRecord } from "../../common/isRecord.js";
+import { requestBody } from "../routes/requestBody.js";
 
 // Console-backed logger matching the engine's CollectionLogger shape
 // (prefix, message, optional structured data) — shared with the other engines'
@@ -137,8 +139,7 @@ function guarded<P extends Record<string, string>>(op: string, handler: RequestH
 
 /** A request body usable as a record: a non-null, non-array object. */
 function extractRecord(body: unknown): CollectionItem | null {
-  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
-  return body as CollectionItem;
+  return isRecord(body) ? body : null;
 }
 
 // A loaded collection, sans the null that `loadCollection` returns on a miss —
@@ -225,7 +226,8 @@ async function writeViewItem(collection: ResolvedCollection, raw: unknown, mode:
   const record = extractRecord(raw);
   if (!record) return { rejected: { id: "", problem: "item must be a JSON object" } };
   const { singleton, primaryKey } = collection.schema;
-  const itemId = typeof record[primaryKey] === "string" ? (record[primaryKey] as string) : "";
+  const declaredId = record[primaryKey];
+  const itemId = typeof declaredId === "string" ? declaredId : "";
   if (!itemId) return { rejected: { id: "", problem: `missing primary key '${primaryKey}'` } };
   if (singleton && itemId !== singleton) {
     return { rejected: { id: itemId, problem: `collection '${collection.slug}' is a singleton; the only valid item id is '${singleton}'` } };
@@ -281,9 +283,10 @@ const registryImportHandler: RequestHandler = async (req, res) => {
     res.status(503).json({ error: "collections backend not initialized" });
     return;
   }
-  const author = typeof req.body?.author === "string" ? req.body.author : "";
-  const slug = typeof req.body?.slug === "string" ? req.body.slug : "";
-  const registry = typeof req.body?.registry === "string" && req.body.registry ? req.body.registry : null;
+  const body = requestBody(req.body);
+  const author = typeof body.author === "string" ? body.author : "";
+  const slug = typeof body.slug === "string" ? body.slug : "";
+  const registry = typeof body.registry === "string" && body.registry ? body.registry : null;
   if (!author || !slug) {
     res.status(400).json({ error: "author and slug are required" });
     return;
@@ -455,7 +458,7 @@ const respondForMutateAction = async (
   body: { params?: unknown } | undefined,
 ): Promise<void> => {
   const raw = body?.params;
-  const params = raw && typeof raw === "object" && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  const params = isRecord(raw) ? raw : {};
   const outcome = await applyMutateAction(collection, action, itemId, params);
   if (!outcome.ok) {
     // `itemId` is caller-controlled (a route param) — strip CR/LF so a crafted
@@ -518,7 +521,7 @@ const itemActionHandler: RequestHandler<{ slug: string; itemId: string; actionId
       res.status(405).json({ error: readOnlyRefusal(collection.slug) });
       return;
     }
-    await respondForMutateAction(res, collection, action, req.params.itemId, req.body as { params?: unknown } | undefined);
+    await respondForMutateAction(res, collection, action, req.params.itemId, isRecord(req.body) ? req.body : undefined);
     return;
   }
   const template = await readActionTemplateOr500(res, collection, action);
@@ -608,9 +611,13 @@ const remoteViewHandler: RequestHandler<{ slug: string }> = async (req, res) => 
 // preview's write channel. Same builder + host-side policy as the channel's
 // `mutateRemoteViewItem`, so a preview mutation runs the exact enforcement the
 // phone will.
+// The predicate the write-mode check needs: `VIEW_WRITE_MODES.includes()` only accepts a value
+// already typed as a mode, which is what forced the assertion it replaces.
+const isViewWriteMode = (value: unknown): value is ViewWriteMode => VIEW_WRITE_MODES.some((mode) => mode === value);
+
 const remoteViewMutateHandler: RequestHandler<{ slug: string; viewId: string }> = async (req, res) => {
   const { slug, viewId } = req.params;
-  const request = normalizeMutate((req.body ?? {}) as { op?: unknown; id?: unknown; patch?: unknown });
+  const request = normalizeMutate(isRecord(req.body) ? req.body : {});
   if (!request) {
     res.status(400).json({ error: "invalid mutate request — expected { op: 'update'|'delete', id, patch? }" });
     return;
@@ -653,7 +660,7 @@ const remoteViewItemsHandler: RequestHandler<{ slug: string; viewId: string }> =
 // read-only view can never obtain a write token.
 const viewTokenHandler: RequestHandler<{ slug: string }> = async (req, res) => {
   const { slug } = req.params;
-  const body = (req.body ?? {}) as { viewId?: unknown; capabilities?: unknown };
+  const body: Record<string, unknown> = isRecord(req.body) ? req.body : {};
   const viewId = typeof body.viewId === "string" ? body.viewId.trim() : "";
   if (!viewId) {
     res.status(400).json({ error: "`viewId` is required" });
@@ -666,7 +673,10 @@ const viewTokenHandler: RequestHandler<{ slug: string }> = async (req, res) => {
   // The write tier is wired below (PUT /view-data), so grant exactly what the
   // view declared. `clampCapabilities` defaults the requested set to the declared
   // set, so a `["read"]` view still can never obtain a `write` token.
-  const granted = clampCapabilities(view.capabilities as ViewCapability[] | undefined, undefined);
+  // Filtered rather than asserted. The schema validator already rejects an unrecognised capability
+  // (a collection declaring one fails to load at all), so this changes nothing today — but it is
+  // the local code proving what it hands to the minter rather than declaring it.
+  const granted = clampCapabilities(Array.isArray(view.capabilities) ? view.capabilities.filter(isCapability) : undefined, undefined);
   const minted = mintViewToken(slug, granted);
   res.json({ token: minted.token, exp: minted.exp, dataUrl: `/api/collections/${encodeURIComponent(slug)}/view-data`, capabilities: granted });
 };
@@ -704,13 +714,15 @@ const viewDataPutHandler: RequestHandler<{ slug: string }> = async (req, res) =>
     res.status(405).json({ error: readOnlyRefusal(collection.slug) });
     return;
   }
-  const body = (req.body ?? {}) as { items?: unknown; mode?: unknown };
+  const body: Record<string, unknown> = isRecord(req.body) ? req.body : {};
   if (!Array.isArray(body.items)) {
     res.status(400).json({ error: "`items` must be an array" });
     return;
   }
-  const mode: ViewWriteMode = body.mode === undefined ? "upsert" : (body.mode as ViewWriteMode);
-  if (!VIEW_WRITE_MODES.includes(mode)) {
+  // Checked BEFORE it is typed. The assertion this replaces named `body.mode` a valid mode and
+  // then asked whether it was one — the answer arrived after the claim.
+  const mode = body.mode === undefined ? "upsert" : body.mode;
+  if (!isViewWriteMode(mode)) {
     const modeList = VIEW_WRITE_MODES.map((m) => `"${m}"`).join(", ");
     res.status(400).json({ error: `\`mode\` must be one of ${modeList}` });
     return;
@@ -758,7 +770,7 @@ const viewQueryConcurrency = (req: Request<{ slug?: string }>, res: Response, ne
 // is not a trusted audience for those.
 const viewDataQueryHandler: RequestHandler<{ slug: string }> = async (req, res) => {
   try {
-    const body = (req.body ?? {}) as { query?: unknown };
+    const body: Record<string, unknown> = isRecord(req.body) ? req.body : {};
     const raw = await manageCollectionHandler({ action: "queryItems", slug: req.params.slug, query: body.query });
     try {
       res.json(JSON.parse(raw));

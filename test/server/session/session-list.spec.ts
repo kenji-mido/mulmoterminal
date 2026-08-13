@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import { parseActivityIds, selectSessionRows, type SessionRow } from "../../../server/session/session-list.js";
 

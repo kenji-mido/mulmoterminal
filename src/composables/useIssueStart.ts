@@ -8,9 +8,12 @@
 // startCollectionChat does for the collection plugin.
 import { ref } from "vue";
 import { placeSpawnedChat } from "./useSpawnedChat";
-import { issueStartPlan, type IssueStartPlan } from "./issueStartPlan";
+import { currentGitlabHosts } from "./useAppConfig";
+import { issueStartPlan, type IssueStartPlan } from "../../common/issueStartPlan";
 import { isRecord } from "../../common/isRecord";
 import { parseRepoDirsResponse, type RepoDirs } from "../../common/repoDirs";
+import { repoIdentity } from "../../common/repoEntry";
+import { fetchWithTimeout, SLOW_COMMAND_TIMEOUT_MS } from "../utils/fetchWithTimeout";
 
 // Loaded once per view open, like the PR and issue lists beside it: resolving a directory's remote
 // is a `git` call per saved directory, and the answer only changes when the user edits Settings.
@@ -22,7 +25,7 @@ const keyOf = (repo: string, issue: number): string => `${repo}#${issue}`;
 
 export async function loadRepoDirs(): Promise<void> {
   try {
-    const res = await fetch("/api/repo-dirs");
+    const res = await fetchWithTimeout("/api/repo-dirs");
     if (!res.ok) return;
     repoDirs.value = parseRepoDirsResponse(await res.json());
   } catch {
@@ -35,11 +38,14 @@ export async function loadRepoDirs(): Promise<void> {
 // GitHub treats `Owner/Repo` and `owner/repo` as one repository, and the two spellings arrive from
 // different places: `prRepos` is typed by hand, the server's side comes from a remote URL.
 export function clonesFor(repo: string): RepoDirs | undefined {
-  const wanted = repo.toLowerCase();
-  return repoDirs.value.find((r) => r.repo.toLowerCase() === wanted);
+  // Matched on the HOST-QUALIFIED identity: without the host, a GitHub and a GitLab project of the
+  // same path would answer for each other. `canonicalRepo` is the other question — what to pass a
+  // CLI's `--repo` — and is deliberately not used here.
+  const wanted = repoIdentity(repo);
+  return repoDirs.value.find((r) => repoIdentity(r.repo) === wanted);
 }
 
-export const planFor = (repo: string): IssueStartPlan => issueStartPlan(clonesFor(repo));
+export const planFor = (repo: string): IssueStartPlan => issueStartPlan(clonesFor(repo), repo, currentGitlabHosts());
 
 /** Adopt a chosen clone into the loaded answer, and return the name to record it under.
  *
@@ -57,25 +63,43 @@ export function rememberClone(repo: string, dir: string): string {
   return entry.repo;
 }
 
+// The route answers a failure in one of TWO shapes, and the sentence worth showing lives in a
+// different key in each: `{ error }` for a request it would not accept at all (bad repo, a
+// directory that is not this repo's clone), and `{ ok: false, reason, detail }` for a step that
+// ran and stopped — which is where the one sentence saying what to DO about it lives, e.g. the
+// worktree being open in another terminal (#1219). Reading only `error` dropped that on the floor
+// and showed "could not start work on acme/web#7" instead.
+const failureSentence = (data: unknown): string | null => {
+  if (!isRecord(data)) return null;
+  if (typeof data.error === "string" && data.error) return data.error;
+  return typeof data.detail === "string" && data.detail ? data.detail : null;
+};
+
 async function requestStart(repo: string, issue: number, dir: string): Promise<boolean> {
-  const res = await fetch("/api/issues/start", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ repo, issue, dir }),
-  });
+  const res = await fetchWithTimeout(
+    "/api/issues/start",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repo, issue, dir }),
+    },
+    SLOW_COMMAND_TIMEOUT_MS,
+  );
   const data: unknown = await res.json().catch(() => null);
   if (!res.ok) {
-    startError.value = isRecord(data) && typeof data.error === "string" ? data.error : `could not start work on ${repo}#${issue}`;
+    startError.value = failureSentence(data) ?? `could not start work on ${repo}#${issue}`;
     return false;
   }
   if (!isRecord(data) || typeof data.sessionId !== "string") {
     startError.value = "the server started nothing";
     return false;
   }
-  // `draft: true` — the issue is typed into the input box and left there. It was written by
-  // whoever opened the issue, which is usually not the person about to run it, so the Enter is
-  // theirs to press.
-  placeSpawnedChat({ id: data.sessionId, agent: "claude", draft: true });
+  // `draft` — the issue is typed into the input box and left there. It was written by whoever
+  // opened the issue, which is usually not the person about to run it, so the Enter is theirs to
+  // press. NOT for a resumed session (#1219): that one was already working on this issue, nothing
+  // was typed into it, and claiming otherwise would leave the cell waiting for an Enter that has
+  // no draft behind it.
+  placeSpawnedChat({ id: data.sessionId, agent: "claude", draft: data.outcome !== "resumed" });
   return true;
 }
 

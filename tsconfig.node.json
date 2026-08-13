@@ -14,11 +14,23 @@
     "moduleDetection": "force",
     "noEmit": true,
 
+    /* `strict` was absent here while every other project had it. Only vite.config.ts is in scope,
+       so nothing was riding on it — but there is no reason for one project to be the loose one. */
+    "strict": true,
+
     /* Linting */
+    "useUnknownInCatchVariables": true,
+    "noImplicitOverride": true,
+    /* See tsconfig.app.json for the measured counts (#1348). */
+    "noImplicitReturns": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["vite.config.ts"]
+  /* `*.config.ts` rather than naming vite.config.ts: this listed that one file, so `vitest.config.ts`
+     and `scripts/model-trials.ts` belonged to NO project and were checked by nothing — not by
+     `yarn typecheck`, not by CI (#1348). A pattern means the next root config or script is covered
+     the day it is written, which is the part a hand-maintained list keeps getting wrong. */
+  "include": ["*.config.ts", "scripts/**/*.ts"]
 }

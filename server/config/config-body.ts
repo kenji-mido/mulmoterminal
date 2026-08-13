@@ -16,6 +16,7 @@ import { isRecord } from "../../common/isRecord.js";
 export const ARRAY_FIELDS = [
   "cwdPresets",
   "prRepos",
+  "gitlabHosts",
   "launchers",
   "quickCommands",
   "pushKinds",

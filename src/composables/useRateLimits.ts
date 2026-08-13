@@ -10,7 +10,8 @@
 import { ref } from "vue";
 import { parseRateLimits } from "../../common/rateLimits";
 import { isRecord } from "../../common/isRecord";
-import type { ClaudeProbeState, RateLimitSnapshot } from "./rateLimitGauge";
+import type { ClaudeProbeStall, ClaudeProbeState, RateLimitSnapshot } from "./rateLimitGauge";
+import { fetchWithTimeout } from "../utils/fetchWithTimeout";
 
 const FETCH_TIMEOUT_MS = 8000;
 // The server refuses to probe more often than its own staleness window, so a tighter poll here
@@ -27,15 +28,16 @@ let timer: ReturnType<typeof setTimeout> | null = null;
 let watchers = 0;
 
 const PROBE_STATES: readonly ClaudeProbeState[] = ["ok", "no-claude", "no-windows", "no-report"];
-const isProbeState = (v: unknown): v is ClaudeProbeState => typeof v === "string" && (PROBE_STATES as readonly string[]).includes(v);
+const isProbeState = (v: unknown): v is ClaudeProbeState => typeof v === "string" && PROBE_STATES.some((state) => state === v);
+
+const PROBE_STALLS: readonly ClaudeProbeStall[] = ["trust-prompt", "unknown"];
+const isProbeStall = (v: unknown): v is ClaudeProbeStall => typeof v === "string" && PROBE_STALLS.some((stall) => stall === v);
 
 // A failure leaves the last known windows in place. Blanking them would read as "0% used", which
 // is the opposite of the truth we just failed to fetch.
 async function load(): Promise<boolean> {
-  const controller = new AbortController();
-  const abort = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const res = await fetch("/api/rate-limits/refresh", { method: "POST", signal: controller.signal });
+    const res = await fetchWithTimeout("/api/rate-limits/refresh", { method: "POST" }, FETCH_TIMEOUT_MS);
     if (!res.ok) return false;
     const data: unknown = await res.json();
     if (!isRecord(data)) return false;
@@ -45,13 +47,12 @@ async function load(): Promise<boolean> {
       // Carried verbatim rather than inferred here: the server is the only place that knows
       // whether a probe was refused, timed out, or answered with no windows (#1011).
       claudeProbe: isProbeState(data.claudeProbe) ? data.claudeProbe : undefined,
+      claudeStall: isProbeStall(data.claudeProbeStall) ? data.claudeProbeStall : undefined,
     };
     return data.probing === true;
   } catch {
     // offline, aborted, or the route is not there — keep what we had
     return false;
-  } finally {
-    clearTimeout(abort);
   }
 }
 

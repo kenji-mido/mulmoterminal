@@ -40,8 +40,11 @@ const ROW_BLINK = "animate-roster-alert motion-reduce:animate-none";
 // A stronger mix of the SAME colour keeps the hue in all four themes.
 const ROW_BLOCKED =
   "border-border border-l-[#f59e0b] bg-[color-mix(in_srgb,#f59e0b_14%,var(--bg-panel))] hover:bg-[color-mix(in_srgb,#f59e0b_24%,var(--bg-panel))] shadow-[0_0_0_2px_color-mix(in_srgb,#f59e0b_60%,transparent)]";
+// The green is --done, the token the grid cell's own `done` chrome names too (cellStatusClasses.ts).
+// It was this file's literal #22c55e while the cell ringed `done` in the theme accent, so the same
+// session changed colour when you enlarged it (#1307).
 const ROW_DONE =
-  "border-border border-l-[#22c55e] bg-[color-mix(in_srgb,#22c55e_8%,var(--bg-panel))] hover:bg-[color-mix(in_srgb,#22c55e_18%,var(--bg-panel))] shadow-[0_0_0_1px_color-mix(in_srgb,#22c55e_45%,transparent)]";
+  "border-border border-l-done bg-[color-mix(in_srgb,var(--done)_8%,var(--bg-panel))] hover:bg-[color-mix(in_srgb,var(--done)_18%,var(--bg-panel))] shadow-[0_0_0_1px_color-mix(in_srgb,var(--done)_45%,transparent)]";
 // The row you are looking at, and a row with nothing to say — neither carries a status colour, so
 // their hover is the theme's own.
 const ROW_EXPANDED = "border-[#4a9eff] border-l-[#4a9eff] bg-panel hover:bg-hover";

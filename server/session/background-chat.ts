@@ -5,6 +5,7 @@
 // The agent tool calls this, so the body is whatever a model produced — every field is
 // treated as absent unless it is exactly what we accept.
 import { asTerminalAgent, type TerminalAgent } from "../../common/sessionAgent.js";
+import { isRecord } from "../../common/isRecord.js";
 
 export interface BackgroundChatRequest {
   agent: TerminalAgent;
@@ -17,7 +18,7 @@ export interface BackgroundChatRequest {
 
 /** The request, or the message to answer with when it cannot be served. */
 export function parseBackgroundChat(body: unknown): { ok: true; request: BackgroundChatRequest } | { ok: false; message: string } {
-  const record = typeof body === "object" && body !== null ? (body as Record<string, unknown>) : {};
+  const record: Record<string, unknown> = isRecord(body) ? body : {};
   const message = typeof record.message === "string" ? record.message.trim() : "";
   if (!message) return { ok: false, message: "spawnBackgroundChat: `message` is required (non-empty string)." };
   return {

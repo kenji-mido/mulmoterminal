@@ -5,7 +5,7 @@
 import { computed, useTemplateRef } from "vue";
 import { useDropdownMenu } from "../composables/useDropdownMenu";
 import { useIssueStart } from "../composables/useIssueStart";
-import { issueStartBlockedReason } from "../composables/issueStartPlan";
+import { issueStartBlockedReason } from "../../common/issueStartPlan";
 import { useAppConfig } from "../composables/useAppConfig";
 import { formatCwd } from "./cwdDisplay";
 

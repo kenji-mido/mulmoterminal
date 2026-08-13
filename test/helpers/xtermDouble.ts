@@ -44,6 +44,15 @@ export interface XtermTermState {
    *  pointer reports the app feeds back through `term.input()`. Captured so a test can push
    *  either kind through the real `send` and see which one counts as the user typing (#992). */
   emitData: (data: string) => void;
+  /** What `buffer.active` reports for the #846 health probe. Healthy by default (a spec that
+   *  isn't about the probe must never trip it); a spec drives the corruption by shortening
+   *  `length`. See src/composables/terminalBufferHealth.ts for what makes a shape "short". */
+  bufferLength: number;
+  bufferBaseY: number;
+  bufferCursorY: number;
+  /** How many terminals the manager has constructed for this state. The rebuild (#846) is
+   *  otherwise invisible from outside: it swaps `c.term` for a fresh one behind the slot key. */
+  constructed: number;
 }
 
 export function createXtermState(): { termState: XtermTermState; keyState: XtermKeyState } {
@@ -59,6 +68,12 @@ export function createXtermState(): { termState: XtermTermState; keyState: Xterm
       onSelectionChange: () => {},
       helperTextarea: null,
       emitData: () => {},
+      // rows is 24 below, so this is exactly a full screen with nothing scrolled off: short by
+      // neither of bufferIsShort's two tests.
+      bufferLength: 24,
+      bufferBaseY: 0,
+      bufferCursorY: 0,
+      constructed: 0,
     },
     keyState: { handler: () => true },
   };
@@ -75,6 +90,7 @@ export function xtermModule(termState: XtermTermState, keyState: XtermKeyState) 
         // and a test that only saw the constructor argument could not tell whether they landed.
         this.options = opts;
         termState.options = opts;
+        termState.constructed += 1;
       }
       // ensure() registers the mouse-tracking guards through this (#729); the guards' own behaviour
       // is covered against a REAL terminal in mouseTrackingGuard.spec.ts.
@@ -100,7 +116,14 @@ export function xtermModule(termState: XtermTermState, keyState: XtermKeyState) 
         termState.wheelHandler = fn;
       }
       get buffer() {
-        return { active: { type: termState.bufferType } };
+        return {
+          active: {
+            type: termState.bufferType,
+            length: termState.bufferLength,
+            baseY: termState.bufferBaseY,
+            cursorY: termState.bufferCursorY,
+          },
+        };
       }
       // The clipboard decision asks the terminal whether anything is selected (#900), so the
       // double has to answer. Selection-specific behaviour is covered in terminalClipboard.spec.

@@ -220,7 +220,7 @@ jobs:
           linter or the build: vitest, eslint and vue-tsc are all
           absent, and the attempt only costs you time. Running them
           is the CI job's role — ci.yml installs dependencies and
-          runs lint, three typechecks, the build and the full test
+          runs lint, the typecheck, the build and the full test
           suite on ubuntu AND macOS for every PR — so a second
           execution here would buy nothing the PR does not already
           report. Review by READING the diff and the surrounding

@@ -14,9 +14,15 @@ export interface RateLimitSnapshot {
   /** Why the Claude half is missing, when it is (#1011). The server's own words, so the two
    *  cannot describe the same situation differently. */
   claudeProbe?: ClaudeProbeState | undefined;
+  /** Which silence, when the state is `no-report` (#1293). */
+  claudeStall?: ClaudeProbeStall | undefined;
 }
 
 export type ClaudeProbeState = "ok" | "no-claude" | "no-windows" | "no-report";
+
+/** The one silence the probe's screen can name. Everything else is `unknown`, which reads as the
+ *  general no-report line — a wrong reason costs more than a vague one. */
+export type ClaudeProbeStall = "trust-prompt" | "unknown";
 
 // What to put where the Claude figures would be. Silence is right for "we simply have not
 // measured yet", and wrong for the two states that will not resolve on their own: #1011 was a
@@ -28,6 +34,11 @@ const PROBE_NOTES: Record<ClaudeProbeState, string | null> = {
   "no-report": "Claude usage unavailable — the last check got no answer. Retrying, less often each time.",
 };
 
+// A trust prompt is the one stall a user can clear in ten seconds, and the only reason they would
+// ever know to: the hidden session waits on a dialog they cannot see. It says "the folder" rather
+// than naming one because the path is the server's (CLAUDE_CWD) and does not cross to the browser.
+const TRUST_PROMPT_NOTE = "Claude usage unavailable — the usage check is waiting on Claude Code's trust prompt. Run `claude` in its folder once and accept it.";
+
 /** A short line explaining an absent Claude gauge, or null when there is nothing worth saying —
  *  either it is showing, or it has simply not been measured yet.
  *
@@ -37,6 +48,7 @@ const PROBE_NOTES: Record<ClaudeProbeState, string | null> = {
  *  uninstall `claude` and the gauge would go on showing yesterday's percentage, silently. */
 function claudeProbeNote(snapshot: RateLimitSnapshot | null, now_ms: number): string | null {
   if (!snapshot || gaugeWindows(snapshot.claude, now_ms).length > 0) return null;
+  if (snapshot.claudeProbe === "no-report" && snapshot.claudeStall === "trust-prompt") return TRUST_PROMPT_NOTE;
   return PROBE_NOTES[snapshot.claudeProbe ?? "ok"];
 }
 

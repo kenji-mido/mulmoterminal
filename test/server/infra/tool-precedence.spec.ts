@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 
 import { resolvePluginTools } from "../../../server/infra/tool-precedence.js";

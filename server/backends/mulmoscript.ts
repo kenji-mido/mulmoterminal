@@ -28,6 +28,7 @@ import {
 } from "@mulmoclaude/mulmoscript-plugin/server";
 import type { SaveMulmoScriptArgs } from "@mulmoclaude/mulmoscript-plugin";
 import { artifactsFileOps } from "./artifacts.js";
+import { isRecord } from "../../common/isRecord.js";
 
 /** Pubsub channel the extracted View subscribes to for generation progress —
  *  `plugin:<scope>:<event>`, matching the client runtime's channel formula
@@ -121,7 +122,16 @@ async function handleToolCall(body: Record<string, unknown>, res: Response, inst
     res.json({ message: guard.error });
     return;
   }
-  const outcome = await executeMulmoScriptSave({ files: { artifacts: instance.backend.artifacts } }, body as SaveMulmoScriptArgs);
+  // Built from the checked fields rather than asserted: every field of SaveMulmoScriptArgs is
+  // optional, so a body that is missing or mistypes one is a valid call the package rejects on its
+  // own terms — while the assertion handed it, say, a numeric `filePath` typed as a string.
+  const args: SaveMulmoScriptArgs = {
+    ...(body.script !== undefined ? { script: body.script } : {}),
+    ...(typeof body.filename === "string" ? { filename: body.filename } : {}),
+    ...(typeof body.filePath === "string" ? { filePath: body.filePath } : {}),
+    ...(typeof body.autoGenerateMovie === "boolean" ? { autoGenerateMovie: body.autoGenerateMovie } : {}),
+  };
+  const outcome = await executeMulmoScriptSave({ files: { artifacts: instance.backend.artifacts } }, args);
   if (!outcome.ok) {
     res.json({ message: outcome.error, instructions: "Acknowledge the error and retry with a valid `script` (new) or an existing `filePath`." });
     return;
@@ -162,7 +172,7 @@ export function mountMulmoScriptDispatchRoute(app: Express): void {
       res.status(503).json({ error: "mulmoScript backend not initialised" });
       return;
     }
-    const body = (req.body ?? {}) as Record<string, unknown>;
+    const body: Record<string, unknown> = isRecord(req.body) ? req.body : {};
     try {
       if (typeof body.kind === "string") {
         res.json(await dispatchHandler(body));

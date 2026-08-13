@@ -2,14 +2,14 @@
 // piece of index.ts (#548 step 3c): it spans the CLI args, the
 // sidebar's optimistic row, the draft typed into the input box, and teardown on exit.
 import type { WebSocket } from "ws";
-import { CLAUDE_CWD, PORT, isWorkspaceCwd } from "../config/env.js";
-import { guiMcpEnv } from "./mcp-config.js";
+import { CLAUDE_CWD, PORT } from "../config/env.js";
+import { guiMcpEnv, carriesFullGuiMcp, fullGuiAllowedTools } from "./mcp-config.js";
 import { getUserMcpServers, getPrWorkdirFooter, getAppendSystemPrompt, getTerminalSubmit } from "../config/config-routes.js";
 import { submitSequenceForAgent } from "../../common/terminalSubmit.js";
 import { buildClaudeArgs } from "../agents/claude-args.js";
 import { claudeAdapter } from "../agents/claude.js";
 import { appendedSystemPrompt } from "../agents/appended-prompt.js";
-import { hookedSessions, knownSessions, launchChoices, ptys, resetSessionToolGroups } from "./registry.js";
+import { claimFullGuiMcp, hookedSessions, knownSessions, launchChoices, ptys, resetSessionToolGroups } from "./registry.js";
 import { ptySpawn, ptyWouldReattach } from "./pty-spawn.js";
 import { ptyExitLine, ptyStartLine } from "./pty-exit-log.js";
 import { attachDraftInjection } from "./draft-injection.js";
@@ -105,21 +105,6 @@ function sessionAddDirs(sessionId: string, configured: string[] | null | undefin
   return dropsDirectory ? [...(configured ?? []), dropsDirectory] : configured;
 }
 
-/**
- * Does this session carry the WHOLE GUI MCP on `--mcp-config`, the way the single view always
- * has? Two ways to earn it, and they are different facts that used to be one flag:
- *
- *   `attachGuiMcp` — not a grid cell at all: the single view, or a chat spawned with no cell yet.
- *   the CWD        — a grid cell running in the workspace itself. Starting a terminal there is
- *                    all but the same thing as running the single view, and that equivalence is
- *                    what lets the single view eventually go.
- *
- * A cell in a PROJECT directory is false on both counts and takes exactly the branch it takes
- * today. Named and exported rather than left inline because that last sentence is the invariant
- * this whole change is written around, and an invariant nothing can assert is just a hope.
- */
-export const carriesFullGuiMcp = (attachGuiMcp: boolean, cwd: string | undefined): boolean => attachGuiMcp || isWorkspaceCwd(cwd);
-
 export function createClaudeSpawner(deps: SpawnDeps) {
   // Spawn a fresh claude PTY for this session, register it, and wire its output /
   // exit back to the browser socket. `ws` may be null for a session spawned without
@@ -128,8 +113,9 @@ export function createClaudeSpawner(deps: SpawnDeps) {
   function spawnClaudePty(sessionId: string, resume: string | null, ws: WebSocket | null, options: SpawnClaudeOptions = {}): PtyEntry {
     const { initialPrompt, cwd = CLAUDE_CWD, attachGuiMcp = true, draft, launch } = options;
     const fullGuiMcp = carriesFullGuiMcp(attachGuiMcp, cwd);
-    // fullGuiMcp picks the MCP mode (see buildClaudeArgs, and its own doc for who earns it): the
-    // GUI MCP + --strict-mcp-config; a project-directory cell attaches neither, so its own load.
+    // fullGuiMcp picks the MCP mode (see buildClaudeArgs, and its own doc for who earns it): our
+    // broker on one all-tools url; a project-directory cell gets none of ours and loads the GUI
+    // tools its own directory registered. Either way the user's own MCP servers load.
     // Only --resume when the session has an on-disk transcript — claude doesn't write
     // a session's .jsonl until its first prompt, so a started-but-unused session can't
     // be resumed; we restart fresh (reusing the id via --session-id) instead.
@@ -161,7 +147,7 @@ export function createClaudeSpawner(deps: SpawnDeps) {
       // except the tool GROUPS the directory may have registered itself, which we pre-approve
       // blind (see GRID_MCP_TOOLS). The user's own servers keep their normal prompts there, since
       // that path never went through our allowlist before.
-      allowedTools: fullGuiMcp ? [deps.guiMcpTools, ...getUserMcpServers().map((s) => `mcp__${s.id}`)].join(",") : deps.gridMcpTools,
+      allowedTools: fullGuiMcp ? fullGuiAllowedTools(deps.guiMcpTools, getUserMcpServers()) : deps.gridMcpTools,
       addDirs,
       appendedPrompt: sessionAppendedPrompt(cwd, dir.appendSystemPrompt),
     });
@@ -193,12 +179,18 @@ export function createClaudeSpawner(deps: SpawnDeps) {
     // remaining window is irreducible without tmux reporting which branch `-A` took, and what
     // survives it is an over-reported group on a session that lost it — the next genuinely new
     // process clears that, whereas the reverse mistake could not be undone at all.
-    function resetToolGroupsUnlessReattaching(): void {
-      if (!ptyWouldReattach(sessionId, true)) resetSessionToolGroups(sessionId);
+    //
+    // The all-tools claim rides the SAME probe rather than taking its own: asking twice would widen
+    // exactly the window this is placed here to keep narrow. It is passed the answer instead of
+    // asking, and decides for itself what a reattach means for each direction (see claimFullGuiMcp).
+    function recordCapabilitiesForThisSpawn(): void {
+      const reattaching = ptyWouldReattach(sessionId, true);
+      if (!reattaching) resetSessionToolGroups(sessionId);
+      claimFullGuiMcp(sessionId, attachGuiMcp, cwd, reattaching);
     }
 
     function spawnEntry(): PtyEntry {
-      resetToolGroupsUnlessReattaching();
+      recordCapabilitiesForThisSpawn();
       const spawnEnv = { unset: resolved.unset, env: guiMcpEnv(sessionId, PORT), binEnvVar: claudeAdapter.binEnvVar };
       const { term, tmux, reattached } = ptySpawn(sessionId, deps.claudeBin, args, cwd, true, spawnEnv);
       console.log(ptyStartLine({ agent: "claude", pid: term.pid, cwd, tmux, reattached, sessionId, note: canResume ? `resume ${resume}` : null }));

@@ -99,3 +99,19 @@ source: server/backends/remoteHost/terminalScreen.ts
 Fields the host cannot answer are omitted entirely — a session that outlived a restart has no PTY
 left, so it has neither a directory nor a branch to report. The phone side also needs a version
 that renders them. Suspect a bug only when the host does hold the value and it still doesn't show.
+
+## A repo on my own GitLab says "is not supported yet" in PRs & Issues
+
+configKey: gitlabHosts
+configKey: prRepos
+source: common/gitlabHosts.ts
+source: server/git/forge-host.ts
+guide: docs/guide/en/github.md
+
+Nothing in a URL says which forge a host runs, so a host is read with `glab` only when it is
+gitlab.com or the user DECLARED it. Read the declaration from the global config
+(`~/.mulmoterminal/config.json`) and what a declaration may look like from `common/gitlabHosts.ts` —
+a spelling that fails its rule is dropped on load, which looks exactly like never having written it.
+Then check the two things outside this app: `glab auth status` must name that host, and a config
+edited by hand is only read at start-up. Pure git features (branch, diff, worktree, status) never
+depended on the host, so their working is not evidence that the declaration took.

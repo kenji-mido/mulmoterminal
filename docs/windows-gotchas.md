@@ -74,6 +74,17 @@ const SIBLING = path.resolve(BASE, "../lib");  // the expectation, computed the 
 
 → `test/server/config/add-dirs.spec.ts` for the shape.
 
+**A double that routes on a file NAME is a path comparison too.** The specs that mock `node:fs`
+pick a log apart by basename, and `String(file).split("/").pop()` returns the whole path on
+Windows — so a read falls through to `""` and a recorded write filters out to nothing. Neither
+throws: the spec reads empty logs and reports the feature as broken. #1189 and #1196 each shipped
+one, and Windows daily went red on 12 consecutive runs before it was traced (#1212).
+
+Use `mockedFileName()` from `test/support/mockFsPath.ts` (`split(/[/\\]/)`). Not `path.basename` —
+correct at runtime, but on POSIX it leaves `\` alone, so the Windows case cannot be asserted on the
+machine that runs the suite. Not `endsWith` either: `unplaced-sessions.json` ends with
+`placed-sessions.json`, so a suffix match reads the two logs as one.
+
 **Verify on the real runner before merging**, with the dispatch at the top of this file. Local
 `yarn test` on macOS/Linux cannot see any of this — the whole class only appears where the
 separator and the drive letter differ.

@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { finalizePrBody, type Runner } from "../../../server/git/worktree-pr.js";
 import type { SpawnResult } from "../../../server/git/spawn-collect.js";

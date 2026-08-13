@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import { makeTempDir } from "../../support/tempDir.js";
 import { writeFileSync, mkdirSync, rmSync, symlinkSync, realpathSync } from "node:fs";

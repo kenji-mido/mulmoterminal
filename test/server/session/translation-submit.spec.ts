@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect, vi } from "vitest";
 
 import { translationSubmitOutcome } from "../../../server/session/translation-submit.js";

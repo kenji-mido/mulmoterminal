@@ -9,6 +9,8 @@
 // The caller does the work each effect names (read the transcript, blank the maps, publish,
 // queue a title); this only decides which one, if any.
 
+import { isInjectedPrompt } from "./transcript.js";
+
 export type HeaderHookEffect =
   // Record this as the session's current query. Already trimmed and capped.
   | { kind: "prompt"; text: string }
@@ -22,11 +24,17 @@ export const LAST_PROMPT_CAP = 200;
 
 // Null means "this hook changes nothing about the header", which is the common case: every
 // tool hook, every SessionStart that is not a `/clear`, and — deliberately — a
-// UserPromptSubmit carrying a blank or non-string prompt. Blanking the header on an empty
-// submit would erase the query the user is still waiting on.
+// UserPromptSubmit carrying a blank, non-string, or harness-injected prompt. Blanking the
+// header on an empty submit would erase the query the user is still waiting on.
+//
+// An injected prompt is refused HERE rather than at the call site because one `kind: "prompt"`
+// feeds two writes — the header text and the AI title — and through them five surfaces, down to
+// the Web Push body. Null leaves the last real prompt standing, which is what should survive a
+// background task finishing (#1384).
 export function headerHookEffect(event: string, body: Record<string, unknown>, cap: number = LAST_PROMPT_CAP): HeaderHookEffect | null {
   if (event === "UserPromptSubmit") {
     if (typeof body.prompt !== "string" || !body.prompt.trim()) return null;
+    if (isInjectedPrompt(body.prompt)) return null;
     return { kind: "prompt", text: body.prompt.trim().slice(0, cap) };
   }
   // Only `source: "clear"`. A `/compact` also arrives as SessionStart, and clearing on it

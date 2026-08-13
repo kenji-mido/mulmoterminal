@@ -1,6 +1,7 @@
 // The phone's remote terminal view (#435): pick a session, read its screen, and — since #445 —
-// type into it. Screens are bounded by the terminal's own geometry (rows x cols), so unlike
-// collections they need no paging to stay under the 1 MiB command-doc ceiling.
+// type into it. A screen is a fixed-size WINDOW ending at the live prompt — a bounded number of
+// rows and bytes, see SCREEN_HISTORY_ROWS — so unlike collections it needs no paging to stay
+// under the 1 MiB command-doc ceiling.
 //
 // No MulmoClaude counterpart: that host has no PTY table to look at.
 import { toJsonObject, type CommandHandlers, type JsonObject } from "@mulmoclaude/core/remote-host";

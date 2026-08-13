@@ -9,6 +9,7 @@
 // An UNKNOWN ACTION only warns: that is what a config written for a newer MulmoTerminal
 // looks like, and downgrading must not brick the app.
 import { validateKeymap } from "../../common/keymap.js";
+import { isRecord } from "../../common/isRecord.js";
 
 export interface KeymapCheck {
   warnings: string[];
@@ -21,7 +22,7 @@ const describe = (binding: unknown): string =>
 // Pure: the raw parsed config object in, human-readable lines out. The caller decides
 // what to print and whether to exit.
 export function checkKeymap(rawConfig: unknown): KeymapCheck {
-  const keymap = typeof rawConfig === "object" && rawConfig !== null && !Array.isArray(rawConfig) ? (rawConfig as Record<string, unknown>).keymap : undefined;
+  const keymap = isRecord(rawConfig) ? rawConfig.keymap : undefined;
   const problems = validateKeymap(keymap);
   const line = (p: (typeof problems)[number]) => `  keymap.${p.action}: ${describe(p.binding)} — ${p.reason}`;
   return {

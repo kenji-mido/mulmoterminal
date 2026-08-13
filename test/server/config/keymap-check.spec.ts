@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect, vi } from "vitest";
 import { checkKeymap, enforceKeymap } from "../../../server/config/keymap-check.js";
 

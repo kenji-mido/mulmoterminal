@@ -15,19 +15,26 @@
 //   - "the newest X"    → the last X seen, replaced as it arrives
 //   - the current turn  → reset on each user prompt (the rule already works that way)
 //
-// The per-record memory is a handful of strings and one array that empties every turn, so a
-// 585 MB transcript costs the same as a small one.
+// The state holds **no raw records**, which is what lets this fold be paused and RESUMED — kept
+// beside the transcript and continued on what was appended rather than run again from the start
+// (#1377 / #1386). It used to keep every user record, to pick the latest meaningful prompt out of
+// them at the end, and the last assistant record, to read the model and context off it. Both are
+// now resolved as they arrive, by the same functions that resolved them before — and both were
+// unbounded: a transcript here holds 13,664 user records, and one of them can be megabytes.
 //
 // Every rule still lives in its `…FromParsed` function: each is fed a one-record or few-record
 // window rather than reimplemented here.
 import {
   aiTitleFromParsed,
   countUserTurnsFromParsed,
-  createCurrentTurnToolScan,
+  emptyPromptTrail,
+  foldPromptTrail,
+  foldTurnToolNames,
   latestAssistantTextFromParsed,
-  latestMeaningfulUserPromptFromParsed,
   latestTurnContextFromParsed,
+  meaningfulPromptOf,
   sessionUsageFromParsed,
+  type PromptTrail,
 } from "./transcript.js";
 import type { LatestTurnContext, SessionUsage } from "./transcript.js";
 import { isRecord } from "../../common/isRecord.js";
@@ -42,52 +49,80 @@ export interface SummaryParts {
   toolNames: string[];
 }
 
-export function createSummaryScan() {
-  const usage: SessionUsage = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
-  let userTurns = 0;
-  let aiTitle: string | null = null;
-  const toolScan = createCurrentTurnToolScan();
-  // The records the prompt rule reads: `user` lines, and the `last-prompt` record it falls back to
-  // when a transcript has none (a hook writes that one). Keeping user records alone dropped the
-  // fallback and reported null — Codex caught it. Still far fewer than the transcript.
-  const promptRecords: Record<string, unknown>[] = [];
-  // Whatever produced these most recently, so a long run of tool calls afterwards cannot bury them.
-  let lastAssistantText: string | null = null;
-  // The last assistant MESSAGE, not the last context that named a model: the rule reads model and
-  // tokens off the same final turn as a unit, so a turn naming no model reports null rather than
-  // an earlier turn's model (Codex).
-  let lastAssistantRecord: Record<string, unknown> | null = null;
+/** Everything the summary needs to remember, and nothing that cannot be written down. */
+export interface SummaryState {
+  usage: SessionUsage;
+  userTurns: number;
+  aiTitle: string | null;
+  prompts: PromptTrail;
+  /** Whatever produced text most recently, so a long run of tool calls afterwards cannot bury it. */
+  lastAssistantText: string | null;
+  /** Model and context tokens off the last assistant MESSAGE, read as a unit — so a turn naming no
+   *  model reports null rather than an earlier turn's model (Codex). */
+  context: LatestTurnContext;
+  /** Tool names in the current turn, emptied by each new user prompt. */
+  turnTools: string[];
+}
 
+export const emptySummaryState = (): SummaryState => ({
+  usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 },
+  userTurns: 0,
+  aiTitle: null,
+  prompts: emptyPromptTrail(),
+  lastAssistantText: null,
+  context: { model: null, contextTokens: 0 },
+  turnTools: [],
+});
+
+/** Every part of it, including the ones holding a collection: a resumed fold pushes into
+ *  `turnTools` and adds into `usage`, and the state it continues from has already been read. */
+export const copySummaryState = (state: SummaryState): SummaryState => ({
+  usage: { ...state.usage },
+  userTurns: state.userTurns,
+  aiTitle: state.aiTitle,
+  prompts: { ...state.prompts },
+  lastAssistantText: state.lastAssistantText,
+  context: { ...state.context },
+  turnTools: [...state.turnTools],
+});
+
+export function foldSummary(into: SummaryState, record: Record<string, unknown>): void {
+  // One-record windows: each rule still decides for itself what counts, so "what is a user
+  // turn" or "which usage fields exist" lives in one place, not two.
+  const one = [record];
+  into.userTurns += countUserTurnsFromParsed(one);
+  const perRecord = sessionUsageFromParsed(one);
+  into.usage.inputTokens += perRecord.inputTokens;
+  into.usage.outputTokens += perRecord.outputTokens;
+  into.usage.cacheReadTokens += perRecord.cacheReadTokens;
+  into.usage.cacheCreationTokens += perRecord.cacheCreationTokens;
+  into.aiTitle = aiTitleFromParsed(one) ?? into.aiTitle;
+  foldTurnToolNames(into.turnTools, record);
+  foldPromptTrail(into.prompts, record);
+  // `?? previous` rather than an unconditional assign: an assistant record carrying only a
+  // tool_use has no text, and must not blank out the reply the user is looking at.
+  into.lastAssistantText = latestAssistantTextFromParsed(one) ?? into.lastAssistantText;
+  // Resolved as it arrives rather than by keeping the record: the same one-record window, and its
+  // ANSWER is two small fields where the record it came from can be megabytes.
+  if (record.type === "assistant" && isRecord(record.message)) into.context = latestTurnContextFromParsed(one);
+}
+
+export const summaryPartsOf = (state: SummaryState, responseMax: number): SummaryParts => ({
+  lastPrompt: meaningfulPromptOf(state.prompts),
+  aiTitle: state.aiTitle,
+  lastResponse: state.lastAssistantText?.slice(0, responseMax) ?? null,
+  userTurns: state.userTurns,
+  usage: state.usage,
+  context: state.context,
+  toolNames: state.turnTools,
+});
+
+export function createSummaryScan() {
+  const state = emptySummaryState();
   return {
     add(record: Record<string, unknown>) {
-      // One-record windows: each rule still decides for itself what counts, so "what is a user
-      // turn" or "which usage fields exist" lives in one place, not two.
-      const one = [record];
-      userTurns += countUserTurnsFromParsed(one);
-      const perRecord = sessionUsageFromParsed(one);
-      usage.inputTokens += perRecord.inputTokens;
-      usage.outputTokens += perRecord.outputTokens;
-      usage.cacheReadTokens += perRecord.cacheReadTokens;
-      usage.cacheCreationTokens += perRecord.cacheCreationTokens;
-      aiTitle = aiTitleFromParsed(one) ?? aiTitle;
-      toolScan.add(record);
-      if (record.type === "user" || record.type === "last-prompt") promptRecords.push(record);
-      // `?? previous` rather than an unconditional assign: an assistant record carrying only a
-      // tool_use has no text, and must not blank out the reply the user is looking at.
-      lastAssistantText = latestAssistantTextFromParsed(one) ?? lastAssistantText;
-      if (record.type === "assistant" && isRecord(record.message)) lastAssistantRecord = record;
+      foldSummary(state, record);
     },
-
-    finish(responseMax: number): SummaryParts {
-      return {
-        lastPrompt: latestMeaningfulUserPromptFromParsed(promptRecords),
-        aiTitle,
-        lastResponse: lastAssistantText?.slice(0, responseMax) ?? null,
-        userTurns,
-        usage,
-        context: latestTurnContextFromParsed(lastAssistantRecord ? [lastAssistantRecord] : []),
-        toolNames: toolScan.names(),
-      };
-    },
+    finish: (responseMax: number): SummaryParts => summaryPartsOf(state, responseMax),
   };
 }

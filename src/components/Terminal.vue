@@ -31,10 +31,10 @@ import type { LaunchChoice } from "./wsUrl";
 // `null` => start a fresh session; otherwise resume the given session id.
 // `connectKey` increments on every user action so re-selecting the same
 // session (or starting another fresh one) still forces a reconnect.
-// `devTerminal` runs claude as a plain dev terminal (the grid): NO GUI plugin MCP
-// and NO --strict-mcp-config, so the user's (~/.claude.json) + project's (.mcp.json)
-// MCP servers load normally. Default (false, the single view) keeps main's behavior:
-// the in-process GUI MCP attached and isolated with --strict-mcp-config.
+// `devTerminal` runs claude as a plain dev terminal (the grid): no GUI plugin MCP of
+// ours, so its GUI tools come from whatever the directory registered. Default (false,
+// the single view) attaches the in-process GUI MCP on one all-tools url. The user's
+// (~/.claude.json) + project's (.mcp.json) MCP servers load in both.
 // `command` switches the terminal to a plain shell command (the grid's Run menu):
 // it connects to /ws/run with the script index instead of resuming a Claude
 // session, and never auto-reconnects (the ephemeral process can't be resumed).
@@ -255,6 +255,7 @@ onMounted(() => {
       onCwd: (c) => emit("cwd", c),
       onExit: (exitCode) => emit("exit", exitCode),
       onInput: () => emit("input"),
+      onInputDropped: (willReconnect) => void showHint(willReconnect ? INPUT_DROPPED_EN : INPUT_DROPPED_ENDED_EN, "cloud_off"),
     },
     container,
     effectiveTermTheme(),
@@ -393,7 +394,7 @@ watch(
     // here means a surviving timer only ever reflects the cell's current, unchanged state.
     clearTimeout(refocusTimer);
     if (!shouldRefocusOnZoomChange(!!expanded, props.zoomed)) return;
-    nextTick(() => conn.focus(slotKey));
+    void nextTick(() => conn.focus(slotKey));
     refocusTimer = setTimeout(() => conn.focus(slotKey), FLIP_MS + 30);
   },
 );
@@ -409,7 +410,7 @@ watch(
   () => props.expanded,
   () => {
     clearTimeout(refitTimer);
-    nextTick(() => conn.fit(slotKey));
+    void nextTick(() => conn.fit(slotKey));
     refitTimer = setTimeout(() => conn.fit(slotKey), FLIP_MS + 30);
   },
 );
@@ -513,16 +514,34 @@ function onDragOver(e: DragEvent) {
 // otherwise fall back to advice that always holds.
 const DROP_HINT_PICKER_EN = "This browser doesn't share a dropped file's path. Use the paperclip button in the header (Insert a file path) instead.";
 const DROP_HINT_TYPE_EN = "This browser doesn't share a dropped file's path — type or paste the path instead.";
+// Input into a terminal whose socket is down. The status pill says "disconnected", but it is in a
+// header a grid cell hides (filmstrip) and nobody watches a pill while typing — so input that went
+// nowhere looks exactly like a terminal that received it and printed nothing. Rate-limited by
+// useTerminalConnections, and it names the recovery, because the reconnect is automatic and
+// waiting IS the right move.
+//
+// "sent" rather than "typed": the same banner now answers for a header button and a picked skill
+// (#1315), and someone who pressed a button did not type anything.
+const INPUT_DROPPED_EN = "Not connected — what you sent didn't reach the terminal. Reconnecting…";
+// The same silence, but nothing is coming to end it: an exited session, a superseded tab, a Run
+// cell whose command finished. Telling those to wait for a reconnect would replace one misleading
+// message with another, which is the very thing this banner exists to stop.
+const INPUT_DROPPED_ENDED_EN = "This session has ended — what you sent didn't reach the terminal.";
 const dropHint = ref(false);
 const dropHintText = ref("");
+// The banner started as the file-drop hint and is now shared, so the icon travels with the
+// sentence: a connection notice under a paperclip reads as a failed attachment.
+const DROP_HINT_ICON = "attach_file";
+const dropHintIcon = ref(DROP_HINT_ICON);
 const DROP_HINT_MS = 6000;
 let dropHintTimer: ReturnType<typeof setTimeout> | undefined;
 // Two hints can now overlap (a failed drop, a failed paste), and a translation that resolves
 // after the next hint has replaced the text would otherwise put the OLD sentence back.
 let hintRequest = 0;
-async function showHint(english: string) {
+async function showHint(english: string, icon: string = DROP_HINT_ICON) {
   const request = ++hintRequest;
   dropHintText.value = english; // show immediately; the translation (server-cached) swaps in
+  dropHintIcon.value = icon;
   dropHint.value = true;
   clearTimeout(dropHintTimer);
   dropHintTimer = setTimeout(() => (dropHint.value = false), DROP_HINT_MS);
@@ -554,16 +573,24 @@ onUnmounted(() => {
 
 <template>
   <div class="relative flex h-full min-h-0 min-w-0 flex-1 flex-col bg-base">
+    <!-- Same height, padding and gap as the cell's own header row above it (CELL_HEADER), so the two
+         read as one 68px piece of chrome rather than two. The height is FIXED rather than left to
+         `py-*` + content: this row's tallest child is an 18px icon in a `p-0.5` button — 22px, since
+         `.material-symbols-outlined` sets `line-height: 1` — and the old `py-2` around that came to
+         38px, four more than row 1. Nothing here is taller than 34px, and `flex-none` keeps the
+         terminal below from compressing it.
+         Not the CELL_HEADER constant itself: that carries `border-b`, which belongs under the row
+         that has another row beneath it, not under the one the terminal starts below. -->
     <div
       v-if="!hideHeader"
-      class="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 bg-[var(--cell-header-bg,var(--bg-panel))] px-4 py-2 font-sans text-[14px] text-[var(--cell-header-fg,var(--text))]"
+      class="flex h-[34px] flex-none items-center gap-2 bg-[var(--cell-header-bg,var(--bg-panel))] px-2 font-sans text-[14px] text-[var(--cell-header-fg,var(--text))]"
       :style="headerStyle"
     >
-      <!-- Kept for a screen reader and taken off the screen, at every width. It was already
-           dropped below 640px as "the least informative thing on the row" — and that is no less
-           true at 900px, where the row still cannot hold its buttons. Nothing is learned from the
-           word "Terminal" written above a terminal. -->
-      <span class="sr-only">Terminal</span>
+      <!-- No "Terminal" heading. It was the page title of the single view, which no longer exists
+           (the router has no route for it) — every caller now embeds this inside a cell whose own
+           header row already says which cell it is. It outlived its context as the largest, boldest
+           text in a cell while saying the least, and on a command or launcher cell it contradicted
+           the row above it, which names the program actually running. -->
       <span
         v-if="dirName"
         class="max-w-[16ch] truncate rounded-[10px] px-2 py-px text-[11px] font-semibold leading-[1.6]"
@@ -571,22 +598,26 @@ onUnmounted(() => {
         :title="dirName"
         >{{ dirName }}</span
       >
-      <GitBranchChip :status="gitStatus" />
-      <!-- Only when it is NOT "connected". A green badge confirming that nothing is wrong is read
-           once and then never again, while it holds ~90px on every row forever — and the states
-           that matter (connecting, disconnected, superseded) are exactly the ones a permanently
-           present badge trains the eye to skip. -->
-      <span v-if="status !== 'connected'" class="rounded-[4px] px-2 py-0.5 text-[12px]" :class="statusClass">{{ status }}</span>
+      <!-- This row's LEADING context, opposite the actions in `ml-auto` below. A session cell fills
+           it with its path menu, which is the better place for a path than its own info row — that
+           row is what you scan across nine cells, this is what you read about the one in front of
+           you. The command and launcher cells fill nothing and keep the branch chip: their own
+           header (CellShell) carries no git, so it is the only place they have for it. A default
+           rather than a `hideGit` prop, so who owns this space is answered by whoever fills it. -->
+      <slot name="header-lead">
+        <GitBranchChip :status="gitStatus" />
+      </slot>
+      <!-- Only while something is wrong with the CONNECTION. This is the socket's state, not the
+           agent's — a cell's own dot already says whether the agent is working or waiting — and a
+           permanent green "connected" on every cell in the grid says nothing anyone reads. It has
+           to stay for the other values: "connecting" is why a terminal is blank, and the error
+           state is why it stopped taking input. -->
+      <span v-if="status !== 'connected'" data-testid="term-conn-status" class="rounded-[4px] px-2 py-0.5 text-[12px]" :class="statusClass">{{ status }}</span>
       <RunMenu v-if="runMenu" :cwd="serverCwd" @run="(c) => emit('run', c)" />
       <SkillMenu v-if="runMenu" :cwd="serverCwd" @skill="onSkill" />
-      <!-- The row WRAPS rather than overflowing, and this group is shrink-0, so on a narrow
-           screen the actions drop to a second line instead of off the right edge. Nothing here
-           shrinks — the badge and the branch chip are already capped at 16ch and the left side
-           alone fills a phone — so without wrapping these buttons are simply unreachable, which
-           is how the ⌨ toggle came to exist only in landscape.
-           The right-push is dropped below 640px: on the line the group wraps onto there is
-           nothing to push away from, so ml-auto would only leave a gap to its left. -->
-      <div class="ml-0 inline-flex shrink-0 items-center gap-1 sm:ml-auto">
+      <!-- flex-none: the lead slot beside it now grows and truncates (a path), and without this the
+           actions would shrink to make room and clip their own icons. -->
+      <div class="ml-auto inline-flex flex-none items-center gap-1">
         <button
           v-for="b in headerButtons"
           :key="b.id"
@@ -631,8 +662,9 @@ onUnmounted(() => {
         </button>
         <!-- The file-path picker and file explorer are now DEFAULT_BUTTONS (server-resolved into
              headerButtons above), so the user can drop/reorder/replace them via config. -->
-        <!-- A grid cell injects its own actions (GitHub / timeline / reorder / zoom /
-             close) here, so all the icon buttons live on this one header row. -->
+        <!-- A grid cell injects its SESSION actions (GitHub / ask / copy / timeline) here, so they
+             sit with this row's own ones. Reorder / zoom / park / close are NOT here: they act on
+             the cell, not on the session, and stay on the cell's own header row. -->
         <slot name="header-actions" />
       </div>
     </div>
@@ -729,7 +761,7 @@ onUnmounted(() => {
         class="pointer-events-none absolute bottom-3 left-1/2 z-20 flex max-w-[min(90%,560px)] -translate-x-1/2 items-center gap-2 rounded-lg border-2 border-[#c98a00] bg-[#ffd54a] px-4 py-2.5 font-sans text-[13px] font-semibold leading-[1.4] text-[#1a1a2e] shadow-[0_4px_16px_rgba(0,0,0,0.45)]"
         role="status"
       >
-        <span class="material-symbols-outlined shrink-0 text-[18px]" aria-hidden="true">attach_file</span>
+        <span class="material-symbols-outlined shrink-0 text-[18px]" aria-hidden="true">{{ dropHintIcon }}</span>
         <span>{{ dropHintText }}</span>
       </div>
     </Transition>

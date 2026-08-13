@@ -23,7 +23,7 @@ export function antigravityBrainRoot(): string {
 }
 
 // One directory per conversation, named by its id. Anything else in there is not a conversation.
-export function listAntigravitySessions(root: string): string[] {
+export function listAntigravityConversationIds(root: string): string[] {
   if (!existsSync(root)) return [];
   try {
     return readdirSync(root).filter((name) => UUID_RE.test(name));
@@ -40,13 +40,13 @@ export function antigravityConversationExists(root: string, id: string): boolean
 }
 
 export function snapshotAntigravitySessions(root: string = antigravityBrainRoot()): Set<string> {
-  return new Set(listAntigravitySessions(root));
+  return new Set(listAntigravityConversationIds(root));
 }
 
 // The one conversation this session created, or null while that is still ambiguous.
 export function pickFreshAntigravitySession(root: string, before: ReadonlySet<string>, claimed?: ReadonlySet<string>): string | null {
-  const found = listAntigravitySessions(root).filter((id) => !before.has(id) && !claimed?.has(id));
-  return found.length === 1 ? found[0] : null;
+  const found = listAntigravityConversationIds(root).filter((id) => !before.has(id) && !claimed?.has(id));
+  return found.length === 1 ? (found[0] ?? null) : null;
 }
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));

@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect, vi } from "vitest";
 import type { NextFunction, Request, Response } from "express";
 import { needsSameOrigin, requestOriginAllowed, sameOriginGuard } from "../../../server/routes/same-origin-guard.js";

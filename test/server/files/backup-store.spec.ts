@@ -1,10 +1,11 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync, readFileSync, readdirSync, rmSync, existsSync } from "node:fs";
 import path from "node:path";
+import { makeTempDir } from "../../support/tempDir";
 import { backupDirFor, expiredBackups, storeBackup, backupCurrentFile, BACKUP_GENERATIONS } from "../../../server/files/backup-store";
 
-const tmp = () => mkdtempSync(path.join(tmpdir(), "mt-backup-"));
+const tmp = () => makeTempDir("mt-backup-");
 const backupsIn = (dir: string) =>
   readdirSync(dir)
     .filter((n) => n.endsWith(".bak"))

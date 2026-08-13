@@ -8,7 +8,8 @@
 // client owns the full array and replaces it wholesale. Mutations are optimistic
 // with rollback, and serialized so overlapping replace-all PUTs can't reorder.
 import { computed, ref, type ComputedRef } from "vue";
-import { sameShortcut, type Shortcut, type ShortcutKind } from "../../common/shortcuts";
+import { sameShortcut, SHORTCUT_KINDS, type Shortcut, type ShortcutKind } from "../../common/shortcuts";
+import { isRecord } from "../../common/isRecord";
 import { reconcileShortcuts } from "./reconcileShortcuts";
 import { fetchJson } from "../utils/fetchJson";
 
@@ -24,12 +25,25 @@ interface ShortcutsResponse {
   shortcuts: Shortcut[];
 }
 
+// The reader `fetchJson` requires. It checks rather than names: a pin the UI cannot navigate to
+// (no slug) or cannot label (no title/icon) is dropped instead of rendered as a blank chip.
+const isShortcut = (value: unknown): value is Shortcut =>
+  isRecord(value) &&
+  SHORTCUT_KINDS.some((kind) => kind === value.kind) &&
+  typeof value.slug === "string" &&
+  typeof value.title === "string" &&
+  typeof value.icon === "string";
+
+const readShortcuts = (raw: unknown): ShortcutsResponse => ({
+  shortcuts: isRecord(raw) && Array.isArray(raw.shortcuts) ? raw.shortcuts.filter(isShortcut) : [],
+});
+
 /** Load once per session (deduped). A FAILED load is not cached so the next call
  *  retries. */
 async function load(force = false): Promise<void> {
   if (loadPromise && !force) return loadPromise;
   loadPromise = (async () => {
-    const result = await fetchJson<ShortcutsResponse>("/api/shortcuts");
+    const result = await fetchJson("/api/shortcuts", readShortcuts);
     if (!result.ok) {
       loadError.value = result.error;
       loadPromise = null; // allow retry
@@ -58,7 +72,7 @@ function enqueue<T>(task: () => Promise<T>): Promise<T> {
 /** Persist `next`, rolling back to `previous` on failure. Call only inside enqueue. */
 async function persist(next: Shortcut[], previous: Shortcut[]): Promise<boolean> {
   shortcuts.value = next;
-  const result = await fetchJson<ShortcutsResponse>("/api/shortcuts", {
+  const result = await fetchJson("/api/shortcuts", readShortcuts, {
     method: "PUT",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ shortcuts: next }),

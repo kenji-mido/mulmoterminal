@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { parsePrUrl, prUrlForBranch, clearPrUrlCache } from "../../../server/git/pr-for-branch.js";
 

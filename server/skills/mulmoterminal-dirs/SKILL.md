@@ -200,6 +200,23 @@ nothing, which reads as the setting being broken. For CJK, prefer a face whose f
 exactly twice the Latin width (Cica, HackGen, Sarasa Mono J, Noto Sans Mono CJK JP, MS Gothic, BIZ
 UDGothic); anything else tears the box-drawing frames an agent TUI is made of.
 
+### Worktrees derive their own config from this one
+
+A managed git worktree (`~/.mulmoterminal/worktrees/<repo>-<hash>/<task>`) gets its own
+`.mulmoterminal.json` when MulmoTerminal creates it, derived from the project's: identity keys
+(`name` / `theme` / `colors` / `fontSize` / `fontFamily` / `provider` / `model`) as written, the
+seven chrome colours rotated **12° further per worktree**, and `orderPriority` at the project's
+rank **+ 1**. `sound` / `sounds` / `addDirs` are not carried.
+
+Two consequences for this skill:
+
+- **Leave worktree directories out of the population you survey.** Their colours are derived, not
+  chosen, so reading them as data would infer a 12° family step that nobody decided on. Rank them
+  and they collide with the +1 the app writes.
+- **Recolouring a project does not recolour its existing worktrees** — the copy was taken when the
+  worktree was created. Say so if the user asks why one cell kept the old colour, and offer to
+  delete that worktree's file so the next launch has nothing stale.
+
 ### Other keys in this file
 
 `buttons` / `chips` → `mulmoterminal-header`. `provider` / `model` → `mulmoterminal-model`.

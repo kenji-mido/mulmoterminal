@@ -4,7 +4,7 @@ import type { AttentionStatus } from "../../../src/components/attentionStatus";
 
 const BLINK = "animate-roster-alert";
 const AMBER_EDGE = "border-l-[#f59e0b]";
-const GREEN_EDGE = "border-l-[#22c55e]";
+const GREEN_EDGE = "border-l-done";
 
 describe("rosterAlertClass", () => {
   it("blinks the row whose agent is waiting on the user", () => {
@@ -51,7 +51,9 @@ describe("rosterAlertClass", () => {
   // whole row, which on a light theme — where the wash sits a few percent from white — clipped it to
   // pure white, so the one row you were looking at was the one with no colour.
   it("keeps the state colour in the hovered background", () => {
-    expect(rosterAlertClass("done", { expanded: false, blink: true, parked: false })).toContain("hover:bg-[color-mix(in_srgb,#22c55e_18%,var(--bg-panel))]");
+    expect(rosterAlertClass("done", { expanded: false, blink: true, parked: false })).toContain(
+      "hover:bg-[color-mix(in_srgb,var(--done)_18%,var(--bg-panel))]",
+    );
     expect(rosterAlertClass("blocked", { expanded: false, blink: false, parked: false })).toContain(
       "hover:bg-[color-mix(in_srgb,#f59e0b_24%,var(--bg-panel))]",
     );

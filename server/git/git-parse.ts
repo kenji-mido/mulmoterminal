@@ -10,7 +10,7 @@ export function lastGhUrl(stdout: string): string | null {
   const urls = splitLines(stdout)
     .map((line) => line.trim())
     .filter((line) => line.startsWith("http"));
-  return urls.length ? urls[urls.length - 1] : null;
+  return urls[urls.length - 1] ?? null;
 }
 
 export interface NumstatEntry {
@@ -25,7 +25,7 @@ export interface NumstatEntry {
 export function parseNumstatLine(line: string, toCount: (s: string) => number): NumstatEntry {
   const [add, del, ...rest] = line.split("\t");
   const num = (s: string) => (s === "-" ? -1 : toCount(s));
-  return { path: rest.join("\t"), additions: num(add), deletions: num(del) };
+  return { path: rest.join("\t"), additions: num(add ?? "-"), deletions: num(del ?? "-") };
 }
 
 // Cap a diff patch so a huge one does not bloat the payload over the socket; `truncated` tells

@@ -3,11 +3,16 @@
 // unit-testable without mounting the Firebase-importing component.
 
 import { isRunnerHealth, type RunnerHealth } from "../../common/remoteHostHealth";
+import { isRecord } from "../../common/isRecord";
 
 export interface RemoteHostStatus {
   connected: boolean;
   uid: string | null;
 }
+
+/** The status as it arrives over the wire. Beside the type so the two cannot drift. */
+export const isRemoteHostStatus = (value: unknown): value is RemoteHostStatus =>
+  isRecord(value) && typeof value.connected === "boolean" && (value.uid === null || typeof value.uid === "string");
 
 // The result of a /api/remote-host/* call: the status + parked blob + runner health on
 // success, or an error with the HTTP status (0 for a network failure) so the caller can

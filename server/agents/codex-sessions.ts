@@ -1,12 +1,13 @@
 import { existsSync, readdirSync } from "node:fs";
-import { open } from "node:fs/promises";
 import path from "node:path";
 import { isRecord } from "../../common/isRecord.js";
+import { cleanTitle, parseJsonRecord, readTranscriptHead } from "./transcript-head.js";
+import { byCodeUnit } from "../../common/byCodeUnit.js";
 
 const ROLLOUT_RE = /^rollout-.*\.jsonl$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const HEAD_BYTES = 64 * 1024; // enough for session_meta + the first user turn
-const TITLE_MAX = 60;
+const DEFAULT_TITLE = "Codex session";
 const SCAN_LIMIT = 200; // newest rollout files to inspect per request
 
 export interface CodexSessionSummary {
@@ -19,16 +20,6 @@ interface RolloutHead {
   id: string;
   cwd: string | null;
   title: string;
-}
-
-function parseJsonRecord(line: string): Record<string, unknown> | null {
-  if (!line) return null;
-  try {
-    const doc: unknown = JSON.parse(line);
-    return isRecord(doc) ? doc : null;
-  } catch {
-    return null; // a truncated final line, or a non-JSON row
-  }
 }
 
 const isSessionMeta = (d: Record<string, unknown>): boolean =>
@@ -44,11 +35,6 @@ function stringField(doc: Record<string, unknown> | undefined, key: string): str
   return isRecord(payload) && typeof payload[key] === "string" ? payload[key] : null;
 }
 
-function cleanTitle(raw: string | null): string {
-  const t = (raw ?? "").replace(/\s+/g, " ").trim().slice(0, TITLE_MAX);
-  return t || "Codex session";
-}
-
 // From a rollout's head, pull the minted id + cwd (session_meta) and a title (first user message).
 // Returns null if there's no valid session_meta.
 export function parseCodexRolloutHead(head: string): RolloutHead | null {
@@ -59,7 +45,7 @@ export function parseCodexRolloutHead(head: string): RolloutHead | null {
   const meta = docs.find(isSessionMeta);
   const id = stringField(meta, "id");
   if (!id) return null;
-  return { id, cwd: stringField(meta, "cwd"), title: cleanTitle(stringField(docs.find(isUserMessage), "message")) };
+  return { id, cwd: stringField(meta, "cwd"), title: cleanTitle(stringField(docs.find(isUserMessage), "message"), DEFAULT_TITLE) };
 }
 
 function subdirsDesc(dir: string): string[] {
@@ -67,7 +53,7 @@ function subdirsDesc(dir: string): string[] {
     return readdirSync(dir, { withFileTypes: true })
       .filter((e) => e.isDirectory())
       .map((e) => e.name)
-      .sort()
+      .sort(byCodeUnit)
       .reverse();
   } catch {
     return [];
@@ -84,7 +70,7 @@ function dayDirsDesc(root: string): string[] {
 function rolloutsInDay(dayDir: string): string[] {
   return readdirSync(dayDir)
     .filter((n) => ROLLOUT_RE.test(n))
-    .sort()
+    .sort(byCodeUnit)
     .reverse()
     .map((f) => path.join(dayDir, f));
 }
@@ -97,20 +83,10 @@ function recentRolloutPaths(root: string, scan: number): string[] {
 }
 
 async function readRolloutSummary(file: string): Promise<(RolloutHead & { mtime: number }) | null> {
-  let fh;
-  try {
-    fh = await open(file, "r");
-    const buf = Buffer.alloc(HEAD_BYTES);
-    const { bytesRead } = await fh.read(buf, 0, HEAD_BYTES, 0);
-    const head = parseCodexRolloutHead(buf.subarray(0, bytesRead).toString("utf8"));
-    if (!head) return null;
-    const { mtimeMs } = await fh.stat();
-    return { ...head, mtime: mtimeMs };
-  } catch {
-    return null;
-  } finally {
-    await fh?.close();
-  }
+  const read = await readTranscriptHead(file, HEAD_BYTES);
+  if (!read) return null;
+  const head = parseCodexRolloutHead(read.head);
+  return head && { ...head, mtime: read.mtime };
 }
 
 // The rollout file for this id, or null. The id is the filename suffix, so the search reads

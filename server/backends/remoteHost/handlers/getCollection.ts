@@ -5,9 +5,10 @@
 import { listItems, loadCollection, toDetail } from "@mulmoclaude/core/collection/server";
 import type { CommandHandlers, JsonObject } from "@mulmoclaude/core/remote-host";
 import { clampLimit, clampOffset, deriveItems, pageResult } from "../collectionPage.js";
+import { readString } from "../../../../common/readString.js";
 
 export const getCollection: CommandHandlers["getCollection"] = async (params: JsonObject) => {
-  const slug = String(params.slug ?? "");
+  const slug = readString(params.slug);
   const offset = clampOffset(params.offset);
   const limit = clampLimit(params.limit);
   const collection = await loadCollection(slug);

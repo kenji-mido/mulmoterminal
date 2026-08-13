@@ -30,29 +30,37 @@ import { reactive, watch } from "vue";
 import { Terminal, type ITheme } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
-import { ClipboardAddon, type IClipboardProvider } from "@xterm/addon-clipboard";
-import { swallowsMouseTracking } from "./mouseTrackingModes";
+import { ClipboardAddon } from "@xterm/addon-clipboard";
+// The clipboard wiring lives apart now; isSystemClipboard is re-exported because its spec reads
+// it off this module.
+import { clipboardProvider, wireCopyOnSelect, isSystemClipboard } from "./terminalClipboardWiring";
+export { isSystemClipboard };
 import { arrowSequence, type ArrowDir } from "./terminalArrowKeys";
 import { documentHidden, whenDocumentVisible } from "./documentVisibility";
-import { clearResetModes, recordSwallowedModes } from "./mouseReports";
-import { guardMouseClicks, guardMouseWheel, guardTouchScroll } from "./terminalMouseInput";
+import { reclaimVisibleSlots } from "./terminalVisibilityHandoff";
+// guardMouseTracking moved into terminalMouseInput.ts upstream and now owns the CSI handlers and
+// the wheel guard this file used to wire by hand — hence no mouseTrackingModes / mouseReports /
+// scroll-speed imports here any more. guardTouchScroll is the fork's touch counterpart, wired
+// beside it.
+import { guardMouseClicks, guardMouseTracking, guardTouchScroll } from "./terminalMouseInput";
+import { getTerminalScrollSpeed } from "./useTerminalScrollSpeed";
 import { isTypedInput } from "./terminalUserInput";
 import { bufferIsShort, readBufferShape } from "./terminalBufferHealth";
 import { CanvasAddon } from "@xterm/addon-canvas";
 import "@xterm/xterm/css/xterm.css";
 import { connWsUrl, type LaunchChoice } from "../components/wsUrl";
-import { reconnectDelayMs, shouldReconnect } from "./reconnectPolicy";
+import { connectionWillReturn, reconnectDelayMs, shouldReconnect } from "./reconnectPolicy";
 import type { RunCommand } from "../components/runCommand";
 import { readableSlot, type SlotCandidate, type SlotInfo } from "./readableSlot";
-import { exitCodeOf, messageEffect } from "./serverMessage";
+import { exitCodeOf, messageEffect, parseServerFrame } from "./serverMessage";
+// No enterKeyOverride / EnterKeyEvent: makeEnterHandler lives in terminalSubmitHandlers.ts now.
 import { submitSequence, submittableLine, DEFAULT_TERMINAL_SUBMIT_MODE, type TerminalSubmitMode } from "../../common/terminalSubmit";
 import { TERMINAL_FONT_SIZE_DEFAULT } from "../../common/terminalFontSize";
 import { TERMINAL_FONT_FAMILY_DEFAULT } from "../../common/terminalFontFamily";
 import { getTerminalSubmitMode } from "./terminalSubmitMode";
-import { getTerminalScrollSpeed } from "./useTerminalScrollSpeed";
-import { clipboardActionFor, selectionToCopy } from "../../common/terminalClipboard";
+import { clipboardActionFor } from "../../common/terminalClipboard";
+import { isImeConfirming } from "./imeComposition";
 import { getActiveKeymap } from "./activeKeymap";
-import { isCopyOnSelectEnabled } from "./copyOnSelect";
 import { createFilePathLinkProvider } from "./terminalFilePathLinkProvider";
 import { tryOpenInPane } from "./filesPaneOpener";
 import { filesGotoFile } from "./useFilesView";
@@ -120,6 +128,14 @@ export interface ConnHandlers {
   // and pastes all funnel through on their way to the socket, so it cannot be reached by output
   // the server writes back or by anything the app renders — only by someone using the session.
   onInput?: () => void;
+  // …and it went nowhere, because the socket is not open. Fired for a keystroke and for anything
+  // the GUI sends into the PTY (a header button, a picked skill, a pasted block), because the
+  // silence is the same either way and a button press is the worse of the two: whoever pressed it
+  // has no sense of having typed, so nothing points at the connection (#1315). Rate-limited, so a
+  // held-down key doesn't turn into a stream of notices. `willReconnect` is false for a session
+  // that ended and for a Run cell, neither of which comes back — telling those to wait would be a
+  // promise nothing will keep.
+  onInputDropped?: (willReconnect: boolean) => void;
 }
 
 // The two xterm options that decide the CELL METRICS, so they travel together: both change how
@@ -159,6 +175,33 @@ interface Conn {
   theme: ITheme | undefined; // last applied, so a rebuilt terminal keeps the cell's colours
   font: TerminalFont; // same reason as `theme` — a rebuilt terminal must not snap back to the default
   lastRebuildMs: number; // rate-limits the #846 recovery so a stuck reading can't spin
+  // A drop has already been LOGGED for this disconnected stretch. One line is all a post-mortem
+  // needs; fifty say nothing more. The banner is timed separately below. Both clear on open.
+  warnedDroppedInput: boolean;
+  // -Infinity rather than 0 so "never notified" outlasts any cooldown: a spec that stubs Date.now
+  // to a small number would otherwise lose the FIRST banner and still read as passing.
+  lastDroppedInputNoticeMs: number;
+}
+
+// The banner is re-armed on a timer rather than shown once per stretch, because a stretch has no
+// upper bound: the backoff retries forever at a 5s cap, so a server that stays down outlives the
+// notice by hours, and whoever comes back and types again meets the silence this exists to break
+// (#1316). One notice per banner-lifetime still cannot become a stream — the next one can only
+// land once the previous has left the screen. Matches DROP_HINT_MS in Terminal.vue.
+const DROPPED_INPUT_NOTICE_MS = 6_000;
+
+// Input that reached a socket which is not open — a keystroke, or anything the GUI sends.
+function reportDroppedInput(c: Conn): void {
+  const willReconnect = connectionWillReturn({ released: c.released, sawExit: c.sawExit, isCommand: !!c.target.command });
+  if (!c.warnedDroppedInput) {
+    c.warnedDroppedInput = true;
+    const fate = willReconnect ? "reconnecting" : "not reconnecting";
+    console.warn(`[terminal] slot ${c.key}: dropped input — the socket is not open (status ${connView.get(c.key)?.status ?? "unknown"}, ${fate})`);
+  }
+  const now = Date.now();
+  if (now - c.lastDroppedInputNoticeMs < DROPPED_INPUT_NOTICE_MS) return;
+  c.lastDroppedInputNoticeMs = now;
+  c.handlers.onInputDropped?.(willReconnect);
 }
 
 // A rebuild costs a re-attach and the client-side scrollback, so a slot gets at most one per
@@ -201,112 +244,6 @@ function setNeedsPrompt(c: Conn, value: boolean) {
   if (v) v.needsPrompt = value;
 }
 
-// Claude Code emits OSC 52 with an EMPTY selection (`ESC ] 52 ; ; <base64>`), which
-// the addon's default provider silently drops (it only writes for selection "c").
-// Route the empty (and "c") selection to the system clipboard so the auto-copy lands.
-export const isSystemClipboard = (selection: string): boolean => selection === "" || selection === "c";
-const clipboardProvider: IClipboardProvider = {
-  // OSC 52 clipboard READ is disabled: letting a terminal program read the user's
-  // clipboard (`ESC ] 52 ; <sel> ; ?`) is an exfiltration vector, and nothing here
-  // needs it (paste uses the browser's native Cmd+V). This is write-only.
-  readText() {
-    return "";
-  },
-  async writeText(selection, text) {
-    if (!isSystemClipboard(selection)) return;
-    try {
-      await navigator.clipboard.writeText(text);
-    } catch {
-      // clipboard blocked (no focus / permission) — best effort
-    }
-  },
-};
-
-// Put the terminal's selection on the system clipboard, by whichever route the browser allows.
-//
-// `navigator.clipboard` is the direct one, but it is secure-context-only: at `http://<lan-ip>` it
-// does not exist AT ALL, and reaching this app that way from a second machine is ordinary. The
-// fallback hands the job back to xterm — with its helper textarea focused, `execCommand("copy")`
-// fires xterm's own `copy` listener, which writes THE CURRENT SELECTION.
-//
-// Which is why this takes the terminal's host and not merely a string: it can only ever copy what
-// the terminal has selected, and must not be generalised into "write this text to the clipboard".
-async function writeTerminalSelection(host: HTMLDivElement, text: string): Promise<boolean> {
-  if (navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(text);
-      return true;
-    } catch {
-      // document not focused, or permission refused — fall through instead of giving up
-    }
-  }
-  // Focus is NOT taken here. Reaching this line means the user just dragged inside this terminal,
-  // so xterm has already focused its textarea; if something else holds focus by now, stealing it
-  // back would be worse than not copying.
-  const textarea = host.querySelector(".xterm-helper-textarea");
-  if (!textarea || document.activeElement !== textarea) return false;
-  try {
-    return document.execCommand("copy");
-  } catch {
-    return false;
-  }
-}
-
-// How long the selection must hold still before it is copied. xterm fires onSelectionChange on
-// every coordinate change during a drag, so writing on each one would put every intermediate
-// selection into the OS clipboard HISTORY (Win+V) — one drag, twenty entries. Restarting this
-// timer on each event leaves only the last one.
-//
-// A pause longer than this MID-drag still writes what was selected so far, and then again at the
-// end. That is the accepted cost of not keying this to mouseup: the settle timer serves a keyboard
-// or select-all selection too, where there is no mouse event to key to. The clipboard still ends
-// up holding the right text either way — only the history gets one extra entry.
-const SELECTION_SETTLE_MS = 150;
-
-// Copy-on-select (#900): a settled mouse selection reaches the clipboard with no key pressed. Off
-// unless config.json asks for it; what gets skipped and why is in common/terminalClipboard.ts.
-//
-// This is the app's only clipboard write of its own. The `copy` keymap action looks like the same
-// feature but isn't: there a keystroke had already made the browser copy, and xterm's own listener
-// served it — nothing here had to write anything.
-function wireCopyOnSelect(term: Terminal, host: HTMLDivElement): void {
-  let settleTimer: ReturnType<typeof setTimeout> | null = null;
-  let lastCopied: string | null = null;
-  // Writes run one after another rather than the moment each one is due. A settle can land while
-  // the previous write is still pending — a browser that ASKS for clipboard permission leaves it
-  // pending for as long as the user takes to answer — and two overlapping writes then resolve in
-  // whichever order the browser picks, which can leave the clipboard holding the OLDER selection.
-  let writes: Promise<void> = Promise.resolve();
-  const copySettledSelection = async (): Promise<void> => {
-    const text = selectionToCopy(isCopyOnSelectEnabled(), term.getSelection(), lastCopied);
-    // Remembered only once it has actually landed, so a write blocked by a lost focus is retried
-    // rather than treated as already done.
-    if (text !== null && (await writeTerminalSelection(host, text))) lastCopied = text;
-  };
-  const enqueueCopy = (): void => {
-    // The catch matters more than it looks: one rejected link would poison the chain and end
-    // copy-on-select for this terminal for good, with nothing to show for it.
-    writes = writes.then(copySettledSelection).catch(() => {});
-  };
-  term.onSelectionChange(() => {
-    // The default path, and it must cost nothing: xterm fires this on every coordinate change, so
-    // without the early return every ordinary drag would schedule and cancel a timer per cell
-    // crossed for a feature nobody turned on.
-    if (!isCopyOnSelectEnabled()) return;
-    // A cleared selection retires the last one, so selecting the same text again afterwards copies
-    // again: between two drags the user may well have put something else on the clipboard, and
-    // "you already copied that" would then leave them with the wrong thing and no sign of it.
-    //
-    // Read per EVENT rather than at settle, because a click that clears and the drag that follows
-    // can both land inside one settle window — by the time the timer runs, only the new selection
-    // is visible and the clear would go unnoticed. hasSelection() is the cheap half of the API;
-    // getSelection() rebuilds the text from the buffer, which is not worth doing per event.
-    if (!term.hasSelection()) lastCopied = null;
-    if (settleTimer) clearTimeout(settleTimer);
-    settleTimer = setTimeout(enqueueCopy, SELECTION_SETTLE_MS);
-  });
-}
-
 // Which OSC 8 hyperlink targets we open on click. Restricted to http(s) so a program can't
 // emit a `javascript:`/`file:` link that runs on click — the safeguard xterm's docs call for.
 export const isOpenableTerminalLink = (uri: string): boolean => /^https?:\/\//i.test(uri);
@@ -325,18 +262,6 @@ export const isOpenableTerminalLink = (uri: string): boolean => /^https?:\/\//i.
 //
 // The record is owned by the connection, not this closure, because it is per SESSION: connect()
 // clears it alongside term.reset() so a crashed app's modes can't outlive it.
-function guardMouseTracking(term: Terminal, swallowedMouseModes: Set<number>): void {
-  term.parser.registerCsiHandler({ prefix: "?", final: "h" }, (params) => {
-    const swallowed = swallowsMouseTracking(params);
-    if (swallowed) recordSwallowedModes(swallowedMouseModes, params);
-    return swallowed;
-  });
-  term.parser.registerCsiHandler({ prefix: "?", final: "l" }, (params) => {
-    clearResetModes(swallowedMouseModes, params);
-    return false;
-  });
-  guardMouseWheel(term, swallowedMouseModes, getTerminalScrollSpeed);
-}
 
 // Terminal input -> the slot's CURRENT socket (survives reconnects: `c.ws` is re-read
 // each keystroke, so input always targets the live socket). The Enter-family key handler
@@ -350,8 +275,25 @@ function wireTerminalInput(term: Terminal, c: Conn): void {
     // Pointer and focus reports ride this same function — the app feeds its own clicks and wheel
     // through `term.input()` — so they have to be excluded here or clicking a parked cell to READ
     // it would wake it, which is the one thing parking is for.
-    if (isTypedInput(data)) c.handlers.onInput?.();
-    if (c.ws && c.ws.readyState === WebSocket.OPEN) c.ws.send(JSON.stringify({ type: "input", data }));
+    if (isTypedInput(data)) {
+      c.handlers.onInput?.();
+      // Someone typing is the ONLY sign of life an idle cell gets, so it is also the only chance to
+      // notice that its terminal is dead. guardBufferHealth's other two callers are a fit and an
+      // incoming output frame, and #846 strands a cell where neither ever runs again: the keystroke
+      // reaches the pty, the reply lands in a write queue xterm will never drain, and the screen
+      // stays frozen. Nothing resizes it, nothing renders, so the cell sits dead until a reload —
+      // while the person in front of it types and reads it as "input is broken".
+      guardBufferHealth(c);
+    }
+    if (c.ws && c.ws.readyState === WebSocket.OPEN) {
+      c.ws.send(JSON.stringify({ type: "input", data }));
+    } else if (isTypedInput(data)) {
+      // A keystroke with nowhere to go is dropped in silence — the status pill is the only sign,
+      // and a filmstrip cell doesn't render one. Say so once per disconnected stretch, so "I typed
+      // and nothing happened" leaves evidence of WHICH of the two silences it was: a socket that is
+      // down, or a terminal that has stopped drawing.
+      reportDroppedInput(c);
+    }
   };
   term.onData(send);
   const onEnter = makeEnterHandler(() => effectiveSubmitMode(c), send);
@@ -364,6 +306,12 @@ function wireTerminalInput(term: Terminal, c: Conn): void {
   // the more specific binding should win: copy/paste answer for at most two keys, and a `send`
   // on Enter is someone deliberately overriding the submit behaviour for this one keystroke.
   term.attachCustomKeyEventHandler((e) => {
+    // Before any of the three: a key that is confirming an IME candidate belongs to the IME, and
+    // all three below would otherwise claim it. Each already refuses `e.isComposing`, which covers
+    // Chrome and Firefox — this is the Safari case, where compositionend has already fired and the
+    // flag is false by now (#1353). `true` hands the key back to xterm, which is what happens
+    // anyway when none of the three matches.
+    if (isImeConfirming(e)) return true;
     if (clipboardActionFor(getActiveKeymap(), e, term.hasSelection())) return false;
     if (!onSend(e)) return false;
     return onEnter(e);
@@ -499,6 +447,8 @@ function ensure(key: string, target: ConnTarget, font: TerminalFont): Conn {
     theme: undefined,
     font,
     lastRebuildMs: 0,
+    warnedDroppedInput: false,
+    lastDroppedInputNoticeMs: Number.NEGATIVE_INFINITY,
   };
   conns.set(key, c);
   connView.set(key, { status: "connecting", serverCwd: target.cwd, needsPrompt: false });
@@ -596,6 +546,10 @@ function connect(c: Conn) {
   sock.onopen = () => {
     if (sock !== c.ws) return;
     c.reconnectAttempts = 0;
+    // A new stretch: worth a line again, and worth saying at once rather than after whatever was
+    // left of the previous stretch's cooldown.
+    c.warnedDroppedInput = false;
+    c.lastDroppedInputNoticeMs = Number.NEGATIVE_INFINITY;
     setStatus(c, "connected");
     sock.send(JSON.stringify({ type: "resize", cols: c.term.cols, rows: c.term.rows }));
   };
@@ -627,27 +581,22 @@ function handleOutput(c: Conn, data: unknown) {
   // Checked here as well as on fit() because a slot that is only receiving output would
   // otherwise sit frozen until something happened to resize it (#846).
   guardBufferHealth(c);
-  c.term.write(data as string);
+  if (typeof data === "string") c.term.write(data);
   if (typeof data === "string" && data.includes(RESUME_NEEDS_PROMPT)) setNeedsPrompt(c, true);
 }
 
-function handleMessage(c: Conn, event: MessageEvent) {
-  const msg = JSON.parse(event.data);
-  if (msg.type === "output") {
-    handleOutput(c, msg.data);
-  } else if (msg.type === "session") {
-    // Server reports the live session id — remember it so a later reconnect resumes
-    // THIS session (esp. brand-new sessions that had no id yet) and the effective cwd.
+// The live session id, so a later reconnect resumes THIS session (esp. a brand-new one that had
+// no id yet), plus the effective cwd.
+function applySessionFrame(c: Conn, msg: Record<string, unknown>): void {
+  if (typeof msg.id === "string") {
     c.knownSessionId = msg.id;
     c.handlers.onSession?.(msg.id);
-    if (typeof msg.cwd === "string") {
-      c.knownCwd = msg.cwd;
-      const v = connView.get(c.key);
-      if (v) v.serverCwd = msg.cwd;
-      c.handlers.onCwd?.(msg.cwd);
-    }
-  } else {
-    handleTerminalEnd(c, msg);
+  }
+  if (typeof msg.cwd === "string") {
+    c.knownCwd = msg.cwd;
+    const v = connView.get(c.key);
+    if (v) v.serverCwd = msg.cwd;
+    c.handlers.onCwd?.(msg.cwd);
   }
 }
 
@@ -655,13 +604,25 @@ function handleMessage(c: Conn, event: MessageEvent) {
 // fires onExit (NOT superseded — the session is alive in another tab), and the wording; this
 // applies it. `superseded` keeps its own status because the session did not end: it moved, and
 // the view offers to take it back.
-function handleTerminalEnd(c: Conn, msg: { type: string; message?: unknown; exitCode?: unknown }) {
-  const effect = messageEffect(msg.type, !!c.target.command, msg.message, exitCodeOf(msg));
+function applyTerminalFrame(c: Conn, msg: Record<string, unknown>): void {
+  const effect = messageEffect(typeof msg.type === "string" ? msg.type : undefined, !!c.target.command, msg.message, exitCodeOf(msg));
   if (!effect.terminal) return;
   c.sawExit = true;
   if (effect.banner) c.term.write(effect.banner);
   setStatus(c, msg.type === "superseded" ? "superseded" : "disconnected");
   if (effect.callsOnExit) c.handlers.onExit?.(exitCodeOf(msg));
+}
+
+function handleMessage(c: Conn, event: MessageEvent) {
+  const msg = parseServerFrame(event.data);
+  if (!msg) return;
+  if (msg.type === "output") {
+    handleOutput(c, msg.data);
+  } else if (msg.type === "session") {
+    applySessionFrame(c, msg);
+  } else {
+    applyTerminalFrame(c, msg);
+  }
 }
 
 // Take a stopped slot back: re-open its socket at the SAME target, which reattaches the live
@@ -808,7 +769,13 @@ export function submitText(key: string, text: string): boolean {
   const c = conns.get(key);
   if (!c) return false;
   const sock = c.ws;
-  if (!sock || sock.readyState !== WebSocket.OPEN) return false;
+  // The `false` used to be the whole answer, and only one caller ever read it — the rest pressed
+  // a button into a closed socket and showed nothing (#1315). Saying so here reaches every host,
+  // including the ones written after this line.
+  if (!sock || sock.readyState !== WebSocket.OPEN) {
+    reportDroppedInput(c);
+    return false;
+  }
   setNeedsPrompt(c, false); // a prompt is on its way — the session is no longer stuck
   const submit = submitBytesFor(c);
   sock.send(JSON.stringify({ type: "input", data: submittableFor(c, text) }));
@@ -829,7 +796,12 @@ const PASTE_START = "\x1b[200~";
 const PASTE_END = "\x1b[201~";
 export function pasteText(key: string, text: string): boolean {
   const c = conns.get(key);
-  if (!text || c?.ws?.readyState !== WebSocket.OPEN) return false;
+  // Empty text is not a dropped paste — there was nothing to deliver, so it stays silent (#1315).
+  if (!text || !c) return false;
+  if (c.ws?.readyState !== WebSocket.OPEN) {
+    reportDroppedInput(c);
+    return false;
+  }
   c.ws.send(JSON.stringify({ type: "input", data: `${PASTE_START}${text}${PASTE_END}` }));
   c.term.focus();
   return true;
@@ -844,7 +816,11 @@ const PASTE_SUBMIT_MS = 200;
 export function pasteAndSubmit(key: string, text: string): boolean {
   const c = conns.get(key);
   const sock = c?.ws;
-  if (!text || !c || !sock || sock.readyState !== WebSocket.OPEN) return false;
+  if (!text || !c) return false; // nothing to deliver — not a drop (#1315)
+  if (!sock || sock.readyState !== WebSocket.OPEN) {
+    reportDroppedInput(c);
+    return false;
+  }
   const submit = submitBytesFor(c);
   // The guard's space rides INSIDE the paste, where the TUI takes it as text — after the
   // terminator it would be a keystroke, and an open completion menu is what reads those (#1142).
@@ -891,36 +867,22 @@ export function sendArrow(key: string, dir: ArrowDir): void {
 // Insert text (a path, or space-joined paths) at the cursor via the normal input
 // channel — no trailing CR, so the user reviews and submits.
 export function insertText(key: string, text: string) {
-  if (!text) return;
+  if (!text) return; // nothing to deliver — not a drop
   const c = conns.get(key);
   if (!c) return;
-  if (c.ws?.readyState === WebSocket.OPEN) c.ws.send(JSON.stringify({ type: "input", data: text }));
+  // The quietest of the GUI paths: what arrives here was dictated, dropped or pasted, so the user
+  // is watching for text to appear in the input box rather than for a reply (#1315).
+  if (c.ws?.readyState === WebSocket.OPEN) {
+    c.ws.send(JSON.stringify({ type: "input", data: text }));
+  } else {
+    reportDroppedInput(c);
+  }
   c.term.focus();
 }
 
-// Being looked at is what makes a device the one holding its sessions — so this is both halves
-// of that rule. What waited while hidden connects now, and what another window took while we
-// were away comes back, instead of leaving a screenful of terminals that each need a tap.
-//
-// Only on the TRANSITION to visible, so two screens that are both open do not fight: whichever
-// the user turned to last holds the sessions, and nothing re-triggers until someone looks
-// somewhere else. Registered once for the module — the deferral is a property of the DOCUMENT,
-// not of any one slot.
-whenDocumentVisible(() => {
-  for (const [key, c] of conns.entries()) {
-    // Only a slot that is actually ON SCREEN. A slot outlives the view that mounted it (that
-    // is what makes a page switch cheap), so the map holds ones nothing is rendering — and a
-    // detached slot taking "its" session back would take it from the cell the user is looking
-    // at, on this very device. Being looked at is the rule; an element is how a slot is.
-    if (!c.attachedEl) continue;
-    if (c.deferredConnect) {
-      c.deferredConnect = false;
-      connect(c);
-    } else if (connView.get(key)?.status === "superseded") {
-      reconnect(key); // taken by another window while we were away — take it back
-    }
-  }
-});
+// Registered once for the module — the deferral is a property of the DOCUMENT, not of any one
+// slot. The rule itself is in terminalVisibilityHandoff.ts.
+whenDocumentVisible(() => reclaimVisibleSlots(conns.entries(), (key) => connView.get(key)?.status, connect, reconnect));
 
 export function focus(key: string) {
   conns.get(key)?.term.focus();

@@ -38,18 +38,18 @@ export function computeFilePathLinks(cells: TerminalCell[]): ColumnLink[] {
   const colEnd: number[] = [];
   for (let col = 0; col < cells.length; col++) {
     const cell = cells[col];
-    if (cell.width === 0) continue; // trailing half of the preceding wide glyph
+    if (!cell || cell.width === 0) continue; // absent, or the trailing half of a wide glyph
     const chars = cell.chars.length ? cell.chars : " "; // an unwritten cell renders as a space
     for (let k = 0; k < chars.length; k++) {
-      units.push(chars[k]);
+      units.push(chars[k] ?? "");
       colStart.push(col);
       colEnd.push(col + cell.width - 1);
     }
   }
   return findFilePathLinks(units.join("")).map((hit) => ({
     text: hit.text,
-    startX: colStart[hit.start] + 1,
-    endX: colEnd[hit.end - 1] + 1,
+    startX: (colStart[hit.start] ?? 0) + 1,
+    endX: (colEnd[hit.end - 1] ?? 0) + 1,
   }));
 }
 

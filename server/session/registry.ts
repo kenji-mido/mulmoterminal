@@ -27,7 +27,9 @@ import { normalizeMemo } from "../../common/sessionMemo.js";
 import { forEachJsonlRecord } from "../infra/jsonl-file.js";
 import { devTerminalCwdLine, hydrateCwdsInto } from "./dev-terminal-cwds.js";
 import { parseSessionToolGroups, sessionToolGroupLine, TOOL_GROUP_RESET, type SessionToolGroup } from "./session-tool-groups.js";
+import { allToolsLogLine, parseAllToolsLog } from "./all-tools-log.js";
 import type { ToolGroup } from "../../common/toolGroups.js";
+import { carriesFullGuiMcp } from "./mcp-config.js";
 import type { Activity, KnownSession, PtyEntry } from "./types.js";
 
 // Per-session "working" state, driven by Claude hooks (see /api/hook):
@@ -296,10 +298,25 @@ export function unplacedSessionRows(): { id: string; agent: TerminalAgent }[] {
   return [...unplacedSessions].filter(([id]) => !placedSessions.has(id)).map(([id, agent]) => ({ id, agent }));
 }
 
-// Sessions that connected on the ALL-TOOLS MCP url (`/api/mcp/:sessionId`). That url is handed
-// out by --mcp-config and by nothing else, so reaching it is proof the session carries the whole
-// GUI MCP — including the tools that belong to no group and are therefore unreachable through a
-// group url (spawnBackgroundChat).
+/** Whether the phone may list this session: a grid cell, or one on its way to being one.
+ *
+ *  The two halves are one question asked at two moments. `devTerminalSessions` is written by a
+ *  browser attach and by nothing else, so a session the PHONE started — the issue it just began,
+ *  the chat it just sent — is in neither set the desktop reads, and the phone would not find in
+ *  its own list the work it had started (#1184). The unplaced mark is exactly "spawned visible,
+ *  no cell yet", and it is cleared by the attach that adds the id to the other set, so a session
+ *  moves between the halves without ever being in both or in neither. */
+export function isPhoneListableSession(id: string): boolean {
+  return devTerminalSessions.has(id) || (unplacedSessions.has(id) && !placedSessions.has(id));
+}
+
+// Sessions handed the ALL-TOOLS MCP url (`/api/mcp/:sessionId`). That url comes from --mcp-config
+// and from nothing else, so it means the session carries the whole GUI MCP — including the tools
+// that belong to no group and are therefore unreachable through a group url (spawnBackgroundChat).
+//
+// Written at TWO moments, and the earlier one is what a decision can rely on. Connecting proves it
+// (below), but a group url may be the first to connect, and it has to know the answer already to
+// stand down (#1338) — so `claimFullGuiMcp` records it at spawn, before either client dials.
 //
 // Recorded as its own fact rather than inferred from "has all four groups", which is a different
 // statement: a directory that registered every group url really does have all four groups and
@@ -310,20 +327,74 @@ export function unplacedSessionRows(): { id: string; agent: TerminalAgent }[] {
 // the ListTools that would teach us again.
 const allToolsSessions = new Set<string>();
 const ALL_TOOLS_SESSIONS_FILE = path.join(MULMOTERMINAL_HOME, "all-tools-sessions.json");
-export const allToolsSessionsHydrated = hydrateIdLog(ALL_TOOLS_SESSIONS_FILE, allToolsSessions);
-const appendAllToolsSession = idLogAppender(ALL_TOOLS_SESSIONS_FILE, "all-tools-sessions");
+export const allToolsSessionsHydrated = (async () => {
+  try {
+    for (const id of parseAllToolsLog(await fs.readFile(ALL_TOOLS_SESSIONS_FILE, "utf8"), isValidSessionId)) allToolsSessions.add(id);
+  } catch {
+    // absent on first run / unreadable => nothing remembered
+  }
+})();
+let allToolsPersist: Promise<void> = Promise.resolve();
+function appendAllToolsEntry(id: string, carries: boolean): void {
+  allToolsPersist = allToolsPersist
+    .then(() => fs.mkdir(MULMOTERMINAL_HOME, { recursive: true }))
+    .then(() => fs.appendFile(ALL_TOOLS_SESSIONS_FILE, allToolsLogLine(id, carries)))
+    .catch((e) => console.error(`[all-tools-sessions] failed to persist: ${messageOf(e)}`));
+}
+export const whenAllToolsPersisted = (): Promise<void> => allToolsPersist;
 
 /** Note that a session reached us on the all-tools url. A no-op once known — one server is built
  *  per MCP request, so this is asked on every tool call. */
 export function markAllToolsSession(id: string): void {
   if (!isValidSessionId(id) || allToolsSessions.has(id)) return;
   allToolsSessions.add(id);
-  appendAllToolsSession(id);
+  appendAllToolsEntry(id, true);
+}
+
+/**
+ * The opposite, and the reason this log needed a release marker at all: a session id outlives the
+ * process that earned the claim. A new process given no all-tools url must stop answering yes, or
+ * its group urls stand down (mcp/tool-gate.ts) with nothing left to serve the tools — a cell with
+ * no GUI tools at all, which is worse than the duplicate the standing-down prevents.
+ *
+ * Called only where a genuinely NEW process is starting, never on a tmux reattach: there the
+ * original process is still running with whatever url it was given.
+ */
+export function releaseAllToolsSession(id: string): void {
+  if (!isValidSessionId(id) || !allToolsSessions.has(id)) return;
+  allToolsSessions.delete(id);
+  appendAllToolsEntry(id, false);
 }
 
 /** Does this session carry the whole GUI MCP, rather than the subset its directory registered? */
 export function hasAllGuiTools(id: string): boolean {
   return allToolsSessions.has(id);
+}
+
+/**
+ * Decide whether a spawn carries the full GUI MCP AND bring the record in line, in one call.
+ *
+ * Every spawn path asks `carriesFullGuiMcp` — claude's argv, codex's `-c` overrides, the launcher
+ * chip — and each then hands out the all-tools url, or does not. Keeping the question and the record
+ * apart is how one of them comes to answer differently from what it handed over, which is the drift
+ * CLAUDE.md warns about around this predicate and is what happened twice in review on #1399: a chip
+ * running `zsh` claimed without being handed anything, and codex claimed without ever releasing.
+ * So spawn paths call THIS; the pure predicate stays exported for the specs and for readers.
+ *
+ * The two directions are NOT symmetric, and the asymmetry is the safety:
+ *
+ * - **Release unconditionally.** Releasing one that should have been kept only brings the duplicate
+ *   tool names back — cosmetic, and the next spawn corrects it. Keeping a stale claim leaves a cell
+ *   with its group urls stood down and no all-tools url to serve them: no GUI tools at all.
+ * - **Claim only for a genuinely new process.** A tmux reattach runs whatever the ORIGINAL spawn was
+ *   given, which may be no all-tools url — claiming on top of that is exactly the stale-claim
+ *   failure, arrived at from the other side.
+ */
+export function claimFullGuiMcp(sessionId: string, attachGuiMcp: boolean, cwd: string | undefined, wouldReattach: boolean): boolean {
+  const full = carriesFullGuiMcp(attachGuiMcp, cwd);
+  if (!full) releaseAllToolsSession(sessionId);
+  else if (!wouldReattach) markAllToolsSession(sessionId);
+  return full;
 }
 
 // Sessions the SCHEDULER started — a user's own configured task, as opposed to a collection
@@ -598,6 +669,15 @@ export function sessionToolGroups(sessionId: string): ToolGroup[] {
   return [...(toolGroupsBySession.get(sessionId) ?? [])];
 }
 
+/** Settles once every persist queued so far has hit the disk.
+ *
+ *  The appends above are deliberately fire-and-forget — a tool call must not wait on a log — but
+ *  that leaves no way to know they are done, and each one begins with `mkdir(…, recursive)`. A
+ *  caller that deletes the home directory before the queue drains has it RECREATED underneath it,
+ *  which is how a spec pointing HOME at a temp directory left one behind on every single run
+ *  (#1345). Awaiting this before cleaning up is what makes that deterministic. */
+export const whenToolGroupsPersisted = (): Promise<void> => toolGroupsPersist;
+
 // Forget what a session had, because it is being replaced. Called on every claude spawn for the
 // id: the new process gets whatever the user's MCP config says NOW, so carrying the old answer
 // forward would keep asserting a capability the user may have just switched off. The marker is
@@ -629,7 +709,7 @@ export function resetSessionToolGroups(sessionId: string): void {
 const ACTIVITY_STATE_FILE = path.join(MULMOTERMINAL_HOME, "activity-state.json");
 export const activityStateHydrated: Promise<void> = (async () => {
   try {
-    const parsed = JSON.parse(await fs.readFile(ACTIVITY_STATE_FILE, "utf8"));
+    const parsed: unknown = JSON.parse(await fs.readFile(ACTIVITY_STATE_FILE, "utf8"));
     for (const { id, working, waiting, event } of parseActivityState(parsed, (x) => SESSION_ID_RE.test(x))) {
       // Don't clobber a live update that already landed while hydration was in flight.
       if (!activity.has(id)) activity.set(id, { working, waiting, event, at: Date.now() });

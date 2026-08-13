@@ -1,5 +1,6 @@
 import { ref } from "vue";
 import { isRecord } from "../../common/isRecord";
+import { fetchWithTimeout } from "../utils/fetchWithTimeout";
 
 // The /api/google/status payload. `linked` reflects a stored refresh token — the
 // token itself never leaves the host. `pending` is true while a consent flow is
@@ -32,15 +33,9 @@ function parseStatus(data: unknown): GoogleStatus | null {
 }
 
 async function requestJson(url: string, method: "GET" | "POST"): Promise<unknown> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    const res = await fetch(url, { method, signal: controller.signal });
-    if (!res.ok) throw new Error(`${url} failed: ${res.status}`);
-    return await res.json();
-  } finally {
-    clearTimeout(timer);
-  }
+  const res = await fetchWithTimeout(url, { method }, REQUEST_TIMEOUT_MS);
+  if (!res.ok) throw new Error(`${url} failed: ${res.status}`);
+  return await res.json();
 }
 
 const backoffMs = (failures: number): number => Math.min(STATUS_POLL_INTERVAL_MS * 2 ** failures, MAX_POLL_BACKOFF_MS);

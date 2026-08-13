@@ -33,4 +33,4 @@ installPageZoomGuard();
 // attach the durable "single" PTY — before the route flips to the grid, leaking a
 // hidden Claude session. router.isReady() guarantees the initial URL is honored first.
 const app = createApp(App).use(router);
-router.isReady().then(() => app.mount("#app"));
+void router.isReady().then(() => app.mount("#app"));

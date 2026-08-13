@@ -71,7 +71,9 @@ function createTicketBook() {
     },
     holdsNewest: (id: string, ticket: number): boolean => holder.get(id) === ticket,
     knows: (id: string): boolean => holder.has(id),
-    forget: (id: string): void => void holder.delete(id),
+    forget: (id: string): void => {
+      holder.delete(id);
+    },
     size: (): number => holder.size,
   };
 }
@@ -89,8 +91,12 @@ function createUnclosableGaps() {
   const key = (client: TerminalSize, window: TerminalSize): string => `${client.cols}x${client.rows}|${window.cols}x${window.rows}`;
   return {
     alreadyReported: (id: string, client: TerminalSize, window: TerminalSize): boolean => seen.get(id) === key(client, window),
-    remember: (id: string, client: TerminalSize, window: TerminalSize): void => void seen.set(id, key(client, window)),
-    clear: (id: string): void => void seen.delete(id),
+    remember: (id: string, client: TerminalSize, window: TerminalSize): void => {
+      seen.set(id, key(client, window));
+    },
+    clear: (id: string): void => {
+      seen.delete(id);
+    },
   };
 }
 

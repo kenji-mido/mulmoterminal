@@ -16,11 +16,14 @@ describe("useSessionContext", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it("fetches /api/session/:id (with cwd) and exposes the running model", async () => {
-    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse({ context: { model: "claude-opus-4-8", contextTokens: 42 } })));
+    const fetchMock = vi.fn<(url: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(() =>
+      Promise.resolve(jsonResponse({ context: { model: "claude-opus-4-8", contextTokens: 42 } })),
+    );
     vi.stubGlobal("fetch", fetchMock);
     const { result, unmount } = withSetup(() => useSessionContext(ref<string | null>("sess-1"), ref<string | null>("/proj")));
     await flushPromises();
-    expect(fetchMock).toHaveBeenCalledWith("/api/session/sess-1?cwd=%2Fproj");
+    // #1393: every request carries a deadline now, so the init is no longer absent.
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/session/sess-1?cwd=%2Fproj");
     expect(result.context.value?.model).toBe("claude-opus-4-8");
     unmount();
   });

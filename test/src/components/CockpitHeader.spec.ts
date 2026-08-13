@@ -62,6 +62,9 @@ describe("CockpitHeader", () => {
     expect(dir.classes()).toContain("text-left");
     // rtl reorders punctuation unless the path text opts back into logical order.
     expect(dir.get("span").classes()).toContain("[unicode-bidi:plaintext]");
-    expect(dir.attributes("title")).toBe("/home/me/work/nested/deep/proj");
+    // The full path moved from a `title` to the shared hover tip (#1235) — asserted end to end in
+    // hoverTip.spec.ts. The attribute has to be gone, or the browser's own slow tooltip appears a
+    // second time on top of it.
+    expect(dir.attributes("title")).toBeUndefined();
   });
 });

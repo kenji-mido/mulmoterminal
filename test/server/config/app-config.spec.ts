@@ -1,4 +1,5 @@
-import { describe, it, expect } from "vitest";
+// @vitest-environment node
+import { describe, it, expect, vi } from "vitest";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -83,9 +84,27 @@ describe("sanitizePrWorkdirFooter", () => {
 
 describe("sanitizeRepos", () => {
   it("keeps trimmed owner/repo slugs, drops junk, de-dupes", () => {
-    expect(sanitizeRepos(["  a/b ", "c/d", "a/b", "no-slash", "x/y/z", 5, "bad name/repo"])).toEqual(["a/b", "c/d"]);
+    expect(sanitizeRepos(["  a/b ", "c/d", "a/b", "no-slash", 5, "bad name/repo"])).toEqual(["a/b", "c/d"]);
     expect(sanitizeRepos("nope")).toEqual([]);
     expect(sanitizeRepos(undefined)).toEqual([]);
+  });
+
+  // Deliberate widening (#981): a third segment used to be rejected here, which meant a
+  // `host/owner/repo` entry could not be SAVED at all. What an entry means — which forge, and
+  // whether that forge is implemented — is `forgeFromRepoEntry` / `repoSupport`, not this.
+  it("keeps a host-qualified entry, and a GitLab group path of any depth", () => {
+    expect(sanitizeRepos(["gitlab.com/group/project", "gitlab.com/group/sub/project"])).toEqual(["gitlab.com/group/project", "gitlab.com/group/sub/project"]);
+  });
+
+  it("still rejects anything that is not a slug path", () => {
+    expect(sanitizeRepos(["one", "has space/repo", "a//b", "/leading", "trailing/"])).toEqual([]);
+  });
+
+  // What may be stored is exactly what the parser can read, so an ambiguous entry never reaches a
+  // CLI: `gh --repo a/b/c` would target host `a` while this side called it a GitHub path
+  // (Codex review).
+  it("rejects a hostless entry with more than two segments", () => {
+    expect(sanitizeRepos(["a/b/c", "owner/repo/extra"])).toEqual([]);
   });
 });
 
@@ -100,10 +119,16 @@ describe("sanitizeRepoDirs", () => {
     ["a relative path", { "a/b": "w/ab" }],
     ["a non-string value", { "a/b": 5 }],
     ["a key that is not owner/repo", { "no-slash": "/w/x" }],
-    ["a key with a path in it", { "a/b/c": "/w/x" }],
     ["a key with a space", { "bad name/repo": "/w/x" }],
   ])("drops %s", (_case, input) => {
     expect(sanitizeRepoDirs(input)).toEqual({});
+  });
+
+  // Widened with `prRepos` (#981), and for the same reason: the repo a recorded clone belongs to
+  // can now be written `host/owner/repo`, so a key with a longer path is a real entry rather than
+  // a malformed one.
+  it("keeps a host-qualified key", () => {
+    expect(sanitizeRepoDirs({ "gitlab.com/group/project": "/w/p" })).toEqual({ "gitlab.com/group/project": "/w/p" });
   });
 
   // The deletion-by-malformed-body trap this field shares with `sounds`: an array sanitizes to
@@ -238,8 +263,44 @@ describe("sanitizeUserMcpServers", () => {
     ]);
     expect(sanitizeUserMcpServers("nope")).toEqual([]);
   });
-  it("reserves the built-in GUI MCP id (a user entry can't shadow it)", () => {
-    expect(sanitizeUserMcpServers([{ id: "mulmoterminal-gui", url: "https://evil/mcp" }])).toEqual([]);
+  // KEPT, not dropped. The sanitized config is what a later save writes back, so dropping a
+  // clashing entry would erase a server from the user's own file — permanently, and as a
+  // side-effect of changing some unrelated setting. `mt` was a legal id before this release
+  // (Codex review on #1355). It cannot win at spawn — mcpConfigJson writes the built-in last —
+  // and that is where the collision is settled, not here.
+  it("keeps a user entry that clashes with a built-in GUI MCP id instead of erasing it", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(sanitizeUserMcpServers([{ id: "mt", url: "https://mine/mcp" }])).toEqual([{ id: "mt", url: "https://mine/mcp" }]);
+      expect(sanitizeUserMcpServers([{ id: "mulmoterminal-gui", url: "https://mine/mcp" }])).toEqual([{ id: "mulmoterminal-gui", url: "https://mine/mcp" }]);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+  // Well-formed and still unreachable is the one case worth a line in the log: the symptom is a
+  // server that is present in the config and absent in the session. The other rejections are
+  // visibly malformed and stay silent.
+  //
+  // And the LEGACY id must stay silent too (Codex review, second pass): mcpConfigJson overwrites
+  // GUI_SERVER_ID and nothing else, so a server someone still calls `mulmoterminal-gui` is
+  // reachable and works. Warning there tells them to rename something that is fine.
+  it("says so only for the id the built-in actually overwrites", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      sanitizeUserMcpServers([{ id: "mt", url: "https://mine/mcp" }]);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]?.[0])).toContain("mt");
+      warn.mockClear();
+      sanitizeUserMcpServers([{ id: "mulmoterminal-gui", url: "https://mine/mcp" }]);
+      expect(warn).not.toHaveBeenCalled();
+      sanitizeUserMcpServers([
+        { id: "bad id", url: "https://mine/mcp" },
+        { id: "ok", url: "not-a-url" },
+      ]);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 
@@ -276,6 +337,7 @@ describe("loadAppConfig / saveAppConfig", () => {
     soundKinds: [...DEFAULT_SOUND_KINDS],
     sounds: {},
     prRepos: [],
+    gitlabHosts: [],
     repoDirs: {},
     launchers: [],
     quickCommands: [],
@@ -309,6 +371,7 @@ describe("loadAppConfig / saveAppConfig", () => {
       soundKinds: [...DEFAULT_SOUND_KINDS],
       sounds: {},
       prRepos: ["o/r"],
+      gitlabHosts: ["gitlab.hogefuga.com"], // config.json-only, so the file is its only way home
       repoDirs: {},
       launchers: [{ label: "Shell", command: "$SHELL" }],
       quickCommands: [],
@@ -352,6 +415,7 @@ describe("loadAppConfig / saveAppConfig", () => {
         cwdPresets: [{ label: "a", path: "/a" }, "junk"],
         soundFile: 5,
         prRepos: ["o/r", "bad"],
+        gitlabHosts: ["GitLab.Hogefuga.com", "https://gitlab.two.example/", "not a host", 5], // case, a pasted URL, junk
         launchers: [{ label: "S", command: "sh" }, "x"],
         userMcpServers: [
           { id: "ok", url: "https://x/mcp" },
@@ -368,6 +432,7 @@ describe("loadAppConfig / saveAppConfig", () => {
       soundKinds: [...DEFAULT_SOUND_KINDS],
       sounds: {},
       prRepos: ["o/r"],
+      gitlabHosts: ["gitlab.hogefuga.com", "gitlab.two.example"],
       repoDirs: {},
       launchers: [{ label: "S", command: "sh" }],
       quickCommands: [],
@@ -477,6 +542,7 @@ describe("#741 corrupt config is not silently wiped by a partial update", () => 
     soundKinds: [...DEFAULT_SOUND_KINDS],
     sounds: {},
     prRepos: ["o/r"],
+    gitlabHosts: ["gitlab.hogefuga.com"],
     repoDirs: {},
     launchers: [{ label: "Shell", command: "$SHELL" }],
     quickCommands: [],
@@ -542,6 +608,7 @@ describe("mergeConfigUpdate", () => {
     soundKinds: [...DEFAULT_SOUND_KINDS],
     sounds: {},
     prRepos: [],
+    gitlabHosts: [],
     repoDirs: {},
     launchers: [],
     quickCommands: [],

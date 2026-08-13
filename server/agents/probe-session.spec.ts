@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import { newProbeSessionId, isProbeSessionId, PROBE_SESSION_PREFIX } from "./probe-session";
 import { SESSION_ID_RE } from "../config/env";

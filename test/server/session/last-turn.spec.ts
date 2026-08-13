@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import { lastTurnFromClaudeJsonl, lastTurnFromClaudeParsed, lastTurnFromCodexRollout, EMPTY_TURN } from "../../../server/session/last-turn.js";
 import { parseJsonl } from "../../../server/session/transcript.js";

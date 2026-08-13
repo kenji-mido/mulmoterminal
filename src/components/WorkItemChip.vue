@@ -9,27 +9,31 @@
 import { computed } from "vue";
 import type { WorkItem } from "../../common/prPhase";
 import { hasWorkToShow } from "../composables/useWorkItem";
+import { HOVER_TIP_ID, useHoverTipAnchor } from "../composables/useHoverTip";
 import { phaseDisplay } from "./rosterPhase";
+import { workTip } from "./tipContent";
 
 const props = defineProps<{ item: WorkItem }>();
 
 const show = computed(() => hasWorkToShow(props.item));
 const phase = computed(() => phaseDisplay(props.item.phase));
 
-const title = computed(() => {
-  const parts: string[] = [];
-  if (props.item.pr !== null) parts.push(phase.value ? `PR #${props.item.pr} — ${phase.value.title}` : `PR #${props.item.pr}`);
-  if (props.item.issue !== null) parts.push(`issue #${props.item.issue}`);
-  return parts.join(" · ");
-});
+// The hover tip carries what the chip has no room for: what the PR and the issue actually ARE.
+// Those titles have been arriving since #1014 and were shown nowhere on the desktop, which is why
+// the chip could say `#2689 → #2688` and still leave you opening GitHub to find out which is which.
+const { described, show: showTip, hide: hideTip } = useHoverTipAnchor(() => workTip(props.item));
 </script>
 
 <template>
   <span
     v-if="show"
     data-testid="work-chip"
-    class="inline-flex h-[1.5em] max-w-[18ch] flex-none items-center gap-[0.25em] overflow-hidden whitespace-nowrap rounded-[0.75em] bg-[color-mix(in_srgb,currentColor_12%,transparent)] px-[0.4em] text-[0.72rem] leading-[1.5em] opacity-85"
-    :title="title"
+    class="inline-flex h-[1.5em] max-w-[18ch] flex-none items-center gap-[0.25em] overflow-hidden whitespace-nowrap rounded-[0.75em] bg-[color-mix(in_srgb,currentColor_12%,transparent)] px-[0.4em] font-sans text-[0.72rem] leading-[1.5em] opacity-85"
+    :aria-describedby="described ? HOVER_TIP_ID : undefined"
+    @pointerenter="showTip"
+    @pointerleave="hideTip"
+    @focusin="showTip"
+    @focusout="hideTip"
   >
     <a
       v-if="item.pr !== null"

@@ -13,10 +13,11 @@
 // changes), the same lifecycle MulmoClaude gets for free.
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { Request, Response, NextFunction } from "express";
+import { isRecord } from "../../common/isRecord.js";
 
 export type ViewCapability = "read" | "write";
 
-function isCapability(value: unknown): value is ViewCapability {
+export function isCapability(value: unknown): value is ViewCapability {
   return value === "read" || value === "write";
 }
 
@@ -39,11 +40,15 @@ function signPayload(payloadB64: string): string {
   return createHmac("sha256", SIGNING_KEY).update(payloadB64).digest("base64url");
 }
 
+// Least privilege when a view declares nothing. A module constant rather than a literal cast
+// at the call site: an annotation is checked, an assertion is not.
+const LEAST_PRIVILEGE: ViewCapability[] = ["read"];
+
 /** Clamp a view's requested capabilities to what it declared in its schema — a
  *  `["read"]` view can never get a `write` token. The result is declared ∩
  *  requested; undefined declared ⇒ least-privilege `["read"]`. */
 export function clampCapabilities(declared: ViewCapability[] | undefined, requested: ViewCapability[] | undefined): ViewCapability[] {
-  const declaredCaps = declared && declared.length > 0 ? declared : (["read"] as ViewCapability[]);
+  const declaredCaps = declared && declared.length > 0 ? declared : LEAST_PRIVILEGE;
   const requestedCaps = requested && requested.length > 0 ? requested : declaredCaps;
   return declaredCaps.filter((cap) => requestedCaps.includes(cap));
 }
@@ -74,12 +79,13 @@ export function verifyViewToken(token: string, nowMs: number = Date.now()): View
   } catch {
     return null;
   }
-  if (!parsed || typeof parsed !== "object") return null;
-  const candidate = parsed as Record<string, unknown>;
-  if (typeof candidate.slug !== "string" || typeof candidate.exp !== "number") return null;
-  if (!Array.isArray(candidate.caps) || !candidate.caps.every(isCapability)) return null;
-  if (nowMs >= candidate.exp) return null;
-  return { slug: candidate.slug, caps: candidate.caps as ViewCapability[], exp: candidate.exp };
+  if (!isRecord(parsed)) return null;
+  const { slug, exp, caps } = parsed;
+  if (typeof slug !== "string" || typeof exp !== "number") return null;
+  // `every` with a type predicate narrows the array itself, so the checked value IS the typed one.
+  if (!Array.isArray(caps) || !caps.every(isCapability)) return null;
+  if (nowMs >= exp) return null;
+  return { slug, caps, exp };
 }
 
 /** Express middleware: require a valid scoped token whose slug matches the route

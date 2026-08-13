@@ -110,6 +110,23 @@ describe("useNotifications — the list fetched while the channel is live", () =
     vi.restoreAllMocks();
   });
 
+  // A push whose entry is missing fields the list LATER reads must not be admitted: `sorted`
+  // calls `createdAt.localeCompare`, so an entry without it throws while rendering the bell —
+  // far from the malformed push that caused it (Codex review on #1282).
+  it("drops a pushed entry that is missing createdAt, and keeps rendering the rest", async () => {
+    const { answer } = deferredList([BELL]);
+    const { useNotifications } = await freshModule();
+    const { active, sorted } = useNotifications();
+
+    deliver({ type: "published", entry: { id: "bad", pluginPkg: "test", severity: "info", title: "No timestamp" } });
+    answer();
+    await flushPromises();
+
+    expect(active.value.map((e) => e.id)).toEqual(["n1"]);
+    // The read the missing field would have thrown on.
+    expect(() => sorted.value).not.toThrow();
+  });
+
   it("does not bring back a notification cleared while the list was loading", async () => {
     const { answer } = deferredList([BELL, OTHER]);
     const { useNotifications } = await freshModule();

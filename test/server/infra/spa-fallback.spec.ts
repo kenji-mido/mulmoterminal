@@ -1,9 +1,10 @@
+// @vitest-environment node
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import express from "express";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
-import { once } from "node:events";
+import { appRequest } from "../../helpers/appRequest";
 import { isClientRoute, mountSpaFallback } from "../../../server/infra/spa-fallback";
 
 describe("SPA fallback matcher", () => {
@@ -49,16 +50,8 @@ describe("mounting the SPA fallback", () => {
   const serve = async (distDir: string, url: string) => {
     const app = express();
     mountSpaFallback(app, distDir);
-    const server = app.listen(0);
-    await once(server, "listening");
-    const address = server.address();
-    const port = typeof address === "object" && address ? address.port : 0;
-    try {
-      const res = await fetch(`http://127.0.0.1:${port}${url}`);
-      return { status: res.status, body: await res.text() };
-    } finally {
-      server.close();
-    }
+    const res = await appRequest(app)(url);
+    return { status: res.status, body: await res.text() };
   };
 
   it("serves the shell from a dist under a dot directory", async () => {

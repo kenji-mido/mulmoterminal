@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import {
   latestUserPromptFromJsonl,
@@ -20,20 +21,42 @@ import {
   sessionUsageFromParsed,
   latestTurnContextFromParsed,
   currentTurnToolNamesFromParsed,
+  isInjectedPrompt,
 } from "../../../server/session/transcript.js";
+import { INJECTED_PROMPTS, NEAR_MISS_PROMPTS } from "../../support/injectedPrompts.js";
 
 const line = (o: unknown) => JSON.stringify(o);
 
-describe("userPromptText", () => {
-  it("rejects the harness-injected blocks that are not typed prompts", () => {
-    expect(userPromptText("<task-notification>\n<task-id>abc</task-id>\n</task-notification>")).toBeNull();
-    expect(userPromptText("<local-command-stdout>ok</local-command-stdout>")).toBeNull();
-    expect(userPromptText("<command-message>run</command-message>")).toBeNull();
-    expect(userPromptText("<bash-input>ls</bash-input>")).toBeNull();
+// The same fixture list header-hook.spec.ts iterates, so both call sites are held to one
+// specification of what counts as injected — the thing #1384 lacked.
+describe("isInjectedPrompt", () => {
+  it.each(INJECTED_PROMPTS)("refuses the harness-injected %s", (_name, text) => {
+    expect(isInjectedPrompt(text)).toBe(true);
   });
 
-  it("keeps a prompt that merely mentions one of those tags mid-text", () => {
-    expect(userPromptText("what is a <task-notification> block?")).toBe("what is a <task-notification> block?");
+  it.each(NEAR_MISS_PROMPTS)("keeps the typed prompt with a %s", (_name, text) => {
+    expect(isInjectedPrompt(text)).toBe(false);
+  });
+});
+
+describe("userPromptText", () => {
+  it.each(INJECTED_PROMPTS)("reads no prompt out of an injected %s", (_name, text) => {
+    expect(userPromptText(text)).toBeNull();
+  });
+
+  it.each(NEAR_MISS_PROMPTS)("keeps the typed prompt with a %s", (_name, text) => {
+    expect(userPromptText(text)).toBe(text.trim());
+  });
+
+  // The join happens before the anchor is applied, so a reminder appended as its own block
+  // sits mid-string and the real prompt in front of it survives. This is the shape every
+  // `<system-reminder>` on disk actually has — none of them leads a user line.
+  it("keeps a prompt that carries an appended reminder block", () => {
+    const content = [
+      { type: "text", text: "fix the login bug" },
+      { type: "text", text: "<system-reminder>context</system-reminder>" },
+    ];
+    expect(userPromptText(content)).toBe("fix the login bug <system-reminder>context</system-reminder>");
   });
 });
 

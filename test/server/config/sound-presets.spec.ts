@@ -1,10 +1,11 @@
+// @vitest-environment node
 import { describe, it, expect, vi } from "vitest";
-import { mkdtempSync, mkdirSync, readFileSync, existsSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, existsSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { readSoundPreset } from "../../../server/config/sound-presets";
+import { makeTempDir } from "../../support/tempDir";
 
-const cacheDir = () => mkdtempSync(path.join(tmpdir(), "mt-sounds-"));
+const cacheDir = () => makeTempDir("mt-sounds-");
 const audio = (text: string) => new Response(new TextEncoder().encode(text), { status: 200 });
 
 describe("readSoundPreset", () => {

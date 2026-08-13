@@ -50,7 +50,7 @@ export function isThemeIdLike(value: unknown): value is string {
 }
 
 export function isBuiltinThemeId(id: string): id is ThemeId {
-  return (THEME_IDS as readonly string[]).includes(id);
+  return THEME_IDS.some((builtin) => builtin === id);
 }
 
 /** Whether an id may be used for a CUSTOM theme. Built-in ids are refused rather than merged
@@ -69,14 +69,22 @@ export interface CustomThemeInput {
 
 /** The full variable set for a theme: the base it extends, with its own colours on top.
  *  `builtins` supplies the base sets so this stays pure — the client reads them from the
- *  stylesheet's source of truth, the specs from a fixture. */
-export function resolveThemeVars(theme: CustomThemeInput, builtins: Record<ThemeId, ThemeVars>): ThemeVars | null {
+ *  stylesheet's source of truth, the specs from a fixture. PARTIAL because a base can genuinely be
+ *  missing (a stylesheet read that found no block for that id), and the `?? {}` below has always
+ *  handled that — the map only ever needed one key, never all of them. */
+// Every variable present, which is what separates a set we can paint with from one we cannot.
+// A guard rather than a length check on the missing keys: both ask the same question, but only
+// this one hands the answer to the compiler.
+function isCompleteThemeVars(vars: Partial<ThemeVars>): vars is ThemeVars {
+  return THEME_VAR_KEYS.every((key) => !!vars[key]);
+}
+
+export function resolveThemeVars(theme: CustomThemeInput, builtins: Partial<Record<ThemeId, ThemeVars>>): ThemeVars | null {
   const base = theme.extends ? builtins[theme.extends] : null;
-  const merged = { ...(base ?? {}), ...theme.colors } as Partial<ThemeVars>;
-  const missing = THEME_VAR_KEYS.filter((key) => !merged[key]);
+  const merged: Partial<ThemeVars> = { ...(base ?? {}), ...theme.colors };
   // No base and an incomplete list is the one case we cannot paint: report it rather than
   // leaving the gaps to whatever the previously applied theme put on the element.
-  return missing.length ? null : (merged as ThemeVars);
+  return isCompleteThemeVars(merged) ? merged : null;
 }
 
 function channel(hex: string, at: number): number {

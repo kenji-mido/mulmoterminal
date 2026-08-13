@@ -13,6 +13,8 @@ import { MULMOTERMINAL_HOME, SESSION_ID_RE } from "../config/env.js";
 import { messageOf } from "../errors.js";
 import type { ToolCall, ToolResult } from "./types.js";
 import { reconcileCollectionCard } from "../../common/collectionSeed.js";
+import { isUnknownArray } from "../../common/isUnknownArray.js";
+import { isRecord } from "../../common/isRecord.js";
 
 export interface ToolStoreDeps {
   /** Fan a change out to the panel; a no-op before pub/sub exists. */
@@ -45,7 +47,10 @@ async function fileMtimeMs(file: string): Promise<number> {
 // re-read when the file's mtime is newer than the copy it cached, so the non-owner picks up the
 // owner's appends instead of holding a stale copy until it restarts. `statMtimeMs` is a
 // parameter so a test can drive the mtime deterministically. (#705)
-export function createSessionStore<T>(dirName: string, root: string = MULMOTERMINAL_HOME, statMtimeMs: (file: string) => Promise<number> = fileMtimeMs) {
+// `isEntry` is required rather than optional: the file is JSON this process wrote, but it can be
+// hand-edited, truncated by a crash, or left behind by an older version — and with no check the
+// list is promoted to T[] on nothing but the type argument, so every read off an entry lies.
+export function createSessionStore<T>(dirName: string, isEntry: (value: unknown) => value is T, root = MULMOTERMINAL_HOME, statMtimeMs = fileMtimeMs) {
   const dir = path.join(root, dirName);
   const fileFor = (id: string) => path.join(dir, `${id}.json`);
   const map = new Map<string, T[]>(); // id -> list (the working copy; mutate in place)
@@ -61,8 +66,9 @@ export function createSessionStore<T>(dirName: string, root: string = MULMOTERMI
     const file = fileFor(sessionId);
     const mtimeMs = await statMtimeMs(file);
     try {
-      const parsed = JSON.parse(await fs.readFile(file, "utf8"));
-      return { list: Array.isArray(parsed) ? parsed : [], mtimeMs };
+      // A bad entry is dropped rather than failing the read: the list is a set, not positional.
+      const parsed: unknown = JSON.parse(await fs.readFile(file, "utf8"));
+      return { list: isUnknownArray(parsed) ? parsed.filter(isEntry) : [], mtimeMs };
     } catch {
       return { list: [], mtimeMs: 0 };
     }
@@ -147,12 +153,25 @@ interface ToolCallEndRecord extends ToolCallStartRecord {
 }
 
 /** The panel's stores, bound to one pub/sub and one directory root. */
+// What each store accepts back off disk. Every REQUIRED field is checked, and the optional ones
+// are checked when present — a guard that waved those through would be asserting a type the value
+// does not have.
+const isToolResult = (value: unknown): value is ToolResult => isRecord(value) && typeof value.uuid === "string";
+
+const isToolCall = (value: unknown): value is ToolCall =>
+  isRecord(value) &&
+  typeof value.status === "string" &&
+  typeof value.at === "number" &&
+  (value.toolUseId === undefined || typeof value.toolUseId === "string") &&
+  (value.toolName === undefined || typeof value.toolName === "string") &&
+  (value.durationMs === undefined || typeof value.durationMs === "number");
+
 export function createToolStores({ publish, root = MULMOTERMINAL_HOME }: ToolStoreDeps) {
   // GUI toolResults per session, persisted under ~/.mulmoterminal/toolresults so
   // the panel replays the rendered views even after a server reboot. (Chat +
   // message history live in the terminal and Claude's .jsonl; this is the GUI-side
   // store.) Each entry is an array of toolResults, capped to the most recent N.
-  const toolResultsStore = createSessionStore<ToolResult>("toolresults", root);
+  const toolResultsStore = createSessionStore("toolresults", isToolResult, root);
   const GUI_HISTORY_LIMIT = 50;
 
   // Upsert a toolResult into a session's list, deduped by uuid — a re-emitted result
@@ -167,7 +186,7 @@ export function createToolStores({ publish, root = MULMOTERMINAL_HOME }: ToolSto
     const list = await toolResultsStore.get(sessionId);
     if (reconcileCollectionCard(list, result) === "skip") {
       // The list may still have changed above; save so a supersede is not lost on restart.
-      toolResultsStore.save(sessionId);
+      void toolResultsStore.save(sessionId);
       return false;
     }
     const idx = list.findIndex((r) => r.uuid === result.uuid);
@@ -177,7 +196,7 @@ export function createToolStores({ publish, root = MULMOTERMINAL_HOME }: ToolSto
       list.push(result);
       if (list.length > GUI_HISTORY_LIMIT) list.splice(0, list.length - GUI_HISTORY_LIMIT);
     }
-    toolResultsStore.save(sessionId);
+    void toolResultsStore.save(sessionId);
     return true;
   }
 
@@ -195,7 +214,7 @@ export function createToolStores({ publish, root = MULMOTERMINAL_HOME }: ToolSto
   //
   // Persisted under ~/.mulmoterminal/toolcalls via the same disk-backed store as
   // the toolResults, so the history survives a server reboot.
-  const toolCallsStore = createSessionStore<ToolCall>("toolcalls", root);
+  const toolCallsStore = createSessionStore("toolcalls", isToolCall, root);
   const TOOLCALLS_LIMIT = 200;
   // PreToolUse: a tool started. Append a "running" entry (deduped by tool_use_id).
   async function recordToolCallStart(sessionId: string, { toolUseId, toolName, toolInput }: ToolCallStartRecord) {
@@ -205,7 +224,7 @@ export function createToolStores({ publish, root = MULMOTERMINAL_HOME }: ToolSto
     list.push(call);
     if (list.length > TOOLCALLS_LIMIT) list.splice(0, list.length - TOOLCALLS_LIMIT);
     publish(toolCallsChannel(sessionId), call);
-    toolCallsStore.save(sessionId);
+    void toolCallsStore.save(sessionId);
   }
 
   // PostToolUse (status "completed") or PostToolUseFailure (status "failed"):
@@ -226,7 +245,7 @@ export function createToolStores({ publish, root = MULMOTERMINAL_HOME }: ToolSto
       if (list.length > TOOLCALLS_LIMIT) list.splice(0, list.length - TOOLCALLS_LIMIT);
     }
     publish(toolCallsChannel(sessionId), call);
-    toolCallsStore.save(sessionId);
+    void toolCallsStore.save(sessionId);
   }
 
   return { toolResultsStore, toolCallsStore, storeToolResult, recordToolCallStart, recordToolCallEnd };

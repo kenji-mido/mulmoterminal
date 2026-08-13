@@ -11,12 +11,12 @@ const isPrsRoute = (): boolean => router.currentRoute.value.name === "prs";
 
 /** Open the cross-repo PR list. */
 export function prsGotoIndex(): void {
-  router.push({ path: "/prs", state: overlayOriginState() });
+  void router.push({ path: "/prs", state: overlayOriginState() });
 }
 
 /** Close the PR view → back to the view it was opened from. */
 export function prsClose(): void {
-  router.push(overlayReturnPath());
+  void router.push(overlayReturnPath());
 }
 
 export function usePrsView(): { isOpen: ComputedRef<boolean>; close: () => void } {

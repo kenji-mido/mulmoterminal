@@ -10,6 +10,7 @@
 // otherwise spend the user's quota on a probe. The GET stays a pure read.
 import type { Express } from "express";
 import { readClaudeStatus } from "./statusline.js";
+import { currentClaudeLimits } from "./rate-limit-store.js";
 import type { ProbeState } from "./rate-limit-store.js";
 import type { RateLimitSnapshot, RateLimitStore } from "./rate-limit-store.js";
 
@@ -49,11 +50,11 @@ export function mountRateLimitRoutes(app: Express, deps: RateLimitRouteDeps): vo
         deps.store.setProbeInFlight(false);
       }
     }
-    res.json(snapshotBody(deps.store.snapshot(), deps.store.isProbing(), deps.store.probeState()));
+    res.json(snapshotBody(deps.store.snapshot(), deps.store.isProbing(), deps.store.probeState(), now));
   });
 
   app.get("/api/rate-limits", (_req, res) => {
-    res.json(snapshotBody(deps.store.snapshot(), deps.store.isProbing(), deps.store.probeState()));
+    res.json(snapshotBody(deps.store.snapshot(), deps.store.isProbing(), deps.store.probeState(), deps.now_ms()));
   });
 }
 
@@ -68,9 +69,17 @@ export function mountRateLimitRoutes(app: Express, deps: RateLimitRouteDeps): vo
 // tell "not measured yet" from "cannot be measured here", and #1011 showed what that costs: a
 // probe loop ran every 90 seconds for half an hour, spending the very budget the gauge reports,
 // with nothing on screen to hint at it.
-const snapshotBody = (snapshot: RateLimitSnapshot, probing: boolean, state: ProbeState) => ({
-  claude: snapshot.claude?.limits ?? null,
+// `claudeProbeStall` narrows the one state that has more than one cause worth acting on. Sent as
+// the server's own word for it rather than the probe's screen: the screen stays on this machine
+// (probe-stall.ts), and only the verdict crosses to the browser.
+//
+// Claude's windows go through `currentClaudeLimits`, which drops a reading too old to vouch for.
+// The client needs no rule of its own for that — with no windows to draw it already explains the
+// gap from `claudeProbe` (#1293).
+const snapshotBody = (snapshot: RateLimitSnapshot, probing: boolean, state: ProbeState, now_ms: number) => ({
+  claude: currentClaudeLimits(snapshot, now_ms),
   codex: snapshot.codex?.limits ?? null,
   probing,
   claudeProbe: state.kind,
+  claudeProbeStall: state.kind === "no-report" ? state.stall : undefined,
 });

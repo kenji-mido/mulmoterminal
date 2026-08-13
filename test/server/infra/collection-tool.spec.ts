@@ -6,12 +6,12 @@
 // bundledHelpsDir injection that keeps schemaDocs working on a workspace
 // that was never seeded with config/helps.
 import { describe, it, expect, beforeAll } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { MANAGE_COLLECTION, manageCollectionHandler } from "../../../server/infra/collection-tool";
 import { HOST_TOOL_DEFINITIONS } from "../../../server/infra/host-tools";
 import { initCollectionsBackend } from "../../../server/backends/collections";
+import { makeTempDir } from "../../support/tempDir";
 
 const SCHEMA = {
   title: "Tool Fixture",
@@ -25,7 +25,7 @@ const SCHEMA = {
 };
 
 beforeAll(() => {
-  const ws = mkdtempSync(path.join(tmpdir(), "mt-coltool-"));
+  const ws = makeTempDir("mt-coltool-");
   mkdirSync(path.join(ws, ".claude", "skills", "toolcol"), { recursive: true });
   writeFileSync(path.join(ws, ".claude", "skills", "toolcol", "schema.json"), JSON.stringify(SCHEMA));
   mkdirSync(path.join(ws, "data", "toolcol", "items"), { recursive: true });

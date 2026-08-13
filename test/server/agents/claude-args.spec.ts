@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import { buildClaudeArgs, type ClaudeArgsInput } from "../../../server/agents/claude-args.js";
 import { SESSION_SUMMARY_PROMPT } from "../../../server/agents/session-summary-prompt.js";
@@ -19,7 +20,7 @@ const base: ClaudeArgsInput = {
 const cfg = (over: Partial<ClaudeArgsInput> = {}): ClaudeArgsInput => ({ ...base, ...over });
 
 describe("buildClaudeArgs", () => {
-  it("single view (attachGuiMcp): attaches GUI MCP + --strict-mcp-config + --allowedTools", () => {
+  it("single view (attachGuiMcp): attaches GUI MCP + --allowedTools, and nothing that isolates", () => {
     const args = buildClaudeArgs(base);
     expect(args).toEqual([
       "--session-id",
@@ -32,16 +33,15 @@ describe("buildClaudeArgs", () => {
       SESSION_SUMMARY_PROMPT,
       "--mcp-config",
       "{gui-mcp}",
-      "--strict-mcp-config",
       "--allowedTools",
       "mcp__gui__a,mcp__gui__b",
     ]);
   });
 
-  // A grid cell's GUI tools arrive through the USER's own per-folder MCP config, so it must
-  // get neither --mcp-config nor --strict-mcp-config (which would ignore that config) — but it
-  // still pre-approves the render group, or every draw stops at a permission prompt.
-  it("grid dev terminal (attachGuiMcp=false): no GUI MCP, no --strict-mcp-config, but keeps --allowedTools", () => {
+  // A grid cell's GUI tools arrive through the USER's own per-folder MCP config, so it gets no
+  // --mcp-config of ours — but it still pre-approves the render group, or every draw stops at a
+  // permission prompt.
+  it("grid dev terminal (attachGuiMcp=false): no GUI MCP, but keeps --allowedTools", () => {
     const args = buildClaudeArgs({ ...base, attachGuiMcp: false });
     expect(args).toEqual([
       "--session-id",
@@ -57,6 +57,21 @@ describe("buildClaudeArgs", () => {
     ]);
     expect(args).not.toContain("--mcp-config");
     expect(args).not.toContain("--strict-mcp-config");
+  });
+
+  // The regression #1338 / #1385 are: attaching our broker must ADD to what the session can reach,
+  // never replace it. `--strict-mcp-config` made --mcp-config the only source, which took the user's
+  // claude.ai connectors, ~/.claude.json and the directory's .mcp.json with it. Asserted for the
+  // mode that HAS the GUI MCP — the other two cases below only ever lacked the flag because they
+  // lack --mcp-config, so they could not have caught this.
+  it.each([[true], [false]])("never isolates the session, attachGuiMcp=%s", (attachGuiMcp) => {
+    expect(buildClaudeArgs({ ...base, attachGuiMcp })).not.toContain("--strict-mcp-config");
+  });
+
+  // The other half of that regression, and the one a careless fix would cause: dropping the flag
+  // must not drop the broker with it, or the GUI panel silently stops working.
+  it("still attaches the GUI MCP when it has one", () => {
+    expect(buildClaudeArgs(base)).toContain("--mcp-config");
   });
 
   it("omits --allowedTools entirely when there is nothing to pre-approve", () => {

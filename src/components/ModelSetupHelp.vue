@@ -6,8 +6,9 @@
 // already knows exactly what is missing — that sentence goes at the top, and the full
 // walkthrough moves below it. Setup instructions that bury the one broken line are how a
 // user ends up re-doing the parts that already worked.
-import { computed, onMounted, onUnmounted, nextTick, ref } from "vue";
-import { MODAL_FOCUSABLE, trapTabKey } from "../utils/focusTrap";
+import { computed, ref } from "vue";
+import { MODAL_FOCUSABLE } from "../utils/focusTrap";
+import { useModalKeyboard } from "../composables/useModalKeyboard";
 import type { LaunchProviderOption } from "../../common/launchOptions";
 
 const props = defineProps<{ providers: LaunchProviderOption[] }>();
@@ -36,18 +37,9 @@ const copy = (text: string) => navigator.clipboard?.writeText(text);
 
 const modalEl = ref<HTMLElement>();
 
-// Same modal keyboard contract as the settings dialog: Escape closes, Tab stays inside.
-function onKeydown(e: KeyboardEvent) {
-  if (e.key === "Escape") return emit("close");
-  if (e.key !== "Tab" || !modalEl.value) return;
-  trapTabKey(e, modalEl.value, MODAL_FOCUSABLE);
-}
-
-onMounted(() => {
-  document.addEventListener("keydown", onKeydown);
-  nextTick(() => modalEl.value?.querySelector<HTMLElement>("button")?.focus());
-});
-onUnmounted(() => document.removeEventListener("keydown", onKeydown));
+// Same modal keyboard contract as the settings dialog: Escape closes, Tab stays inside. This one
+// has nothing to type into — every stop is a button — so the first one is where focus lands.
+useModalKeyboard({ modalEl, onClose: () => emit("close"), trapSelector: MODAL_FOCUSABLE, focusSelector: "button" });
 </script>
 
 <template>

@@ -10,6 +10,7 @@
 // Pure: no localStorage here. The host reads and writes the string through its own best-effort
 // storage helpers, which is also what makes this testable without a DOM.
 import type { FilesPaneState } from "./FilesPane.vue";
+import { isRecord } from "../../common/isRecord";
 
 export interface RememberedPane {
   cwd: string;
@@ -25,8 +26,8 @@ export const MAX_REMEMBERED_DIRS = 20;
 export const MAX_EXPANDED_PATHS = 200;
 
 const isPaneState = (value: unknown): value is FilesPaneState => {
-  if (typeof value !== "object" || value === null) return false;
-  const { openPath, expanded } = value as Partial<FilesPaneState>;
+  if (!isRecord(value)) return false;
+  const { openPath, expanded } = value;
   const openPathOk = openPath === null || typeof openPath === "string";
   return openPathOk && Array.isArray(expanded) && expanded.every((p) => typeof p === "string");
 };
@@ -37,8 +38,8 @@ const isPaneState = (value: unknown): value is FilesPaneState => {
 const capped = (state: FilesPaneState): FilesPaneState => ({ openPath: state.openPath, expanded: state.expanded.slice(0, MAX_EXPANDED_PATHS) });
 
 const isRemembered = (value: unknown): value is RememberedPane => {
-  if (typeof value !== "object" || value === null) return false;
-  const { cwd, state } = value as Partial<RememberedPane>;
+  if (!isRecord(value)) return false;
+  const { cwd, state } = value;
   return typeof cwd === "string" && cwd !== "" && isPaneState(state);
 };
 

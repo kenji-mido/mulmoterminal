@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 
 import { diedDuringStartup, formatLifetime, ptyExitLine, ptyStartLine, STARTUP_WINDOW_MS } from "../../../server/session/pty-exit-log";

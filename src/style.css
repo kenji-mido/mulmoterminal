@@ -120,6 +120,14 @@
   --warn-bg: #e65100;
   --warn-bg-subtle: #4a3a10;
   --amber: #f5a623;
+  /* "This turn ended, it wants reading" — the one green every view paints a `done` session with
+     (#1307). Not theme-switched and with no light-appearance twin, unlike --ok below: it is only
+     ever a MARK (a border, a ring, a wash, a filled pill with its own dark ink), never ink on the
+     theme's background, so the legibility flip those need does not apply. The roster has shipped
+     this exact value in all four themes since #1131, and giving it a darker light-theme twin would
+     wreck the pill it fills: the near-black ink on it drops from 8.4:1 to 3.5:1. Green TEXT wants
+     --ok, which is flipped for exactly that reason. */
+  --done: #22c55e;
   --err: #ef9a9a;
   --err-text: #ff7b7b;
   --err-strong: #ef4444;

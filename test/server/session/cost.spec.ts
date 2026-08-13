@@ -1,4 +1,9 @@
-import { describe, it, expect } from "vitest";
+// @vitest-environment node
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { takeScratchHome, type ScratchHome } from "../../support/scratchHome.js";
+import { projectSessionsDir } from "../../../server/session/project-dir.js";
 import { rateForModel, costForUsage, costFromJsonl } from "../../../server/session/cost.js";
 
 const line = (o: unknown) => JSON.stringify(o);
@@ -103,5 +108,69 @@ describe("costFromJsonl", () => {
   it("returns zeros for empty or malformed input", () => {
     expect(costFromJsonl("")).toEqual({ usd: 0, unpricedTurns: 0 });
     expect(costFromJsonl("not json\n{broken")).toEqual({ usd: 0, unpricedTurns: 0 });
+  });
+});
+
+// /api/cost read every one of a project's transcripts in full, on every request and with no cache
+// at all — 2.5-3.1 s on a 1.1 GB project, every time the cost panel was opened (#1386). It now
+// folds each file once and resumes on what was appended, so what is pinned here is that a resumed
+// total is the same total.
+describe("a transcript's cost, folded across reads", () => {
+  let scratch: ScratchHome;
+  let n = 0;
+  const CWD = "/Users/me/proj";
+
+  // projectSessionsDir, not a second copy of its rule — it resolves the cwd for the host platform,
+  // so the encoded directory differs on Windows (#1396).
+  const transcriptPath = (id: string): string => {
+    const dir = projectSessionsDir(CWD);
+    mkdirSync(dir, { recursive: true });
+    return path.join(dir, `${id}.jsonl`);
+  };
+
+  const priced = (outputTokens: number) => `${assistant("claude-sonnet-5", { input_tokens: 0, output_tokens: outputTokens })}\n`;
+  const unpriced = () => `${assistant("some-unknown-model", { input_tokens: 10, output_tokens: 10 })}\n`;
+
+  async function freshCost() {
+    vi.resetModules(); // the scratch home is already in place; the module reads it at import
+    const mod = await import("../../../server/session/cost.js");
+    return mod.sessionCost;
+  }
+
+  beforeEach(() => {
+    scratch = takeScratchHome("mt-cost-fold-");
+  });
+  afterEach(() => scratch.release());
+
+  it("adds what was appended to the total it already had", async () => {
+    const sessionCost = await freshCost();
+    const id = `sess-${++n}`;
+    writeFileSync(transcriptPath(id), priced(1_000_000) + unpriced());
+    const first = await sessionCost(CWD, id);
+    expect(first.usd).toBeGreaterThan(0);
+    expect(first.unpricedTurns).toBe(1);
+
+    appendFileSync(transcriptPath(id), priced(1_000_000));
+    const grown = await sessionCost(CWD, id);
+    expect(grown.usd).toBeCloseTo(first.usd * 2, 10);
+    expect(grown.unpricedTurns).toBe(1);
+  });
+
+  // The equivalence: a total built in two goes is the total one pass would produce.
+  it("matches a reader that folded the grown file in one pass", async () => {
+    const id = `sess-${++n}`;
+    const sessionCost = await freshCost();
+    writeFileSync(transcriptPath(id), priced(500_000));
+    await sessionCost(CWD, id);
+    appendFileSync(transcriptPath(id), priced(250_000) + unpriced());
+    const resumed = await sessionCost(CWD, id);
+
+    const oneShot = await (await freshCost())(CWD, id);
+    expect(resumed).toEqual(oneShot);
+  });
+
+  it("costs nothing for a transcript that is not there", async () => {
+    const sessionCost = await freshCost();
+    expect(await sessionCost(CWD, "never-existed")).toEqual({ usd: 0, unpricedTurns: 0 });
   });
 });

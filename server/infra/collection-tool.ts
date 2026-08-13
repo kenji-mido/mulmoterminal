@@ -31,10 +31,14 @@ export const manageCollectionHandler = tool.handler;
  *  applies to XTool-shaped server tools. The core definition types its
  *  inputSchema loosely (`type: string`); the runtime value is the literal
  *  "object" the protocol type wants, so re-stamp it. */
+// Annotated, not asserted: the spread widens `type` back to `string`, and an annotation makes the
+// compiler check the result against what the protocol wants instead of being told.
+const collectionToolParameters: NonNullable<ToolDefinition["parameters"]> = { ...tool.definition.inputSchema, type: "object" };
+
 export const MANAGE_COLLECTION: ToolDefinition = {
   type: "function",
   name: tool.definition.name,
   description: tool.definition.description,
   prompt: tool.prompt,
-  parameters: { ...tool.definition.inputSchema, type: "object" } as NonNullable<ToolDefinition["parameters"]>,
+  parameters: collectionToolParameters,
 };

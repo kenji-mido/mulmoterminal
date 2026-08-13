@@ -12,14 +12,30 @@ anything not covered here.
 ## Run after changes
 - `yarn format` — Prettier. `.prettierignore` excludes `*.md`, so Markdown is not reformatted.
 - `yarn lint` — ESLint.
-- `yarn typecheck` — `vue-tsc -b`. **App code only — it does NOT compile the specs.**
-- `yarn typecheck:server` / `yarn typecheck:test` — CI runs these too. `typecheck:test`
-  (`tsconfig.test.json` + `tsconfig.test-server.json`) is the one that type-checks the specs,
-  including the ones colocated under `server/` rather than in `test/`. Change a shared type or
-  a wire shape and run **all three**: `yarn typecheck` alone passes while CI fails.
+- `yarn typecheck` — `vue-tsc -b`, and it covers the whole repo: the root `tsconfig.json`
+  references all five projects (app, node, server, and the two spec ones — including the specs
+  colocated under `server/` rather than in `test/`). Adding a project means adding it there too,
+  or nothing type-checks it and CI will not tell you.
 - `yarn build` — `vue-tsc -b && vite build`.
 - `yarn test` — **Vitest** (`test/**/*.spec.ts`). Mock external APIs; tests must run without API keys.
 - `yarn dev` — server + Vite together (local development).
+
+### Import a component at module scope, never inside a test
+
+`await import("…/Foo.vue")` inside an `it` (or a helper an `it` awaits) pulls the component's
+whole module graph through the transform, and **the first test to reach it is billed that time
+against `testTimeout`**. On this repo that was 2132ms of loading against an 18ms mount — so the
+file's first test looked 100x slower than its siblings, and on a loaded runner it was the one
+that crossed 15s and went red (#1314). The test was never the slow part.
+
+Load it once at module scope instead — `const Foo = (await import("…/Foo.vue")).default;`, a
+top-level await, or a plain static import. Collection has no per-test budget, so the same work
+costs nothing there.
+
+The exception is a module that must be evaluated AFTER a non-hoisted mock: `vi.doMock` and
+`vi.resetModules` only take effect on a later import, so those specs (`codeBlockCopy.spec.ts`,
+several under `test/server/`) keep the import inside the test on purpose. `vi.mock` is hoisted
+and needs no such thing.
 
 ## No emojis
 **Never use emojis anywhere in this project** — UI, source comments, docs, changelog, commit
@@ -93,6 +109,37 @@ apps discover the same collection skills). The API surface needs it for the same
 had no rule until now.
 
 Deliberate divergence is fine — say so in a comment with the reason, and flag it in the PR.
+
+## The GUI MCP has two server ids, and they are not meant to match
+
+The same tool is called `mcp__mt__presentChart` in a workspace cell and
+`mcp__mulmoterminal-render__presentChart` in a project cell. Both are current. The branch is
+`carriesFullGuiMcp()` in `server/session/mcp-config.ts`: the workspace / single view / cell-less chat
+gets a **generated** `--mcp-config` carrying every tool under `GUI_SERVER_ID`; a project cell is
+handed **no `--mcp-config` at all** and reaches the tools through the user's own `.mcp.json` under the
+per-group ids from `toolGroupServerId()`. Both constants live in `common/toolGroups.ts`.
+
+**Ask that predicate from every new spawn path.** It is deliberately agent-agnostic: claude cells,
+codex cells and the launcher chips that run either all consult it, so two terminals in the workspace
+reach the same tools however they were started. It sat in `spawn-claude.ts` while claude was the only
+caller, and the drift that produced — a codex cell and a `claude` chip silently getting less than the
+cell beside them — is exactly what a new path re-creates by not asking. A chip's only lever is the
+command line, so its injection lives in `launcher-gui-mcp.ts` and recognises **only** a bare `claude`
+or `codex`: it is rewriting text the user wrote, and an unrecognised shape must be left alone.
+
+The ids differ in **who owns them**, which is what decides whether a rename is free:
+
+- `GUI_SERVER_ID` (`mt`) — regenerated on every spawn, written to no file a user keeps. Ours. It is
+  short because the client repeats it on **every tool name** (`mcp__<id>__`, or codex's
+  `mcp-<id>-` with `-` rewritten to `_`), so the id is paid per tool, per listing, per session.
+- `toolGroupServerId()` (`mulmoterminal-render`, …) — **keys in config files users wrote**, read
+  back by the launcher's per-group switch, documented in the setup guide. Renaming these breaks
+  working setups with no error anywhere; it needs a migration over existing per-folder configs.
+
+So: do not "fix" the inconsistency by unifying them, and do not shorten a group id. If a rename is
+genuinely wanted, it is a migration, not an edit. When you add an id for a NEW single-view-style
+server, add the old one to `LEGACY_GUI_SERVER_IDS` — the reserved-id list and the Antigravity config
+merge recognise our own past output by it, and dropping it strands an entry on someone's disk.
 
 ## Bundled skills
 `server/skills/` ships skills to end users; they are mirrored to `~/.claude/skills/` and the Codex

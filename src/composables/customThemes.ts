@@ -8,6 +8,7 @@
 import { ref, computed } from "vue";
 import { THEME_VAR_KEYS, resolveThemeVars, isLightTheme, termThemeFromVars, type CustomThemeInput, type ThemeVars } from "../../common/themeVars";
 import type { ThemeId } from "../../common/themeIds";
+import { isRecord } from "../../common/isRecord";
 
 // The built-in palettes, read from the stylesheet rather than restated here — style.css is the
 // source of truth for what Midnight is, and a second copy would drift the moment one is edited.
@@ -43,8 +44,11 @@ function ruleVars(id: ThemeId, sheets: readonly CSSStyleSheet[]): ThemeVars | nu
       });
     }
   }
-  return THEME_VAR_KEYS.every((key) => found[key]) ? (found as ThemeVars) : null;
+  return isCompleteVars(found) ? found : null;
 }
+
+// Every variable present — a guard so the check narrows instead of being restated as a cast.
+const isCompleteVars = (vars: Partial<ThemeVars>): vars is ThemeVars => THEME_VAR_KEYS.every((key) => !!vars[key]);
 
 export function readBuiltinVars(id: ThemeId, doc: Document = document): ThemeVars | null {
   return ruleVars(
@@ -61,8 +65,8 @@ export function setCustomThemes(input: unknown): void {
 }
 
 function isCustomThemeInput(value: unknown): value is CustomThemeInput {
-  if (typeof value !== "object" || value === null) return false;
-  const theme = value as Record<string, unknown>;
+  if (!isRecord(value)) return false;
+  const theme = value;
   return typeof theme.id === "string" && typeof theme.label === "string" && typeof theme.colors === "object" && theme.colors !== null;
 }
 
@@ -75,7 +79,11 @@ export function findCustomTheme(id: string): CustomThemeInput | null {
 /** Paint a custom theme: its variables onto the root element, and the light/dark flag the
  *  status-pill rules key on. Returns false when the theme cannot be completed — the caller
  *  falls back to a built-in rather than leaving a half-painted element. */
-export function applyCustomTheme(theme: CustomThemeInput, builtins: Record<ThemeId, ThemeVars>, root: HTMLElement = document.documentElement): boolean {
+export function applyCustomTheme(
+  theme: CustomThemeInput,
+  builtins: Partial<Record<ThemeId, ThemeVars>>,
+  root: HTMLElement = document.documentElement,
+): boolean {
   const vars = resolveThemeVars(theme, builtins);
   if (!vars) return false;
   THEME_VAR_KEYS.forEach((key) => root.style.setProperty(key, vars[key]));
@@ -90,7 +98,7 @@ export function clearCustomTheme(root: HTMLElement = document.documentElement): 
 }
 
 /** The xterm palette for a custom theme, or null when it can't be resolved. */
-export function customTermTheme(theme: CustomThemeInput, builtins: Record<ThemeId, ThemeVars>) {
+export function customTermTheme(theme: CustomThemeInput, builtins: Partial<Record<ThemeId, ThemeVars>>) {
   const vars = resolveThemeVars(theme, builtins);
   return vars ? termThemeFromVars(vars) : null;
 }

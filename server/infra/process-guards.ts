@@ -12,13 +12,16 @@
 // logged stack is also what lets us find and fix the real emitter (Step B). A genuinely
 // fatal bind failure still exits, because server.on("error") in index.ts runs its own
 // process.exit before anything reaches here.
+import type { ProcessEventMap } from "node:process";
 import { messageOf } from "../errors.js";
 
-const onUnhandledRejection: NodeJS.UnhandledRejectionListener = (reason) => {
+// The listener signatures come from ProcessEventMap rather than the NodeJS.*Listener aliases:
+// @types/node deprecated those and names this as the replacement.
+const onUnhandledRejection = (...[reason]: ProcessEventMap["unhandledRejection"]) => {
   console.error("[fatal] unhandledRejection — process kept alive:", reason instanceof Error ? (reason.stack ?? reason) : reason);
 };
 
-const onUncaughtException: NodeJS.UncaughtExceptionListener = (err) => {
+const onUncaughtException = (...[err]: ProcessEventMap["uncaughtException"]) => {
   console.error(`[fatal] uncaughtException — process kept alive: ${messageOf(err)}`);
   if (err instanceof Error && err.stack) console.error(err.stack);
 };

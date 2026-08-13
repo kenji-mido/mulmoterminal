@@ -5,9 +5,11 @@
 // the file contains. Every reader that took the whole file caught that and reported "nothing",
 // so the longest-running sessions read as the emptiest ones (#998).
 //
-// Two shapes cover what the callers actually need, and neither is new: this module is where the
+// Three shapes cover what the callers actually need. Two are not new: this module is where the
 // line stream from decision-scan.ts and the tail reader from codex-rollout.ts now live together,
-// so a reader picks one instead of writing a third.
+// so a reader picks one instead of writing a third. The third is the byte-range fold a reader uses
+// when it will come BACK to the same growing file — reading it whole every time is cheap enough to
+// miss until fifty of them are read on every request (#1377).
 import { createReadStream, closeSync, openSync, readSync, statSync } from "node:fs";
 import readline from "node:readline";
 import { isRecord } from "../../common/isRecord.js";
@@ -45,6 +47,98 @@ export async function forEachJsonlRecord(file: string, onRecord: (record: Record
       // Skip malformed lines, exactly as parseJsonl does.
     }
   });
+}
+
+/** Where a scan may start and stop, in BYTES. `to` omitted means EOF.
+ *
+ *  `atLineStart` is the difference between the two things a byte offset can mean. A resumed scan
+ *  continues from an offset a previous scan returned, so the byte IS the start of a line and its
+ *  record must be folded. A window picked by arithmetic (the last N bytes) almost always lands
+ *  inside a line, and half a line is not JSON — that one is dropped, as readTailLines does. */
+export interface JsonlRange {
+  from?: number;
+  to?: number;
+  atLineStart?: boolean;
+}
+
+/** Fold the records inside a byte range, and answer where the scan stopped. A file that is only ever
+ *  appended to can be re-scanned from that offset and the two folds are the same fold — which is
+ *  what lets a reader keep a derived value up to date without paying for the whole file again
+ *  (#1377).
+ *
+ *  The last line of a range that runs to EOF has no newline to prove it finished, and it is two
+ *  different things: a record the writer wrote without a trailing newline, or half of one it is
+ *  still writing. JSON tells them apart — a truncated record does not parse — so a valid one is
+ *  folded (matching forEachJsonlRecord, which yields it) and a broken one is left uncounted for the
+ *  next scan to pick up whole. At a `to` boundary there is no such question: the cut is arbitrary
+ *  and its last line is never folded. */
+export async function forEachJsonlRecordIn(file: string, range: JsonlRange, onRecord: (record: Record<string, unknown>) => void): Promise<number> {
+  const from = range.from ?? 0;
+  let offset = from;
+  let dropLeading = from > 0 && !(range.atLineStart ?? from === 0);
+  await forEachCompleteLine(file, range, (line, bytes, unterminated) => {
+    const record = jsonlRecord(line);
+    if (unterminated && record === null) return; // half-written: not folded, and not counted
+    offset += bytes;
+    if (dropLeading) {
+      dropLeading = false;
+      return;
+    }
+    if (record) onRecord(record);
+  });
+  return offset;
+}
+
+// A JSONL line's record, or null for a blank, malformed or non-object line — the same lines
+// forEachJsonlRecord skips.
+function jsonlRecord(line: string): Record<string, unknown> | null {
+  if (!line.trim()) return null;
+  try {
+    const parsed: unknown = JSON.parse(line);
+    return isRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+// Split on the newline BYTE rather than decoding the range first: 0x0a cannot appear inside a
+// multi-byte UTF-8 sequence, so each complete line decodes on its own and the byte count handed to
+// the caller is the file's own, not a character count that would drift from it.
+//
+// The final line arrives flagged `unterminated` when the range ran to EOF and it had no newline;
+// the caller decides what that means.
+async function forEachCompleteLine(file: string, range: JsonlRange, onLine: (line: string, bytes: number, unterminated: boolean) => void): Promise<void> {
+  const from = range.from ?? 0;
+  if (range.to !== undefined && range.to <= from) return; // an empty range reads nothing
+  const stream = createReadStream(file, { start: from, ...(range.to === undefined ? {} : { end: range.to - 1 }) });
+  // Held across chunks, because a line is split wherever the chunk boundary happens to fall.
+  // Copied rather than kept as a view: a subarray pins the whole chunk it came from.
+  let carry: Buffer = Buffer.alloc(0);
+  try {
+    for await (const chunk of stream) {
+      const buf: Buffer = carry.length ? Buffer.concat([carry, asBuffer(chunk)]) : asBuffer(chunk);
+      let start = 0;
+      for (let nl = buf.indexOf(NEWLINE, start); nl !== -1; nl = buf.indexOf(NEWLINE, start)) {
+        onLine(buf.subarray(start, nl).toString("utf8"), nl - start + 1, false);
+        start = nl + 1;
+      }
+      carry = start === 0 ? buf : Buffer.from(buf.subarray(start));
+    }
+    if (carry.length && range.to === undefined) onLine(carry.toString("utf8"), carry.length, true);
+  } finally {
+    stream.destroy();
+  }
+}
+
+const NEWLINE = 0x0a;
+
+// A read stream types its chunks as `any`, and this reader's byte accounting is only honest if they
+// really are bytes: no encoding is set, so every chunk IS a Buffer, and anything else is a bug
+// worth hearing about rather than silently coercing.
+function asBuffer(chunk: unknown): Buffer {
+  if (Buffer.isBuffer(chunk)) return chunk;
+  if (typeof chunk === "string") return Buffer.from(chunk);
+  throw new TypeError(`jsonl read: expected a Buffer chunk, got ${typeof chunk}`);
 }
 
 /** The parsed records at the END of a JSONL file — what every "what happened last" reader wants.

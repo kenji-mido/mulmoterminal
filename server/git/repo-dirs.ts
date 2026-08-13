@@ -8,8 +8,7 @@
 // The resolution is derived from `cwdPresets` rather than a second hand-kept list: a directory the
 // user registered in Settings IS the set of places they work, and a mapping they had to maintain
 // separately would drift the moment they added a clone.
-import { resolveGithubUrl } from "./gitRemote.js";
-import { repoFromWebUrl } from "../config/header-context.js";
+import { repoForDir } from "./forge-support.js";
 import { publicDirConfig } from "../config/dir-config.js";
 import { createTtlCache } from "./ttl-cache.js";
 import { orderByDirPriority } from "../../common/dirPriorityOrder.js";
@@ -36,7 +35,7 @@ export interface RepoDirsDeps {
 // `owner/repo` for a directory, or null when it is not a git repo, has no origin, or the origin
 // is not on GitHub. All three are ordinary answers for a saved directory, not errors.
 async function resolveRepo(dir: string): Promise<string | null> {
-  return repoFromWebUrl(await resolveGithubUrl(dir));
+  return (await repoForDir(dir))?.repo ?? null;
 }
 
 async function cachedRepoOf(dir: string, deps: RepoDirsDeps): Promise<string | null> {

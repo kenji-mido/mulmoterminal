@@ -237,9 +237,11 @@ describe("toggleZoom (the keyboard's way in and out of the zoom)", () => {
     expect(toggleZoom(make(running(3)), [2, 0, 1]).expanded).toBe(2);
   });
 
-  it("refuses to zoom with fewer than two running cells (same rule as toggleExpand)", () => {
+  // This used to be refused (#374). The zoomed row is where the Canvas / Tools / Files panes live,
+  // so refusing it left them unreachable on a one-terminal grid — see toggleExpand.
+  it("zooms with a single running cell (same rule as toggleExpand)", () => {
     const s = make([cell(0, U(0)), cell(1)]); // one running + one empty launcher
-    expect(toggleZoom(s, [0, 1])).toBe(s);
+    expect(toggleZoom(s, [0, 1]).expanded).toBe(0);
   });
 
   it("still collapses even with one running cell — ⤡ must always get you out", () => {
@@ -482,21 +484,31 @@ describe("setSession / setCwd / toggleExpand", () => {
     expect(toggleExpand(make(running(2), { expanded: 1 }), 1).expanded).toBeNull();
   });
 
-  // #374: zooming shows one cell big with the others as a filmstrip, so with nothing to
-  // switch to it swaps a working layout for an empty filmstrip and squeezes the terminal's
-  // status bar and input off the bottom of the viewport, for no gain.
-  it("refuses to zoom when there is only one occupied cell", () => {
-    const single = make([cell(0, U(0)), cell(1)]);
-    expect(toggleExpand(single, 0)).toBe(single);
-  });
-
-  it("refuses to zoom a grid of nothing but launch cells", () => {
-    const empty = make([cell(0), cell(1)]);
-    expect(toggleExpand(empty, 0)).toBe(empty);
+  // The reverse of what #374 pinned. Zooming is not only "one big, the rest as a filmstrip": the
+  // zoomed row is also the only place the Canvas / Tools / Files panes exist, so refusing it left
+  // them unreachable on a one-terminal grid — the unread-canvas chip did nothing when clicked, and
+  // an agent's drawing had nowhere to be shown. Enlarging your one terminal is also just a thing to
+  // want. Owner's call, after hitting it live.
+  it("zooms the only occupied cell", () => {
+    expect(toggleExpand(make([cell(0, U(0)), cell(1)]), 0).expanded).toBe(0);
   });
 
   it("zooms as soon as a second cell is occupied", () => {
     expect(toggleExpand(make([cell(0, U(0)), cell(1, U(1)), cell(2)]), 0).expanded).toBe(0);
+  });
+
+  // Also a reversal: a grid of nothing but launch cells zooms too. The launch form is what gets
+  // enlarged, which is a bigger form rather than a broken state — and keeping the old refusal for
+  // this one case would mean the expand button worked on some cells and silently not on others.
+  it("zooms a launch cell", () => {
+    expect(toggleExpand(make([cell(0), cell(1)]), 0).expanded).toBe(0);
+  });
+
+  // A uid no cell holds would be stored and then read back as "not zoomed" by zoomedUid — the
+  // grid is never zoomed at nothing, it simply stays as it was.
+  it("ignores a uid no cell has", () => {
+    const s = make(running(2));
+    expect(toggleExpand(s, 99)).toBe(s);
   });
 
   // Whatever a state got into, the collapse button has to get out of it — including a state
@@ -1076,20 +1088,23 @@ describe("zoom invariants (#829)", () => {
     }
   });
 
-  // Invariant 5 — entry needs a second running cell; leaving never refuses.
-  it("refuses to ENTER the zoom with one running cell", () => {
+  // Invariant 5 — entry is refused for nothing that exists, and leaving never refuses either. The
+  // second-running-cell requirement is gone (#374 reversed): the zoomed row is the only place the
+  // Canvas / Tools / Files panes exist, so it locked them away on a one-terminal grid.
+  it("ENTERS the zoom with one running cell", () => {
     const lonely = make([cell(0, U(0)), cell(1)]); // one running + an empty launcher
-    expect(toggleZoom(lonely, [0, 1], 0)).toBe(lonely);
+    expect(toggleZoom(lonely, [0, 1], 0).expanded).toBe(0);
   });
 
-  // nextAttention needs no such guard: by invariant 1 it never enters the zoom in the first
-  // place, so on a one-cell grid there is nothing for it to refuse.
+  // Unchanged by that, and for a different reason: by invariant 1, nextAttention never ENTERS the
+  // zoom at all — it relocates an existing one — so a tiled grid stays tiled however few cells it
+  // has.
   it("nextAttention still does not zoom a lone cell", () => {
     const lonely = make([cell(0, U(0)), cell(1)]);
     expect(nextAttention(lonely, [0, 1], { 0: "blocked" }, null).expanded).toBeNull();
   });
 
-  it("always allows LEAVING the zoom, even in a state that could not be entered", () => {
+  it("always allows LEAVING the zoom", () => {
     const lonely = make([cell(0, U(0))], { expanded: 0 });
     expect(toggleZoom(lonely, [0], 0).expanded).toBeNull();
     expect(toggleExpand(lonely, 0, [0]).expanded).toBeNull();

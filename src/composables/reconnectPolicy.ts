@@ -22,8 +22,16 @@ export interface ReconnectFacts {
   isCommand: boolean;
 }
 
-export function shouldReconnect({ released, sawExit, reconnectPending, isCommand }: ReconnectFacts): boolean {
-  return !released && !sawExit && !reconnectPending && !isCommand;
+// Whether the connection is coming back at all — the question anything TELLING THE USER has to
+// answer, and a different one from `shouldReconnect`. Blind to `reconnectPending` on purpose: an
+// armed retry makes "schedule another?" false while making "is one coming?" as true as it gets, so
+// asking the wrong one promises a reconnect exactly when there is none and denies it when there is.
+export function connectionWillReturn({ released, sawExit, isCommand }: Omit<ReconnectFacts, "reconnectPending">): boolean {
+  return !released && !sawExit && !isCommand;
+}
+
+export function shouldReconnect(facts: ReconnectFacts): boolean {
+  return connectionWillReturn(facts) && !facts.reconnectPending;
 }
 
 // Exponential backoff by attempt number (0 = the first retry after a drop).

@@ -26,6 +26,7 @@ import { forEachJsonlLine } from "../infra/jsonl-file.js";
 import { encodeProjectDirName, projectSessionsDir } from "../session/project-dir.js";
 import { isProbeSessionId } from "./probe-session.js";
 import { PROBE_PROMPT } from "./rate-limit-probe.js";
+import { isRecord } from "../../common/isRecord.js";
 
 // Every probe transcript measured came in at 87-91KB. The cap is an order of magnitude above that
 // so a future, chattier claude still fits, and it exists to keep the sweep from reading a 14MB
@@ -33,26 +34,22 @@ import { PROBE_PROMPT } from "./rate-limit-probe.js";
 export const PROBE_TRANSCRIPT_MAX_BYTES = 1_000_000;
 
 const messageContent = (entry: unknown): { type: string; content: unknown } | null => {
-  if (typeof entry !== "object" || entry === null) return null;
-  const record = entry as Record<string, unknown>;
-  if (typeof record.type !== "string") return null;
-  const message = record.message;
-  if (typeof message !== "object" || message === null) return { type: record.type, content: null };
-  return { type: record.type, content: (message as Record<string, unknown>).content };
+  if (!isRecord(entry)) return null;
+  const type = entry.type;
+  if (typeof type !== "string") return null;
+  const message = entry.message;
+  return { type, content: isRecord(message) ? message.content : null };
 };
 
 const textOf = (content: unknown): string | null => {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return null;
-  const texts = content.filter(
-    (part): part is { text: string } => typeof part === "object" && part !== null && typeof (part as { text?: unknown }).text === "string",
-  );
+  const texts = content.filter((part): part is { text: string } => isRecord(part) && typeof part.text === "string");
   return texts.length > 0 ? texts.map((part) => part.text).join("") : null;
 };
 
 const usesTools = (content: unknown): boolean =>
-  Array.isArray(content) &&
-  content.some((part) => typeof part === "object" && part !== null && ["tool_use", "tool_result"].includes(String((part as { type?: unknown }).type)));
+  Array.isArray(content) && content.some((part) => isRecord(part) && ["tool_use", "tool_result"].includes(String(part.type)));
 
 /** Whether a transcript's CONTENT says a probe wrote it. Pure, so the boundary between "delete
  *  this" and "this is someone's work" is pinned by tests rather than by trying it on a disk.

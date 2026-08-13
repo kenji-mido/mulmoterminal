@@ -58,8 +58,11 @@ beforeEach(() => {
   globalThis.ResizeObserver = ResizeObserverStub as unknown as typeof ResizeObserver;
 });
 
+// At module scope, not inside a test: a component's module load is not the test's work, and
+// billing it to `testTimeout` is what makes the first test of a file the one that flakes.
+const Terminal = (await import("../../../src/components/Terminal.vue")).default;
+
 async function mountTerminal(slot: string) {
-  const Terminal = (await import("../../../src/components/Terminal.vue")).default;
   return mount(Terminal, { props: { sessionId: null, connectKey: 1, persistKey: slot, cwd: `/proj/${slot}` } });
 }
 
@@ -114,7 +117,6 @@ describe("Terminal.vue resolves its directory's look from its own cwd", () => {
 describe("Terminal.vue falls back to the dirCwd hint when it has no cwd", () => {
   it("resolves the directory's font from dirCwd alone", async () => {
     serveDirConfig({ fontSize: 18, fontFamily: "Cica, monospace" });
-    const Terminal = (await import("../../../src/components/Terminal.vue")).default;
     const w = mount(Terminal, { props: { sessionId: null, connectKey: 1, persistKey: "hinted", dirCwd: "/proj/hinted" } });
     await flushPromises();
 

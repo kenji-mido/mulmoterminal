@@ -32,6 +32,13 @@ export interface GridCellProps {
   // there to ask about.
   canvasAvailable?: boolean;
   home: string | null;
+  // The server's workspace directory. Grid state, not the cell's: a cell compares its OWN cwd
+  // against it to know whether it is the workspace, and then says so in its header badge — the
+  // same role-based name the launcher chip uses (WORKSPACE_LABEL in presets.ts).
+  //
+  // Optional here because only TerminalCell needs it non-null (it also prefills the launch form
+  // from it, and re-declares it as required for that); the other two only compare it.
+  defaultCwd?: string | null;
 }
 
 export interface GridCellEmits {

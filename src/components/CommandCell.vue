@@ -9,6 +9,7 @@ import { browserLocale } from "../utils/browserLocale";
 import { isRecord } from "../../common/isRecord";
 import { commandExitKind, notifySound } from "../composables/notifySound";
 import { CELL_BTN, CELL_BTN_BOX, CELL_BTN_INK, CELL_BTN_SIZE, CELL_TERM } from "./cellChromeClasses";
+import { fetchWithTimeout } from "../utils/fetchWithTimeout";
 
 // The summarize button's own colours, and the smaller close button on the summary panel. One complete
 // string per state rather than a base plus an override: two utilities for the same property
@@ -71,24 +72,19 @@ const MAX_SEND_CHARS = 64 * 1024;
 // locale picker (same signal as useVoiceInput / accountingUi / App.vue).
 
 async function postSummary(log: string): Promise<{ summary: string; truncated: boolean }> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), SUMMARY_FETCH_TIMEOUT_MS);
-  try {
-    const res = await fetch("/api/command/summarize", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ log, locale: browserLocale() }),
-      signal: controller.signal,
-    });
-    const data: unknown = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(isRecord(data) && typeof data.error === "string" ? data.error : `request failed (${res.status})`);
-    return {
-      summary: isRecord(data) && typeof data.summary === "string" ? data.summary : "",
-      truncated: isRecord(data) && data.truncated === true,
-    };
-  } finally {
-    clearTimeout(timer);
-  }
+  // No try/catch: `summarize` below is what decides how a failure is shown. The block that used
+  // to be here existed only to clear the timer.
+  const res = await fetchWithTimeout(
+    "/api/command/summarize",
+    { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ log, locale: browserLocale() }) },
+    SUMMARY_FETCH_TIMEOUT_MS,
+  );
+  const data: unknown = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(isRecord(data) && typeof data.error === "string" ? data.error : `request failed (${res.status})`);
+  return {
+    summary: isRecord(data) && typeof data.summary === "string" ? data.summary : "",
+    truncated: isRecord(data) && data.truncated === true,
+  };
 }
 
 async function summarize() {
@@ -142,6 +138,7 @@ function copyPrompt() {
     :canvas-available="canvasAvailable"
     :home="home"
     :cwd="command.cwd"
+    :default-cwd="defaultCwd"
     :finished="finished"
     idle-title="Finished"
     icon="play_arrow"

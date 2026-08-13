@@ -1,3 +1,4 @@
+// @vitest-environment node
 // Windows-only: does a chosen path survive the pipe from PowerShell back to us? (#1146)
 //
 // Nothing else in the suite can answer that. pick-file.spec asserts the SHAPE of the script from any

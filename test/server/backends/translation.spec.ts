@@ -4,7 +4,7 @@ import express from "express";
 import { mkdtempSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { Server } from "node:http";
+import { appRequest } from "../../helpers/appRequest.js";
 import {
   splitHitMiss,
   mergeTranslations,
@@ -77,8 +77,7 @@ describe("validateRequest", () => {
 
 describe("POST /api/translation", () => {
   let ws: string;
-  let server: Server;
-  let base: string;
+  let request: ReturnType<typeof appRequest>;
   let calls: Array<{ targetLanguage: string; sentences: readonly string[] }>;
 
   // Fake LLM: deterministic, records its calls so we can assert caching skips it.
@@ -87,27 +86,18 @@ describe("POST /api/translation", () => {
     return sentences.map((s) => `${s}-${targetLanguage}`);
   };
 
-  beforeEach(async () => {
+  beforeEach(() => {
     calls = [];
     ws = mkdtempSync(path.join(tmpdir(), "mt-tr-"));
     const app = express();
     app.use(express.json());
     mountTranslationRoutes(app, { workspace: ws, translateBatch: fakeBatch });
-    await new Promise<void>((resolve) => {
-      server = app.listen(0, () => {
-        base = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
-        resolve();
-      });
-    });
+    request = appRequest(app);
   });
 
-  afterEach(async () => {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    rmSync(ws, { recursive: true, force: true });
-  });
+  afterEach(() => rmSync(ws, { recursive: true, force: true }));
 
-  const post = (body: unknown) =>
-    fetch(`${base}/api/translation`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const post = (body: unknown) => request("/api/translation", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 
   it("short-circuits English without invoking the LLM or writing a cache", async () => {
     const res = await post({ namespace: "ui", targetLanguage: "en", sentences: ["Hello", "Bye"] });

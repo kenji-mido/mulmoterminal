@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import path from "node:path";
 import { resolveAddDirs, MAX_ADD_DIRS } from "../../../server/config/config-schema";

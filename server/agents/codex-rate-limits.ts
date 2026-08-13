@@ -63,7 +63,7 @@ export function extractCodexRateLimits(rateLimits: unknown): RateLimits | null {
  */
 export function latestRateLimitsInRollout(lines: readonly string[]): RateLimits | null {
   for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim();
+    const line = lines[i]?.trim() ?? "";
     if (!line.includes("rate_limits")) continue;
     try {
       const parsed: unknown = JSON.parse(line);

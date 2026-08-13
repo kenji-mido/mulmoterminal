@@ -54,6 +54,7 @@ function isValidDailyTime(value: string): boolean {
   const parts = value.split(":");
   if (parts.length !== 2) return false;
   const [hourStr, minStr] = parts;
+  if (hourStr === undefined || minStr === undefined) return false; // unreachable: length checked above
   if (hourStr.length !== 2 || minStr.length !== 2 || !allDigits(hourStr) || !allDigits(minStr)) return false;
   return Number(hourStr) <= 23 && Number(minStr) <= 59;
 }
@@ -71,7 +72,7 @@ function tasksFilePath(workspace: string): string {
 
 /** Read the user tasks file. Returns [] for a missing file or malformed JSON (a bad
  *  file must not abort scheduling — it just means no user tasks). */
-export function loadUserTasks(workspace: string): PersistedUserTask[] {
+export function loadUserTasks(workspace: string): unknown[] {
   let raw: string;
   try {
     raw = readTextFile(tasksFilePath(workspace));
@@ -79,8 +80,11 @@ export function loadUserTasks(workspace: string): PersistedUserTask[] {
     return [];
   }
   try {
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? (parsed as PersistedUserTask[]) : [];
+    const parsed: unknown = JSON.parse(raw);
+    // `unknown[]`, not `PersistedUserTask[]`: this only knows the file parsed to an ARRAY. Its one
+    // consumer, buildUserTaskDefinitions, already takes `readonly unknown[]` and validates every
+    // entry — the assertion this replaces claimed a shape nothing here had checked.
+    return Array.isArray(parsed) ? parsed : [];
   } catch (err) {
     log.warn("tasks.json is malformed — ignoring", { error: err instanceof Error ? err.message : String(err) });
     return [];

@@ -50,7 +50,7 @@ describe("createOrOpenPR opens an existing PR (#748)", () => {
       return { ok: true, stdout: "", stderr: "" };
     });
     const res = await createOrOpenPR("/repo/wt");
-    expect(res).toEqual({ ok: true, url: "https://github.com/o/r/pull/42", via: "gh" });
+    expect(res).toEqual({ ok: true, url: "https://github.com/o/r/pull/42", via: "cli" });
     // Regression (#762 Codex review): the lookup must NOT pass `--repo` — `run(..., cwd)` runs
     // gh inside the worktree so it infers the repo, and `--repo` only accepts an OWNER/REPO
     // slug (repoRoot(cwd) is a filesystem path, which would always error and defeat the lookup).
@@ -66,6 +66,6 @@ describe("createOrOpenPR opens an existing PR (#748)", () => {
       return { ok: true, stdout: "", stderr: "" };
     });
     const res = await createOrOpenPR("/repo/wt");
-    expect(res).toEqual({ ok: true, url: "https://github.com/o/r/pull/7", via: "gh" });
+    expect(res).toEqual({ ok: true, url: "https://github.com/o/r/pull/7", via: "cli" });
   });
 });

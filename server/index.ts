@@ -13,7 +13,7 @@ import { initOpenPathBackend } from "./backends/openPath.js";
 import { getUserMcpServers, getWorklogConfig, getTerminalSubmit, getQuickCommands, APP_CONFIG_FILE } from "./config/config-routes.js";
 import { enforceKeymap } from "./config/keymap-check.js";
 import { readFileSync } from "node:fs";
-import { submitSequence, submitSequenceForAgent } from "../common/terminalSubmit.js";
+import { submitSequenceForAgent } from "../common/terminalSubmit.js";
 import { sessionDisplayName } from "../common/sessionMemo.js";
 import { refreshUpdateStatus } from "./config/update-status.js";
 import {
@@ -36,11 +36,13 @@ import { messageOf } from "./errors.js";
 import { hookSettingsJson } from "./session/hook-settings.js";
 import { mcpConfigJson } from "./session/mcp-config.js";
 import { createClaudeSpawner } from "./session/spawn-claude.js";
+import { issueSpawnOptions } from "./session/issue-spawn-options.js";
 import { spawnPty } from "./session/pty-spawn.js";
 import { createRateLimitStore } from "./agents/rate-limit-store.js";
 import { startRateLimitProbe } from "./agents/rate-limit-probe.js";
 import { hasBinary } from "./infra/has-binary.js";
 import { newProbeSessionId } from "./agents/probe-session.js";
+import { writeProbeScreen } from "./agents/probe-stall.js";
 import { removeProbeTranscript, sweepLegacyProbeTranscriptsOnce } from "./agents/probe-transcript.js";
 import { sweepOrphanHeadlessTranscripts } from "./session/headless-session.js";
 import { removeLegacySandboxCredentials, removeLegacySandboxContainers } from "./infra/fs-cleanup.js";
@@ -60,14 +62,16 @@ import {
   activity,
   aiTitles,
   backgroundMarkers,
-  devTerminalSessions,
+  isPhoneListableSession,
   knownSessions,
   lastPrompts,
+  placedSessionsHydrated,
   ptys,
   sessionCwd,
   sessionMemos,
   sessionMemosHydrated,
   markUnplacedSession,
+  unplacedSessionsHydrated,
 } from "./session/registry.js";
 import { hydrateClearedTranscripts } from "./session/cleared-transcripts.js";
 import { runWithHiddenMarker } from "./session/hiddenMarker.js";
@@ -83,6 +87,7 @@ import { createAntigravitySpawner } from "./session/spawn-antigravity.js";
 import { renderScreen } from "./session/headlessScreen.js";
 import {
   agentFromPaneCommand,
+  SCREEN_HISTORY_ROWS,
   buildScreenMeta,
   buildSessionList,
   captureSessionScreen,
@@ -96,7 +101,7 @@ import { decideLaunchTerminal, NO_BROWSER_ERROR } from "./backends/remoteHost/la
 import { LAUNCH_TERMINAL_CHANNEL } from "../common/launchAgent.js";
 import { currentBranch, gitStatus } from "./git/git-status.js";
 import { phaseForRepoBranch } from "./git/prPhase.js";
-import { repoFromWebUrl } from "./config/header-context.js";
+import { repoForDir } from "./git/forge-support.js";
 import { resolveGithubUrl } from "./git/gitRemote.js";
 import { canClearInputBox } from "./backends/remoteHost/terminalInput.js";
 import { initCollectionsBackend } from "./backends/collections.js";
@@ -121,6 +126,7 @@ import { initMulmoScriptBackend } from "./backends/mulmoscript.js";
 import { createSessionLifecycle, SESSIONS_CHANNEL } from "./session/lifecycle.js";
 import { mountAppRoutes } from "./routes/app-routes.js";
 import { allowedToolNames, autoAllowedToolNames } from "./infra/plugins-registry.js";
+import { GUI_SERVER_ID } from "../common/toolGroups.js";
 
 import { resumableSessionPredicate } from "./session/resumable-sessions.js";
 import { installProcessGuards } from "./infra/process-guards.js";
@@ -184,7 +190,7 @@ const sessionChannel = (id: string) => `session:${id}`;
 // The worker-only `submitTranslation` tool is allowed for every session (harmless —
 // only hidden translation workers are actually shown it, see the /mcp route) so the
 // worker can call it without a permission prompt.
-const GUI_MCP_TOOLS = [...allowedToolNames(), "mcp__mulmoterminal-gui__submitTranslation"].join(",");
+const GUI_MCP_TOOLS = [...allowedToolNames(), `mcp__${GUI_SERVER_ID}__submitTranslation`].join(",");
 
 // What a GRID cell pre-approves. A grid cell is never handed --mcp-config: its GUI tools come
 // from the user's OWN per-folder MCP config (`claude mcp add -s local`, `.mcp.json`), so
@@ -327,9 +333,10 @@ const { translateViaHiddenChat } = createTranslationWorker({
 // Before anything binds a port: a typo'd key binding must stop the boot with a message
 // naming it, not disappear into a shortcut that silently never fires.
 enforceKeymap(APP_CONFIG_FILE, {
-  readConfig: () => {
+  readConfig: (): unknown => {
     try {
-      return JSON.parse(readFileSync(APP_CONFIG_FILE, "utf8"));
+      const parsed: unknown = JSON.parse(readFileSync(APP_CONFIG_FILE, "utf8"));
+      return parsed;
     } catch {
       return undefined; // missing or unparseable — not this check's business to report
     }
@@ -388,6 +395,14 @@ const claudeIsRunnable = (): boolean => {
 // like the bug this fixes (#1010).
 const TRANSCRIPT_FLUSH_MS = 5_000;
 
+// A probe that stopped for a reason nothing here can name. The screen is the only evidence there
+// is, and without it the next report of "usage says n/a" starts from nothing (#1293).
+const reportProbeScreen = (screen: string): void => {
+  if (!screen) return;
+  const file = writeProbeScreen(MULMOTERMINAL_HOME, screen);
+  if (file) console.warn(`[rate-limit] the usage probe reported nothing; what its terminal showed is in ${file}`);
+};
+
 const startClaudeRateLimitProbe = (): void => {
   // Belt and braces: the route has already refused to want a probe when claude is missing, but
   // this is the last point before a spawn and the flag it would strand is set by the caller.
@@ -404,17 +419,16 @@ const startClaudeRateLimitProbe = (): void => {
     port: PORT,
     cwd: CLAUDE_CWD,
     sessionId,
-    // The probe IS a claude TUI, so it submits by the user's Claude binding like every other
-    // claude session — read per probe so a config edit needs no restart.
-    submitSequence: () => submitSequence(getTerminalSubmit()),
     // A probe that settles WITHOUT the status line having reported is the "asked, heard nothing"
     // case. report() has already moved the state on if anything arrived, so this only widens the
     // gap when nothing did.
-    onSettled: () => {
+    onSettled: ({ stall, screen }) => {
       // Cleared here rather than by whoever called stop(): `stop()` is idempotent, but a stale
       // reference would let the NEXT probe be killed by a late report belonging to this one.
       stopClaudeRateLimitProbe = null;
-      rateLimitStore.noteProbeFailedIfNoReport(Date.now());
+      // Only a probe that failed for a reason we cannot name leaves its screen behind — a named one
+      // is already on the gauge, and a successful one has nothing to explain (#1293).
+      if (rateLimitStore.noteProbeFailedIfNoReport(Date.now(), stall) && stall === "unknown") reportProbeScreen(screen);
       rateLimitStore.setProbeInFlight(false);
       // Hiding it from /api/sessions is not enough: `claude --resume` reads the transcript
       // directory itself, so the probe has to take its own file with it (#1010).
@@ -581,6 +595,16 @@ const remoteHostSpawnChat = (message: string) => {
   markUnplacedSession(sessionId);
   return { chatId: sessionId };
 };
+// Starting work on an issue from the phone (#1184). The same spawn the desktop's POST
+// /api/issues/start makes, plus the unplaced mark for the same reason as above: the phone has no
+// grid, so nothing else would give this session a cell. `run` submits the seed rather than leaving
+// it in the box (#1253) — see issueSpawnOptions for why the choice is a function and not two keys.
+const remoteHostSpawnIssueSeed = (cwd: string, seed: string, run: boolean): string => {
+  const sessionId = randomUUID();
+  spawnClaudePty(sessionId, null, null, issueSpawnOptions(cwd, seed, run));
+  markUnplacedSession(sessionId);
+  return sessionId;
+};
 // The phone's remote terminal view (#435). Both accessors live here because the PTY table
 // and the title/activity side-tables do; the backend only sees the two functions.
 // A live session knows what it spawned. One that outlived us has no PtyEntry left, so ask
@@ -599,7 +623,7 @@ const workByCwd = async (cwds: readonly string[]): Promise<Map<string, SessionWo
       try {
         const status = await gitStatus(cwd);
         if (!status.repo || !status.branch) return;
-        const repo = repoFromWebUrl(await resolveGithubUrl(cwd));
+        const repo = (await repoForDir(cwd))?.repo ?? null;
         if (!repo) return;
         const summary = sessionWorkSummary(await phaseForRepoBranch(repo, status.branch));
         if (summary) out.set(cwd, summary);
@@ -618,14 +642,19 @@ const remoteHostListTerminalSessions = async () => {
   const cwdOfSession = (id: string) => ptys.get(id)?.cwd ?? sessionCwd(id) ?? "";
   const work = await workByCwd([...new Set([...ptys.keys(), ...tmuxListSessionIds()])].map(cwdOfSession));
   await sessionMemosHydrated; // the memo IS the phone's row title when there is one
+  // Both unplaced logs, because a session waiting for a cell is one the phone may list — and the
+  // case that mark exists for is a server that restarted before any tab opened, where the answer
+  // lives only on disk.
+  await Promise.all([unplacedSessionsHydrated, placedSessionsHydrated]);
   return buildSessionList({
     liveIds: [...ptys.keys()],
     tmuxIds: tmuxListSessionIds(),
     isResumable: await resumableSessionPredicate(),
-    // The phone lists the multi-terminal grid's cells only — not the single-view chat
-    // session or a tmux shell that was never a grid cell. resumableSessionPredicate()
-    // above already awaited devTerminalSessionsHydrated, so this set is fully seeded.
-    isGridSession: (id) => devTerminalSessions.has(id),
+    // The phone lists the multi-terminal grid's cells, and the sessions on their way to being
+    // one — never a tmux shell that was never a cell. resumableSessionPredicate() below already
+    // awaited devTerminalSessionsHydrated, and the unplaced logs are awaited just above; a
+    // session that has only just been spawned passes `isResumable` on its live pty.
+    isGridSession: isPhoneListableSession,
     // Empty title rather than the id as a fallback — buildSessionList uses "nameless"
     // to drop the long tail of finished sessions the phone can't meaningfully offer.
     detailOf: (id) => {
@@ -688,12 +717,14 @@ const remoteHostSessionScreenMeta = (sessionId: string): Promise<SessionScreenMe
 
 const remoteHostCaptureTerminalScreen = (sessionId: string) =>
   captureSessionScreen(sessionId, {
-    captureStyledPane: tmuxCaptureStyledPane,
+    // Both capture paths are asked for the same history; how much of it the phone actually
+    // gets is captureSessionScreen's call, so the two agree (mulmoserver#139).
+    captureStyledPane: (id) => tmuxCaptureStyledPane(id, SCREEN_HISTORY_ROWS),
     sourceOf: (id) => {
       const entry = ptys.get(id);
       return entry ? { buffer: entry.buffer, cols: entry.term.cols, rows: entry.term.rows } : undefined;
     },
-    render: renderScreen,
+    render: (source) => renderScreen({ ...source, historyLines: SCREEN_HISTORY_ROWS }),
     metaOf: remoteHostSessionScreenMeta,
     // Read from config on every screen so an edit in Settings reaches the phone without a
     // restart; scoped here rather than on the phone, which then needs no notion of session
@@ -723,6 +754,7 @@ const remoteHostLaunchTerminal = (agent: unknown, sessionId: unknown) => {
 initRemoteHostBackend({
   workspace: CLAUDE_CWD,
   spawnChat: remoteHostSpawnChat,
+  spawnIssueSeed: remoteHostSpawnIssueSeed,
   launchTerminal: remoteHostLaunchTerminal,
   listTerminalSessions: remoteHostListTerminalSessions,
   captureTerminalScreen: remoteHostCaptureTerminalScreen,
@@ -833,6 +865,8 @@ mountTerminalWebSockets({
   spawnCommandPty,
   spawnLauncherPty,
   resolveLauncher,
+  mcpConfigJson: (sessionId, host) => mcpConfigJson({ sessionId, host, port: PORT, userMcpServers: getUserMcpServers() }),
+  guiMcpTools: GUI_MCP_TOOLS,
 });
 
 // A bind failure (most often the port already in use) must not surface as an unhandled

@@ -1,3 +1,4 @@
+// @vitest-environment node
 // GET /api/repo-dirs end to end: real temp git repos with real `origin` remotes, so the route,
 // the remote resolution and the grouping are exercised together rather than mocked apart. The
 // config layer IS mocked — importing it for real reads the developer's own ~/.mulmoterminal.

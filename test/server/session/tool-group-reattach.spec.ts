@@ -41,6 +41,11 @@ vi.mock("../../../server/session/registry.js", () => ({
   // to decide it must NOT record them a second time — see mcp/gui-call-history.ts).
   hookedSessions: new Set(),
   resetSessionToolGroups: (id: string) => resetSessionToolGroups(id),
+  // Answered, not exercised: this spec is about the reattach PROBE and its ordering. What the claim
+  // records is pinned in full-gui-claim.spec.ts. It shares this function's single probe rather than
+  // taking its own — which is the invariant the ordering test below exists for, and which a second
+  // `ptyWouldReattach` call inside the claim would break.
+  claimFullGuiMcp: () => true,
 }));
 
 // The transcript check decides --resume; irrelevant here and it would touch the real disk.

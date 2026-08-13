@@ -8,6 +8,11 @@ export const median = (values: number[]): number | null => {
   if (values.length === 0) return null;
   const sorted = [...values].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
-  if (sorted.length % 2 === 1) return sorted[mid];
-  return (sorted[mid - 1] + sorted[mid]) / 2;
+  // Read once each: `sorted[mid]` is `number | undefined` under noUncheckedIndexedAccess, and the
+  // length checks above are what actually rule that out.
+  const middle = sorted[mid];
+  if (middle === undefined) return null;
+  if (sorted.length % 2 === 1) return middle;
+  const below = sorted[mid - 1];
+  return below === undefined ? middle : (below + middle) / 2;
 };

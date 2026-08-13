@@ -10,7 +10,7 @@ export type PrPhase = "none" | "draft" | "ci-failing" | "changes-requested" | "c
 
 export const PR_PHASES: readonly PrPhase[] = ["none", "draft", "ci-failing", "changes-requested", "ci-running", "ready", "merged", "closed"];
 
-export const isPrPhase = (v: unknown): v is PrPhase => typeof v === "string" && (PR_PHASES as readonly string[]).includes(v);
+export const isPrPhase = (v: unknown): v is PrPhase => typeof v === "string" && PR_PHASES.some((phase) => phase === v);
 
 // The /api/pr-phase response. `phase` and `prUrl` predate the rest and the roster reads them;
 // the numbers are what lets a cell say WHICH work it is on rather than just how far along it is.
@@ -24,9 +24,26 @@ export interface WorkItem {
   // list above all, where "#987" alone says nothing about which request is running (#1014).
   prTitle: string | null;
   issueTitle: string | null;
+  // WHY a request that is open and not obviously failing still cannot merge. GitLab collapses into
+  // one `detailed_merge_status` what GitHub splits across `isDraft`, `reviewDecision` and the check
+  // rollup, and three of its values — approvals outstanding, unresolved discussions, blocked by
+  // another request — have no home in `PrPhase`. Forcing them into `ready` would call something
+  // unmergeable ready, and into `changes-requested` would invent a review nobody left.
+  //
+  // Always null on GitHub, whose phases say everything there is to say (#981).
+  blockedReason: string | null;
 }
 
-export const EMPTY_WORK_ITEM: Readonly<WorkItem> = { phase: "none", pr: null, prUrl: null, issue: null, issueUrl: null, prTitle: null, issueTitle: null };
+export const EMPTY_WORK_ITEM: Readonly<WorkItem> = {
+  phase: "none",
+  pr: null,
+  prUrl: null,
+  issue: null,
+  issueUrl: null,
+  prTitle: null,
+  issueTitle: null,
+  blockedReason: null,
+};
 
 // One line for a surface with room for one: what the work is FOR beats what was done about it, so
 // the issue's title wins when there is one. Null when neither side has a title to show.
@@ -66,7 +83,7 @@ function toIssueNumber(digits: string): number | null {
 // shown next to this cell's PR has to belong to the same repo to be clickable and true.
 export function issueRefFromPrBody(body: string | null | undefined): number | null {
   const found = typeof body === "string" ? CLOSING_KEYWORD.exec(body) : null;
-  return found ? toIssueNumber(found[1]) : null;
+  return found?.[1] === undefined ? null : toIssueNumber(found[1]);
 }
 
 // Whether the body ALREADY states what merging it closes, in either form GitHub honours. Broader
@@ -88,7 +105,7 @@ const BRANCH_ISSUE = /^[a-z][a-z-]*\/([1-9]\d*)-/;
 // somebody else's issue. Named for the doubt so a call site can't forget it.
 export function issueCandidateFromBranch(branch: string | null | undefined): number | null {
   const found = typeof branch === "string" ? BRANCH_ISSUE.exec(branch) : null;
-  return found ? toIssueNumber(found[1]) : null;
+  return found?.[1] === undefined ? null : toIssueNumber(found[1]);
 }
 
 // The prefix this app gives a branch it creates FOR an issue (#1171). Shared because the two
@@ -104,5 +121,5 @@ const ANCHORED_ISSUE = new RegExp(`^${ISSUE_BRANCH_PREFIX}([1-9]\\d*)-`);
 // else's issue the moment the PR merges, which no amount of confirming afterwards undoes.
 export function issueFromAnchoredBranch(branch: string | null | undefined): number | null {
   const found = typeof branch === "string" ? ANCHORED_ISSUE.exec(branch) : null;
-  return found ? toIssueNumber(found[1]) : null;
+  return found?.[1] === undefined ? null : toIssueNumber(found[1]);
 }

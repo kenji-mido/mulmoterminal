@@ -1,8 +1,9 @@
 ---
-title: Scenarios
+title: Git worktrees for parallel AI agents, and other workflows
+nav_title: Scenarios
 layout: default
 parent: English
-nav_order: 3
+nav_order: 4
 description: Practical parallel-agent workflows: isolating work in a git worktree, working across repositories, having AI summarise a failed script, and running Claude and Codex side by side.
 ---
 
@@ -23,7 +24,7 @@ The grid's core and headline use case. This is the center of the **command post*
 
 1. Add cells with **New terminal** and launch Claude / Codex on a different task in each.
 2. While one is thinking, move ahead with review or edits in another cell.
-3. Pick up only the cells that call you — **amber (awaiting input)** or the **blue-ringed "done, review it"** ones — you don't have to watch them all.
+3. Pick up only the cells that call you — **amber (awaiting input)** or the **green-ringed "done, review it"** ones — you don't have to watch them all.
 
 ![Terminals running in parallel](../images/grid-2x2.png)
 
@@ -50,6 +51,23 @@ quietly start the work on week-old code. With no remote reachable, the local bra
 worktree is still created.
 
 ![Worktrees start from the launcher form](../images/grid-launch-form.png)
+
+### When you're done, clean up as you close
+
+Closing a worktree cell asks first whether to **keep or remove** it. **Remove worktree** deletes the
+worktree **and its branch**, so you aren't left running `git branch -D` afterwards.
+
+![Closing a worktree cell](../images/worktree-close-keep.png)
+
+**When uncommitted or unpushed work is left, the dialog names the counts** and the button becomes
+**Discard & remove** — what you're about to lose is written on the button itself. The diff is
+re-read the moment the dialog opens (the button reads `Checking…` until it lands), so a change made
+seconds ago can't be discarded unseen.
+
+![Closing a worktree that has uncommitted work](../images/worktree-close-discard.png)
+
+Only worktrees **this app created** can be removed; the server refuses a delete aimed outside the
+directory it manages.
 
 ## 3. Work across multiple repositories
 

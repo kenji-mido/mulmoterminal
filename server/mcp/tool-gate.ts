@@ -47,13 +47,26 @@ export const describeTool = (def: PluginToolDefinition): string => [def.descript
 // `group` null means the all-tools surface (the single view's URL, unchanged). A group filters
 // the offer down to the tools classified into it — and an UNCLASSIFIED tool is in no group, so
 // it never reaches a group URL (see common/toolGroups.ts for why that direction is deliberate).
+//
+// `carriesAllTools` is the THIRD gate, and the only one that can empty a group entirely. A session
+// handed the all-tools url can already call every one of these under `mcp__mt__*`; serving them
+// again under `mcp__mulmoterminal-<group>__*` gives the model two names for one action and a coin
+// flip over which to use. Until #1338 nothing had to decide this, because `--strict-mcp-config` shut
+// the directory's own config out — at the cost of the user's connectors along with it. Removing that
+// flag is what makes the overlap reachable, so the resolution moves here, where BOTH urls are ours.
+//
+// Standing down is not the same as not existing: the group server still connects and still reports
+// itself, with no tools. A 404 would surface in the client as "server failed to connect", which is a
+// worse account of the situation than "connected, nothing here".
 export function offeredTools(
   isTranslationWorker: boolean,
   plugins: readonly PluginToolDefinition[],
   workerTool: OfferedTool,
   group: ToolGroup | null = null,
+  carriesAllTools = false,
 ): OfferedTool[] {
   if (isTranslationWorker) return [workerTool];
+  if (group !== null && carriesAllTools) return [];
   const offered = group === null ? plugins : plugins.filter((def) => groupOfTool(def.name) === group);
   return offered.map((def) => ({ name: def.name, description: describeTool(def), inputSchema: def.parameters ?? NO_PARAMETERS }));
 }
@@ -64,7 +77,7 @@ export type ToolRoute =
   // Hand off to the plugin dispatch route.
   | { kind: "dispatch" };
 
-export function routeToolCall(name: string, isTranslationWorker: boolean, group: ToolGroup | null = null): ToolRoute {
+export function routeToolCall(name: string, isTranslationWorker: boolean, group: ToolGroup | null = null, carriesAllTools = false): ToolRoute {
   const isWorkerTool = name === SUBMIT_TRANSLATION_TOOL_NAME;
   if (isTranslationWorker) {
     if (isWorkerTool) return { kind: "submit-translation" };
@@ -75,6 +88,12 @@ export function routeToolCall(name: string, isTranslationWorker: boolean, group:
   // translation pending, which is a 404 from another module rather than a decision made here
   // — and the layer above already assumes a model can name a tool it was never shown.
   if (isWorkerTool) return { kind: "refused", message: `Tool "${name}" is not available.` };
+  // Second layer of the stood-down group. Named before the group filter below so the message can
+  // say where the tool actually IS — refusing it as "not in this group" would be true and useless,
+  // since the session can call it right now under the all-tools server.
+  if (group !== null && carriesAllTools) {
+    return { kind: "refused", message: `Tool "${name}" is served on this session's all-tools MCP server, not on the "${group}" group.` };
+  }
   // Second layer of the group gate. Refused, not dispatched: the dispatch route would happily
   // run any registered plugin, so "we never offered it" is not a control.
   if (group !== null && groupOfTool(name) !== group) {

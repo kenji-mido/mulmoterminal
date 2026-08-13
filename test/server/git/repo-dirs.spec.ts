@@ -1,3 +1,4 @@
+// @vitest-environment node
 // The reverse lookup: given `owner/repo`, which local clones can work on it, in what order, and
 // which one was chosen. Several clones of one repo run side by side in real setups, so almost
 // every case here is about a repo with more than one candidate.

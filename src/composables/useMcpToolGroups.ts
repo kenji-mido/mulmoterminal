@@ -1,6 +1,11 @@
 import { ref, type Ref } from "vue";
 import { TOOL_GROUPS, type ToolGroup } from "../../common/toolGroups";
 import { queueMcpWrite } from "../components/mcpWriteQueue";
+import { isUnknownArray } from "../../common/isUnknownArray";
+import { jsonBody } from "../jsonBody";
+// The POST shells out to `claude mcp add` / `remove`; the GET only reads config files, so it
+// keeps the ordinary deadline.
+import { fetchWithTimeout, SLOW_COMMAND_TIMEOUT_MS } from "../utils/fetchWithTimeout";
 
 // Which GUI tool groups a directory hands its agents, one switch per group in TOOL_GROUPS
 // (render, data, media, external). NOT MulmoTerminal state: each is an MCP server registered in
@@ -9,10 +14,12 @@ import { queueMcpWrite } from "../components/mcpWriteQueue";
 //
 // One record per group rather than a flag per group: the switches differ only in the group they
 // name, so adding one to TOOL_GROUPS should not mean another copy of this block.
-// The cast is Object.fromEntries's signature, which types every key as `string` and so cannot say
-// that a mapping over TOOL_GROUPS covers exactly the groups; writing the four keys out instead
-// would defeat the point of deriving them.
-const byToolGroup = <T>(value: T): Record<ToolGroup, T> => Object.fromEntries(TOOL_GROUPS.map((group) => [group, value])) as Record<ToolGroup, T>;
+// The four groups spelled out, which reads like a step back from deriving them — and is not.
+// `Object.fromEntries` types every key as `string`, so it cannot say the result covers ToolGroup;
+// the assertion that used to bridge that gap ACCEPTS a missing key silently. Written out against a
+// `Record<ToolGroup, T>` annotation, a group added to TOOL_GROUPS makes this a compile error
+// instead — the reminder arrives, rather than a switch quietly never appearing.
+const byToolGroup = <T>(value: T): Record<ToolGroup, T> => ({ render: value, data: value, media: value, external: value });
 
 interface Switches {
   // The directory the switches currently describe. Null means there is nothing to show — either
@@ -42,14 +49,19 @@ async function load(switches: Switches, target: string | null): Promise<void> {
   switches.dir.value = null;
   if (!target) return;
   try {
-    const res = await fetch(`/api/gui-mcp-groups?cwd=${encodeURIComponent(target)}`);
+    const res = await fetchWithTimeout(`/api/gui-mcp-groups?cwd=${encodeURIComponent(target)}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
+    const data = await jsonBody(res);
     // A slower reply for a directory the user has since moved off would show its answer under the
     // new directory's name.
     if (reqId !== switches.req) return;
+    // THROWN, not defaulted to an empty list. The route always answers `{ groups: [...] }`, so a
+    // missing `groups` means the body could not be read — `jsonBody` absorbs a truncated or
+    // aborted one into `{}` and returns NORMALLY, which would walk straight past the catch below
+    // and paint every switch "off". That is the one position the catch exists to refuse.
+    if (!isUnknownArray(data.groups)) throw new Error("GET /api/gui-mcp-groups → body is not { groups }");
     switches.dir.value = target;
-    const registered: unknown[] = Array.isArray(data.groups) ? data.groups : [];
+    const registered: unknown[] = data.groups;
     switches.enabled.value = byToolGroup(false);
     for (const group of TOOL_GROUPS) switches.enabled.value[group] = registered.includes(group);
     switches.failed.value = byToolGroup(null);
@@ -83,14 +95,18 @@ function apply(switches: Switches, group: ToolGroup): Promise<void> {
 
 async function write(switches: Switches, group: ToolGroup, target: string, wanted: boolean): Promise<void> {
   try {
-    const res = await fetch("/api/gui-mcp-groups", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ cwd: target, group, enabled: wanted }),
-    });
+    const res = await fetchWithTimeout(
+      "/api/gui-mcp-groups",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ cwd: target, group, enabled: wanted }),
+      },
+      SLOW_COMMAND_TIMEOUT_MS,
+    );
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    if (!data.ok) throw new Error(data.message || "claude mcp failed");
+    const data = await jsonBody(res);
+    if (data.ok !== true) throw new Error(typeof data.message === "string" && data.message ? data.message : "claude mcp failed");
   } catch (e) {
     // Only if the switches still belong to the directory this write was for. Moved on, they are
     // showing what the NEW directory has registered, and putting one back would report another
@@ -138,11 +154,15 @@ async function syncInto(switches: Switches, worktreePath: string): Promise<void>
   for (const group of changed) {
     await queueMcpWrite(async () => {
       try {
-        await fetch("/api/gui-mcp-groups", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ cwd: worktreePath, group, enabled: wanted(group) }),
-        });
+        await fetchWithTimeout(
+          "/api/gui-mcp-groups",
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ cwd: worktreePath, group, enabled: wanted(group) }),
+          },
+          SLOW_COMMAND_TIMEOUT_MS,
+        );
       } catch {
         // best-effort — a worktree without the registration still launches, just without the tools
       }
@@ -154,10 +174,10 @@ async function syncInto(switches: Switches, worktreePath: string): Promise<void>
 // caller reads as "write every group" rather than as "nothing is registered".
 async function registeredIn(dir: string): Promise<unknown[] | null> {
   try {
-    const res = await fetch(`/api/gui-mcp-groups?cwd=${encodeURIComponent(dir)}`);
+    const res = await fetchWithTimeout(`/api/gui-mcp-groups?cwd=${encodeURIComponent(dir)}`);
     if (!res.ok) return null;
-    const data = await res.json();
-    return Array.isArray(data.groups) ? data.groups : null;
+    const data = await jsonBody(res);
+    return isUnknownArray(data.groups) ? data.groups : null;
   } catch {
     return null;
   }

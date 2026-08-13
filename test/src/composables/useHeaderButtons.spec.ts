@@ -27,11 +27,14 @@ describe("useHeaderButtons", () => {
   });
 
   it("fetches /api/header for a real cwd and exposes the resolved buttons", async () => {
-    const fetchMock = vi.fn(() => Promise.resolve(jsonResponse({ buttons: [{ id: "pr", label: "PR", run: "shell" }], chips: null })));
+    const fetchMock = vi.fn<(url: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(() =>
+      Promise.resolve(jsonResponse({ buttons: [{ id: "pr", label: "PR", run: "shell" }], chips: null })),
+    );
     vi.stubGlobal("fetch", fetchMock);
     const { result, unmount } = withSetup(() => useHeaderButtons(params("/proj")));
     await flushPromises();
-    expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("/api/header?"));
+    // #1393: every request carries a deadline now, so the init is no longer absent.
+    expect(fetchMock.mock.calls[0]?.[0]).toEqual(expect.stringContaining("/api/header?"));
     expect(result.buttons.value.map((b) => b.id)).toEqual(["pr"]);
     unmount();
   });

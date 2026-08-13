@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 
 import { binaryProblemMessage, diagnoseBinary, hasBinary, type BinaryProbe } from "../../../server/infra/has-binary";

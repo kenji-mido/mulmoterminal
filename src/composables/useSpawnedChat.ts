@@ -12,10 +12,11 @@
 //
 // When the grid isn't mounted (the chat was started from a collection overlay, which renders in
 // the single-view shell), the request is QUEUED and the app switches to /terminals; GridView
-// drains the queue when it registers on activate. Same contract as useNewTerminal, including the
-// queue holding EVERY waiting request: a collection action can spawn more than one chat before
-// the route changes, and a dropped one is a live agent with nowhere to appear.
+// drains the queue when it registers on activate. Same contract as useNewTerminal, down to the
+// shared createHandlerQueue: a collection action can spawn more than one chat before the route
+// changes, and a dropped one is a live agent with nowhere to appear.
 import { router } from "../router";
+import { createHandlerQueue } from "./handlerQueue";
 import type { TerminalAgent } from "../../common/sessionAgent";
 
 export interface SpawnedChatRequest {
@@ -42,28 +43,19 @@ export interface SpawnedChatRequest {
  *  take the user away from where the session just appeared. */
 type Handler = (req: SpawnedChatRequest) => boolean;
 
-let handler: Handler | null = null;
-let pending: SpawnedChatRequest[] = [];
+const queue = createHandlerQueue<SpawnedChatRequest, boolean>();
 
 // GridView registers its placer; every request queued before it activated drains immediately, in
 // arrival order. The returned function unregisters it (call in onDeactivated / onBeforeUnmount).
 export function registerSpawnedChatHandler(h: Handler): () => void {
-  handler = h;
-  // Taken before dispatching, as in useNewTerminal: a handler that itself queues would otherwise
-  // have its request dropped by the clear below.
-  const queued = pending;
-  pending = [];
-  queued.forEach((req) => h(req));
-  return () => {
-    if (handler === h) handler = null;
-  };
+  return queue.register(h);
 }
 
 /** Show a spawned chat as a grid cell. If the grid isn't mounted yet, queue it and switch to it. */
 export function placeSpawnedChat(req: SpawnedChatRequest): void {
   // `true` for a queued request too: the grid will have it as soon as it registers, so the grid is
   // still where the user should be looking.
-  const goingToTheGrid = handler ? handler(req) : (pending.push(req), true);
+  const goingToTheGrid = queue.deliver(req, true);
   // Then SHOW the grid. Mounted is not the same as on screen: since #1190 the grid stays alive
   // UNDERNEATH a full-screen overlay, so a chat started from the collections browser is placed
   // into a grid the user cannot see. Navigating is also what closes that overlay — before the grid
@@ -78,6 +70,5 @@ export function placeSpawnedChat(req: SpawnedChatRequest): void {
 
 /** Test seam: drop anything queued by a previous case. Not used by the app. */
 export function resetSpawnedChatQueue(): void {
-  handler = null;
-  pending = [];
+  queue.reset();
 }

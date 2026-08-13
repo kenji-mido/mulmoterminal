@@ -1,3 +1,4 @@
+// @vitest-environment node
 // The rule under test is "only a size tmux CAN report and that DIFFERS earns a nudge" — anything
 // looser resizes a healthy session, anything tighter leaves #957's blank screen in place.
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";

@@ -1,7 +1,11 @@
 {
   "extends": "./tsconfig.app.json",
   "compilerOptions": {
-    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.test.tsbuildinfo"
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.test.tsbuildinfo",
+    /* The flag stays OFF for specs (#1301). A spec indexes fixtures it just built — `rows[0]` on an
+       array it wrote two lines above — so `T | undefined` there is noise about a value the test
+       itself guarantees. The value of the flag is in shipped code, which has it on. */
+    "noUncheckedIndexedAccess": false
   },
   "include": ["test/src/**/*.ts", "test/common/**/*.ts", "test/*.ts"]
 }

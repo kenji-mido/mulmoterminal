@@ -1,22 +1,21 @@
 // @vitest-environment node
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll } from "vitest";
 import express from "express";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import type { Server } from "node:http";
+import { appRequest } from "../../helpers/appRequest.js";
 import { mountWikiRoutes } from "../../../server/backends/wiki.js";
+import { makeTempDir } from "../../support/tempDir";
 
 // A minimal wiki laid out at core's canonical location (wikiDirs):
 //   <ws>/data/wiki/index.md       — the index (two bullet [[links]])
 //   <ws>/data/wiki/pages/*.md     — the page files (alpha links to beta)
 //   <ws>/data/wiki/log.md         — the activity log
 // alpha → beta gives one graph edge; both pages are indexed so lint is clean.
-let server: Server;
-let base: string;
+let request: ReturnType<typeof appRequest>;
 
-beforeAll(async () => {
-  const ws = mkdtempSync(path.join(tmpdir(), "mt-wiki-"));
+beforeAll(() => {
+  const ws = makeTempDir("mt-wiki-");
   const wikiDir = path.join(ws, "data", "wiki");
   mkdirSync(path.join(wikiDir, "pages"), { recursive: true });
   writeFileSync(path.join(wikiDir, "index.md"), "# Index\n\n- [[alpha]]\n- [[beta]]\n");
@@ -26,20 +25,12 @@ beforeAll(async () => {
 
   const app = express();
   mountWikiRoutes(app, { workspace: ws });
-  await new Promise<void>((resolve) => {
-    server = app.listen(0, () => resolve());
-  });
-  const addr = server.address();
-  base = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`;
-});
-
-afterAll(() => {
-  server?.close();
+  request = appRequest(app);
 });
 
 describe("GET /api/wiki", () => {
   it("returns the index content + parsed entries", async () => {
-    const res = await fetch(`${base}/api/wiki`);
+    const res = await request("/api/wiki");
     expect(res.status).toBe(200);
     const body = (await res.json()) as { content: string; entries: Array<{ slug: string; title: string }> };
     expect(body.content).toContain("[[alpha]]");
@@ -49,7 +40,7 @@ describe("GET /api/wiki", () => {
 
 describe("GET /api/wiki?slug=", () => {
   it("returns an existing page", async () => {
-    const res = await fetch(`${base}/api/wiki?slug=alpha`);
+    const res = await request("/api/wiki?slug=alpha");
     expect(res.status).toBe(200);
     const body = (await res.json()) as { exists: boolean; content: string; resolvedTitle: string };
     expect(body.exists).toBe(true);
@@ -58,24 +49,24 @@ describe("GET /api/wiki?slug=", () => {
   });
 
   it("404s a missing page", async () => {
-    const res = await fetch(`${base}/api/wiki?slug=ghost`);
+    const res = await request("/api/wiki?slug=ghost");
     expect(res.status).toBe(404);
   });
 
   it("400s an unsafe slug", async () => {
-    expect((await fetch(`${base}/api/wiki?slug=${encodeURIComponent("../../etc/passwd")}`)).status).toBe(400);
+    expect((await request(`/api/wiki?slug=${encodeURIComponent("../../etc/passwd")}`)).status).toBe(400);
   });
 
   it("400s a repeated (array) slug query rather than 500ing", async () => {
     // `?slug=a&slug=b` parses to a string[], which the typeof guard must reject before
     // it ever reaches readWikiPage.
-    expect((await fetch(`${base}/api/wiki?slug=a&slug=b`)).status).toBe(400);
+    expect((await request("/api/wiki?slug=a&slug=b")).status).toBe(400);
   });
 });
 
 describe("GET /api/wiki/graph", () => {
   it("returns nodes + the resolved alpha→beta edge", async () => {
-    const res = await fetch(`${base}/api/wiki/graph`);
+    const res = await request("/api/wiki/graph");
     expect(res.status).toBe(200);
     const body = (await res.json()) as { nodes: Array<{ slug: string }>; edges: Array<{ from: string; to: string }> };
     expect(body.nodes.map((n) => n.slug).sort()).toEqual(["alpha", "beta"]);
@@ -85,7 +76,7 @@ describe("GET /api/wiki/graph", () => {
 
 describe("GET /api/wiki/lint", () => {
   it("returns issues + a rendered report (healthy fixture)", async () => {
-    const res = await fetch(`${base}/api/wiki/lint`);
+    const res = await request("/api/wiki/lint");
     expect(res.status).toBe(200);
     const body = (await res.json()) as { issues: string[]; report: string };
     expect(body.issues).toEqual([]);

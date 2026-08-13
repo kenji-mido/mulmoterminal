@@ -37,6 +37,6 @@ export const SUNK_CELL = "opacity-40";
 export const SUNK_DOT_STATUS = {
   idle: CELL_DOT_IDLE,
   working: CELL_DOT_WORKING_STILL,
-  done: "bg-accent",
+  done: "bg-done",
   blocked: "bg-amber",
 } as const satisfies Record<AttentionStatus, string>;

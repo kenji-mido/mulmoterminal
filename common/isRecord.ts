@@ -11,3 +11,9 @@ import { isObject } from "graphai";
 // graphai's own `isPlainObject` is exactly this (it also rejects Map/Date/class instances), but
 // it is not exported from the package root, so the array check stays here.
 export const isRecord = (value: unknown): value is Record<string, unknown> => isObject(value) && !Array.isArray(value);
+
+// "Absent, or of this type" — what an OPTIONAL field on a wire shape has to satisfy. A guard that
+// skips these asserts a type it has not seen: absent is meaningful (an older server never said the
+// field), but a present one of the wrong type is a lie the rest of the code then reads.
+export const optionalString = (value: unknown): boolean => value === undefined || typeof value === "string";
+export const optionalBoolean = (value: unknown): boolean => value === undefined || typeof value === "boolean";

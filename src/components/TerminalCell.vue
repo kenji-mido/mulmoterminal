@@ -2,10 +2,13 @@
 import { ref, computed, nextTick, watch, onMounted, onUnmounted, useTemplateRef } from "vue";
 import TerminalView from "./Terminal.vue";
 import { usePubSub } from "../composables/usePubSub";
+import { useImeAwareEnter } from "../composables/useImeAwareEnter";
 import { useCellChrome } from "../composables/useCellChrome";
 import { useGitStatus } from "../composables/useGitStatus";
 import { useWorkItem } from "../composables/useWorkItem";
+import { dismissWorkCommentFailure, visibleWorkCommentFailure } from "../composables/workCommentNotice";
 import { formatCwd, worktreeLabel } from "./cwdDisplay";
+import { isSameDirPath } from "../../common/dirPathKey";
 import DirBadge from "./DirBadge.vue";
 import { isCellContext, isCellUsage, type CellContext, type CellUsage } from "./cellPayload";
 import { asTerminalAgent, type TerminalAgent } from "../../common/sessionAgent";
@@ -13,17 +16,20 @@ import type { LaunchAgent } from "../../common/launchAgent";
 import { unsavedWork } from "./unsavedWork";
 import { shouldPromptTidy } from "./mergedTidy";
 import { usageBadge } from "./cellDisplay";
-import { applyActivityPush, cellHeaderText } from "./cellActivity";
+import { applyActivityPush, cellHeaderText, type ActivityPush } from "./cellActivity";
 import { MEMO_MAX_LENGTH, normalizeMemo } from "../../common/sessionMemo";
 import { preferredLaunchDir, shouldSyncLaunchDir } from "./launchDir";
 import CellLaunchForm from "./CellLaunchForm.vue";
 import GitBranchChip from "./GitBranchChip.vue";
 import WorkItemChip from "./WorkItemChip.vue";
 import CellTidyPrompt from "./CellTidyPrompt.vue";
+import WorkCommentNotice from "./WorkCommentNotice.vue";
 import ModelContextBadge from "./ModelContextBadge.vue";
 import type { LaunchChoice } from "./wsUrl";
 import type { RunCommand } from "./runCommand";
 import { useHeaderButtons } from "../composables/useHeaderButtons";
+import { filesGotoIndex } from "../composables/useFilesView";
+import { openTerminalAt } from "../composables/useNewTerminal";
 import TimelineOverlay from "./TimelineOverlay.vue";
 import CopyCodeBlock from "./CopyCodeBlock.vue";
 import CockpitHeader from "./CockpitHeader.vue";
@@ -40,20 +46,26 @@ import { shouldZoomOnHeaderClick } from "./cellHeaderZoom";
 import {
   CELL_ACTIONS,
   CELL_BTN,
+  CELL_CHIP_BTN,
+  CELL_CHIP_ICON,
   CELL_DIR_PATH,
+  CELL_MENU_ITEM,
   CELL_DOT,
-  CELL_DOT_IDLE,
-  CELL_DOT_WORKING,
   CELL_HEADER_MAIN,
   CELL_HEADER_ZOOMABLE,
   CELL_INNER,
   CELL_TERM,
   DIR_TRUNCATE_FRONT,
 } from "./cellChromeClasses";
+import { CELL_STATUS, DOT_STATUS, HEADER_STATUS } from "./cellStatusClasses";
 import { handoffTargets, pullLastTurn, type HandoffTarget } from "../composables/useHandoff";
 import { runOneExchange, liveCrossTalkDeps } from "../composables/useCrossTalk";
 import { outcomeMessage } from "../composables/exchangeRules";
 import { worktreeFailureMessage } from "./cellChromeRules";
+import { isRecord } from "../../common/isRecord";
+import { isUnknownArray } from "../../common/isUnknownArray";
+import { jsonBody } from "../jsonBody";
+import { fetchWithTimeout, SLOW_COMMAND_TIMEOUT_MS } from "../utils/fetchWithTimeout";
 
 // How long a handoff failure stays on the cell before it clears itself.
 const ASK_MSG_MS = 4000;
@@ -140,9 +152,15 @@ const cwd = ref<string | null>(props.initialCwd ?? props.defaultCwd);
 // Per-directory overrides (<cwd>/.mulmoterminal.json): pins this cell's terminal
 // palette and shows a project badge. Re-fetched when the effective cwd changes.
 const { config: dirConfig, cellStyle, headerStyle } = useCellChrome(cwd);
+// Whether this cell IS the workspace, for the header badge. Same lexical comparison the launcher
+// chip makes (`launchChips`), so a cell launched from the WORKSPACE chip is badged WORKSPACE.
+const isWorkspace = computed(() => isSameDirPath(cwd.value, props.defaultCwd));
 // What this cell is working on (PR + issue), for the `work` chip. Same directory, same kind of
 // poll as the git status below.
-const { item: workItem, refresh: refreshWorkItem } = useWorkItem(cwd);
+const { item: workItem, refresh: refreshWorkItem, commentFailure } = useWorkItem(cwd);
+// "issueWorkComments is on and the issue is NOT being updated" (#1369). Outside the chip loop for
+// the same reason as the tidy prompt below: it reports on a setting, not on the work.
+const workCommentNotice = computed(() => visibleWorkCommentFailure(commentFailure.value));
 // Live git status (branch/dirty/ahead·behind) for the header chip. `refreshGit`
 // is called alongside loadDiff() so a finished turn's changes show immediately.
 const { status: gitStatus, refresh: refreshGit } = useGitStatus(cwd);
@@ -248,7 +266,7 @@ let latestSeed = 0;
 // flight at once. Neither path bumps latestSeed for badges, so a stale read resolving last
 // would clobber the newer numbers. This token makes the newest badge fetch win. (#620.)
 let latestBadgeReq = 0;
-function applyActivity(d: ActivityMsg) {
+function applyActivity(d: ActivityPush) {
   activityGen++;
   const next = applyActivityPush(
     {
@@ -277,15 +295,29 @@ function applyActivity(d: ActivityMsg) {
 // the answer would leak the old session's state into the new one.
 //
 // The cell's dir goes along so the server can read the transcript and report the session's
-// most recent prompt rather than the bare id after a resume.
-type SessionDetail = ActivityMsg & { usage?: unknown; context?: unknown };
+// most recent prompt rather than the bare id after a resume. It is read as a plain record: the
+// endpoint answers the session's own fields and sends no `id`, so it is not an ActivityMsg.
 
-async function fetchSessionDetail(id: string): Promise<SessionDetail | null> {
+// Reads the activity fields off an untrusted body while KEEPING the absent/null distinction
+// applyActivityPush is built on: a key the server did not send must stay absent ("keep what is
+// shown"), which is a different instruction from an explicit null ("there is none now").
+function activityPushOf(d: Record<string, unknown>): ActivityPush {
+  const push: ActivityPush = {};
+  if (typeof d.working === "boolean") push.working = d.working;
+  if (typeof d.waiting === "boolean") push.waiting = d.waiting;
+  for (const key of ["event", "lastPrompt", "aiTitle", "memo"] as const) {
+    const value = d[key];
+    if (value === null || typeof value === "string") push[key] = value;
+  }
+  return push;
+}
+
+async function fetchSessionDetail(id: string): Promise<Record<string, unknown> | null> {
   try {
     const q = cwd.value ? `?cwd=${encodeURIComponent(cwd.value)}` : "";
-    const res = await fetch(`/api/session/${id}${q}`);
+    const res = await fetchWithTimeout(`/api/session/${id}${q}`);
     if (!res.ok) return null;
-    const data = await res.json();
+    const data = await jsonBody(res);
     return id === sessionId.value ? data : null;
   } catch {
     return null;
@@ -296,7 +328,7 @@ async function fetchSessionDetail(id: string): Promise<SessionDetail | null> {
 // (EMPTY_USAGE / EMPTY_CONTEXT when it has nothing to report), so an unrenderable one means
 // something is actually broken — and a badge showing the previous turn's numbers as if they
 // were current is the failure the guards exist to stop.
-function applyBadges(data: SessionDetail) {
+function applyBadges(data: Record<string, unknown>) {
   usage.value = isCellUsage(data.usage) ? data.usage : null;
   context.value = isCellContext(data.context) ? data.context : null;
 }
@@ -342,7 +374,7 @@ async function loadInitial(id: string) {
   // A live push landed while we were fetching: it is newer than this snapshot, so keep it
   // and don't let a stale seed put the cell back to idle. Badges have no such push, so they
   // always refresh — unless a newer badge fetch has since superseded this one.
-  if (activityGen === genBeforeFetch) applyActivity(data);
+  if (activityGen === genBeforeFetch) applyActivity(activityPushOf(data));
   if (badgeReq === latestBadgeReq) applyBadges(data);
 }
 
@@ -400,11 +432,11 @@ onMounted(() => {
   // on reconnect re-seed from the authoritative snapshot (guarded by activityGen), or a turn
   // that started during the outage stays showing idle until it ends.
   offReconnect = onReconnect(() => {
-    if (sessionId.value) loadInitial(sessionId.value);
+    if (sessionId.value) void loadInitial(sessionId.value);
   });
   if (sessionId.value) {
-    loadInitial(sessionId.value);
-    loadDiff(); // a resumed worktree cell shows its diff on restore
+    void loadInitial(sessionId.value);
+    void loadDiff(); // a resumed worktree cell shows its diff on restore
   }
 });
 onUnmounted(() => {
@@ -428,7 +460,7 @@ function launchIn(dir: string | null) {
   launched.value = true;
   emit("agent", agent.value); // let the grid persist which agent this cell launched
   recordNextCwd = true;
-  loadDiff(); // no-op for a non-worktree dir
+  void loadDiff(); // no-op for a non-worktree dir
 }
 // The provider/model picked in the launch form, for the session this cell is about to
 // start. Null — the usual case — means the directory's own default decides. Kept for the
@@ -459,7 +491,7 @@ function resumeSession({ id, cwd: dir, agent: resumeAgent }: { id: string; cwd: 
   connectKey.value++;
   launched.value = true;
   recordNextCwd = false; // resuming isn't a fresh launch — don't record its cwd
-  loadDiff(); // an already-idle worktree session shows its badge right away
+  void loadDiff(); // an already-idle worktree session shows its badge right away
 }
 
 // Reveal this cell's working directory in the OS file manager. The browser can't
@@ -467,7 +499,7 @@ function resumeSession({ id, cwd: dir, agent: resumeAgent }: { id: string; cwd: 
 async function openDir() {
   if (!cwd.value) return;
   try {
-    await fetch("/api/open-dir", {
+    await fetchWithTimeout("/api/open-dir", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ path: cwd.value }),
@@ -495,27 +527,31 @@ function onServerCwd(c: string) {
 // repo top page / Issues / Pull requests. Refreshed whenever the effective cwd
 // changes (launch, server-confirmed cwd, restore).
 const githubUrl = ref<string | null>(null);
-const ghMenuOpen = ref(false);
-const ghWrap = useTemplateRef<HTMLElement>("ghWrap");
+const pathMenuOpen = ref(false);
+const pathWrap = useTemplateRef<HTMLElement>("pathWrap");
 let githubReq = 0; // request token: drop out-of-order responses (cwd can change fast)
 
 async function refreshGithubUrl() {
-  ghMenuOpen.value = false;
+  pathMenuOpen.value = false;
   const reqId = ++githubReq;
   if (!cwd.value) {
     githubUrl.value = null;
     return;
   }
   try {
-    const res = await fetch("/api/git-remote", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ path: cwd.value }),
-    });
+    const res = await fetchWithTimeout(
+      "/api/git-remote",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ path: cwd.value }),
+      },
+      SLOW_COMMAND_TIMEOUT_MS,
+    );
     if (reqId !== githubReq) return; // a newer cwd superseded this lookup
-    const data = res.ok ? await res.json() : null;
+    const data = res.ok ? await jsonBody(res) : {};
     if (reqId !== githubReq) return; // re-check after awaiting the body
-    githubUrl.value = data && typeof data.githubUrl === "string" ? data.githubUrl : null;
+    githubUrl.value = typeof data.githubUrl === "string" ? data.githubUrl : null;
   } catch {
     if (reqId === githubReq) githubUrl.value = null; // best-effort — the link just won't appear
   }
@@ -526,17 +562,48 @@ watch(cwd, refreshGithubUrl, { immediate: true });
 function openGithub(suffix: string) {
   if (!githubUrl.value) return;
   window.open(githubUrl.value + suffix, "_blank", "noopener,noreferrer");
-  ghMenuOpen.value = false;
 }
 
-function onGhOutside(e: MouseEvent) {
-  if (ghWrap.value && !ghWrap.value.contains(e.target as Node)) ghMenuOpen.value = false;
+// The in-app file browser and a new terminal in this directory — the `files` and `terminal` buttons
+// that used to sit on this row. Called through the same helpers the header buttons dispatch to
+// (useHeaderAction), rather than re-implemented, so the menu and a user's own configured button for
+// the same thing cannot drift apart. `afterSlotKey` places the new terminal next to this cell, which
+// is the whole point of "here"; it is this cell's durable-connection slot key (see persist-key).
+function browseFiles() {
+  filesGotoIndex(cwd.value);
 }
-watch(ghMenuOpen, (open) => {
-  if (open) document.addEventListener("mousedown", onGhOutside);
-  else document.removeEventListener("mousedown", onGhOutside);
+function newTerminalHere() {
+  if (cwd.value) openTerminalAt(cwd.value, `cell-${props.uid}`);
+}
+
+// The shared menu row plus this menu's own layout: every item leads with an icon, so the labels
+// line up and the four navigations are told apart by glyph the way they were as buttons.
+const PATH_MENU_ITEM = `inline-flex items-center gap-2 whitespace-nowrap ${CELL_MENU_ITEM}`;
+
+// Closing puts focus back where it came from. The trigger is the only thing in this wrapper that
+// survives the close, and leaving focus on a removed menu item drops the keyboard to the top of the
+// document — which is why Escape has to do more than flip the flag.
+const pathTrigger = useTemplateRef<HTMLElement>("pathTrigger");
+function closePathMenu() {
+  if (!pathMenuOpen.value) return;
+  pathMenuOpen.value = false;
+  void nextTick(() => pathTrigger.value?.focus());
+}
+
+// Every item closes the menu, so no item has to remember to.
+function pathMenuAction(run: () => void) {
+  closePathMenu();
+  run();
+}
+
+function onPathOutside(e: MouseEvent) {
+  if (pathWrap.value && !(e.target instanceof Node && pathWrap.value.contains(e.target))) pathMenuOpen.value = false;
+}
+watch(pathMenuOpen, (open) => {
+  if (open) document.addEventListener("mousedown", onPathOutside);
+  else document.removeEventListener("mousedown", onPathOutside);
 });
-onUnmounted(() => document.removeEventListener("mousedown", onGhOutside));
+onUnmounted(() => document.removeEventListener("mousedown", onPathOutside));
 
 // "Bring another cell's last turn here": pull a sibling terminal's last completed
 // exchange into THIS cell's input box, so the two agents can be pointed at each other's
@@ -593,7 +660,7 @@ async function exchangeWith(target: HandoffTarget) {
 }
 
 function onAskOutside(e: MouseEvent) {
-  if (askWrap.value && !askWrap.value.contains(e.target as Node)) askMenuOpen.value = false;
+  if (askWrap.value && !(e.target instanceof Node && askWrap.value.contains(e.target))) askMenuOpen.value = false;
 }
 watch(askMenuOpen, (open) => {
   if (open) document.addEventListener("mousedown", onAskOutside);
@@ -613,7 +680,7 @@ function teardown() {
   termRef.value?.terminate();
   // Reap on the server over HTTP too — the WS `terminate` only reaches the server while
   // the socket is open, so a disconnected cell's close button would otherwise leave its tmux alive.
-  if (id) fetch(`/api/session/${encodeURIComponent(id)}/terminate`, { method: "POST" }).catch(() => {});
+  if (id) fetchWithTimeout(`/api/session/${encodeURIComponent(id)}/terminate`, { method: "POST" }).catch(() => {});
   launched.value = false;
   recordNextCwd = false; // drop any pending fresh-launch record from a torn-down session
   sessionId.value = null;
@@ -685,11 +752,15 @@ async function removeAndClose() {
   closeError.value = null;
   termRef.value?.terminate(); // free the worktree dir first (Windows locks a process's cwd)
   try {
-    const res = await fetch("/api/worktrees/remove", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ repoDir: dir, path: dir, deleteBranch: true, force: true }),
-    });
+    const res = await fetchWithTimeout(
+      "/api/worktrees/remove",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ repoDir: dir, path: dir, deleteBranch: true, force: true }),
+      },
+      SLOW_COMMAND_TIMEOUT_MS,
+    );
     if (res.ok) return teardown();
     closeError.value = "Couldn't remove the worktree — it may need manual cleanup.";
   } catch {
@@ -713,7 +784,7 @@ onUnmounted(() => document.removeEventListener("keydown", onCloseKey));
 function onSession(id: string) {
   sessionId.value = id;
   emit("session", id);
-  loadInitial(id);
+  void loadInitial(id);
 }
 
 // ~-anchored, front-truncated path for the header (keeps the tail). For a managed
@@ -730,27 +801,8 @@ const status = computed<AttentionStatus>(() => activityStatus(working.value, wai
 const STATUS_CLASS = { blocked: "is-blocked", done: "is-done", working: "is-working", idle: "is-idle" } as const;
 const STATUS_LABEL = { blocked: "Needs input", done: "Done — review", working: "Working…", idle: "Idle" } as const;
 const statusClass = computed(() => STATUS_CLASS[status.value]);
-// The is-* class stays on the element as a state marker (the specs assert it); these
-// carry the styling that used to live in the .cell.is-* / .cell-header.is-* rules.
-// The header colour rides along in the non-blocked branches so two text utilities
-// never race for the same element.
-const HEADER_FG = "text-[var(--cell-header-fg,inherit)]";
-const CELL_STATUS = {
-  // Idle keeps the per-dir --cell-border override; the active states deliberately replace it.
-  idle: "border-[var(--cell-border,var(--border))]",
-  working: "border-accent",
-  done: "border-accent shadow-[0_0_0_2px_color-mix(in_srgb,var(--accent)_40%,transparent)]",
-  blocked: "border-amber shadow-[0_0_0_2px_color-mix(in_srgb,var(--amber)_55%,transparent)]",
-} as const;
-const HEADER_STATUS = {
-  idle: `bg-[var(--cell-header-bg,var(--bg-panel))] border-b-border ${HEADER_FG}`,
-  working: `bg-selected border-b-accent ${HEADER_FG}`,
-  done: `bg-selected border-b-accent ${HEADER_FG}`,
-  blocked: "bg-[var(--warn-bg-subtle)] border-b-amber text-warn",
-} as const;
-// Every state names its own colour: a base tint plus a status tint would be two `bg-*`
-// utilities on one element, and Tailwind's output order — not this map — would pick.
-const DOT_STATUS = { idle: CELL_DOT_IDLE, working: CELL_DOT_WORKING, done: "bg-accent", blocked: "bg-amber" } as const;
+// The is-* class stays on the element as a state marker (the specs assert it); the styling that
+// used to live in the .cell.is-* / .cell-header.is-* rules is in cellStatusClasses.ts.
 const cellStatusClass = computed(() => CELL_STATUS[status.value]);
 const headerStatusClass = computed(() => HEADER_STATUS[status.value]);
 // Set aside, and not stopped waiting for an answer (see cellParked.ts). Enlarging it does NOT
@@ -806,6 +858,33 @@ function cancelMemoEdit() {
   memoEditing.value = false;
 }
 
+// Enter here has to mean "confirm the IME candidate" while a conversion is open, or a note typed in
+// Japanese is saved half-converted and the box closes on the first press with no way back (#1353).
+const memoIme = useImeAwareEnter(() => void saveMemo());
+
+// One plain `keydown` rather than Vue's `.enter` / `.escape` modifiers: the composable reads
+// `event.key` itself, which is what the modifiers do — but binding them here would put the
+// modifier's own `.prevent` ahead of the IME decision, and the whole point is that the decision
+// comes first.
+function onMemoKeydown(event: KeyboardEvent) {
+  if (event.key === "Escape") {
+    // Escape mid-composition drops the candidate. Closing the editor on it would throw away the
+    // sentence the user is still writing, which is worse than the Enter case it mirrors.
+    if (memoIme.isImeConfirmation(event)) return;
+    event.preventDefault();
+    cancelMemoEdit();
+    return;
+  }
+  memoIme.onKeydown(event);
+}
+
+// Blur still saves — clicking away is the ordinary way to leave a text field. The composable's own
+// blur only clears its composition state, so a stale "mid-composition" flag cannot outlive the box.
+function onMemoBlur() {
+  memoIme.onBlur();
+  void saveMemo();
+}
+
 // Save, then let the server's answer win: it normalizes and caps, so what is shown here after a
 // save is what a reload will show. Blur saves too — closing the box by clicking away is the
 // ordinary way to leave a text field, and losing the sentence to it would be the bug.
@@ -819,14 +898,14 @@ async function saveMemo() {
   const previous = memo.value;
   memo.value = text || null;
   try {
-    const res = await fetch(`/api/session/${encodeURIComponent(id)}/memo`, {
+    const res = await fetchWithTimeout(`/api/session/${encodeURIComponent(id)}/memo`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text }),
     });
     if (!res.ok) throw new Error(`memo save failed: ${res.status}`);
     const data: unknown = await res.json();
-    const saved = typeof data === "object" && data !== null && "memo" in data ? (data as { memo: unknown }).memo : null;
+    const saved = isRecord(data) ? data.memo : null;
     if (sessionId.value === id && typeof saved === "string") memo.value = saved || null;
   } catch {
     // Put back what the server still has, rather than leaving a note on screen that no other
@@ -857,6 +936,18 @@ interface WorktreeDiffData {
   patch: string;
   truncated: boolean;
 }
+// The diff arrives off /api/worktrees/diff; the badge and the overlay read every field, so a
+// response that is missing one is treated as "no diff" rather than rendered with holes.
+const isWorktreeDiffData = (value: unknown): value is WorktreeDiffData =>
+  isRecord(value) &&
+  typeof value.isWorktree === "boolean" &&
+  (value.base === null || typeof value.base === "string") &&
+  typeof value.ahead === "number" &&
+  typeof value.dirty === "number" &&
+  isUnknownArray(value.files) &&
+  typeof value.patch === "string" &&
+  typeof value.truncated === "boolean";
+
 const diff = ref<WorktreeDiffData | null>(null);
 const diffOpen = ref(false);
 const isWorktreeCell = computed(() => worktreeLabel(cwd.value) !== null);
@@ -872,11 +963,11 @@ async function loadDiff() {
   }
   const reqId = ++diffReq;
   try {
-    const res = await fetch(`/api/worktrees/diff?cwd=${encodeURIComponent(cwd.value)}`);
+    const res = await fetchWithTimeout(`/api/worktrees/diff?cwd=${encodeURIComponent(cwd.value)}`, undefined, SLOW_COMMAND_TIMEOUT_MS);
     if (reqId !== diffReq) return;
-    const data = res.ok ? await res.json() : null;
+    const data = res.ok ? await jsonBody(res) : {};
     if (reqId !== diffReq) return;
-    diff.value = data && data.isWorktree ? data : null;
+    diff.value = isWorktreeDiffData(data) && data.isWorktree ? data : null;
   } catch {
     if (reqId === diffReq) diff.value = null;
   }
@@ -885,7 +976,7 @@ async function loadDiff() {
 function openDiff() {
   diffOpen.value = true;
   prMsg.value = null;
-  loadDiff(); // refresh on open
+  void loadDiff(); // refresh on open
 }
 
 // Outward-facing actions (push / open PR) for the worktree's branch. `prBusy`
@@ -902,21 +993,30 @@ function commitViaClaude() {
   prMsg.value = delivered ? "Asked Claude to commit…" : "Couldn't reach the session";
 }
 
+// The refusal reason as the message table can use it. The response is untrusted JSON, so a
+// non-string `reason` reads as absent and the caller shows the generic "Failed".
+const reasonOf = (data: Record<string, unknown>): string | null => (typeof data.reason === "string" ? data.reason : null);
+
 async function worktreeAction(endpoint: "push" | "pr"): Promise<Record<string, unknown> | null> {
   if (!cwd.value || prBusy.value) return null;
   prBusy.value = true;
   prMsg.value = endpoint === "push" ? "Pushing…" : "Creating PR…";
   try {
-    const res = await fetch(`/api/worktrees/${endpoint}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ cwd: cwd.value }),
-    });
-    const data = await res.json().catch(() => null);
-    // A non-JSON / empty-body response (e.g. a 403 from the origin guard) must not
-    // leave the UI stuck on the optimistic "Pushing…" text.
-    if (!data) prMsg.value = res.status === 403 ? "Not allowed (origin)" : "Request failed";
-    return data;
+    const res = await fetchWithTimeout(
+      `/api/worktrees/${endpoint}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ cwd: cwd.value }),
+      },
+      SLOW_COMMAND_TIMEOUT_MS,
+    );
+    // jsonBody answers {} for a non-JSON / empty body (e.g. a 403 from the origin guard); an
+    // empty answer must not leave the UI stuck on the optimistic "Pushing…" text.
+    const data = await jsonBody(res);
+    const empty = Object.keys(data).length === 0;
+    if (empty) prMsg.value = res.status === 403 ? "Not allowed (origin)" : "Request failed";
+    return empty ? null : data;
   } catch {
     prMsg.value = endpoint === "push" ? "Push failed" : "PR failed";
     return null;
@@ -927,7 +1027,7 @@ async function worktreeAction(endpoint: "push" | "pr"): Promise<Record<string, u
 
 async function pushBranch() {
   const data = await worktreeAction("push");
-  if (data) prMsg.value = data.ok ? `Pushed ${data.branch}` : worktreeFailureMessage(data.reason as string);
+  if (data) prMsg.value = data.ok ? `Pushed ${data.branch}` : worktreeFailureMessage(reasonOf(data));
 }
 
 async function openPR() {
@@ -935,9 +1035,9 @@ async function openPR() {
   if (!data) return;
   if (data.ok && typeof data.url === "string") {
     window.open(data.url, "_blank", "noopener,noreferrer");
-    prMsg.value = data.via === "gh" ? "PR created" : "Opened PR page";
+    prMsg.value = data.via === "cli" ? "PR created" : "Opened PR page";
   } else {
-    prMsg.value = worktreeFailureMessage(data.reason as string);
+    prMsg.value = worktreeFailureMessage(reasonOf(data));
   }
 }
 
@@ -946,9 +1046,9 @@ async function openPR() {
 // turn's token usage is final.
 watch(working, (now, prev) => {
   if (prev && !now) {
-    loadDiff();
-    refreshUsage();
-    refreshGit(); // branch/dirty may have changed (commit, checkout, edits)
+    void loadDiff();
+    void refreshUsage();
+    void refreshGit(); // branch/dirty may have changed (commit, checkout, edits)
     void refreshWorkItem(); // a turn that pushed or opened a PR changes what this cell is on
   }
 });
@@ -1002,8 +1102,16 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
             <CellChromeButtons v-bind="chromeProps" :parked="parked" v-on="chromeEvents" @toggle-park="togglePark" />
           </span>
         </CockpitHeader>
-        <!-- Row 1 — INFO only (normal grid / expanded): dir + git + model/token + what it's doing.
-           Every icon BUTTON lives on row 2 (the embedded terminal's header, via its slot). -->
+        <!-- Row 1 — the CELL (normal grid / expanded): what it is (dir + git + model/token + what
+           it's doing) and what you can do to the cell itself (reorder / expand / park / close).
+           Row 2 — the embedded terminal's header, via its slot — is the SESSION: everything that
+           acts on the agent running inside. The split is scope, not info-vs-action: row 2 is gone
+           entirely on a filmstrip thumbnail, so anything a cell needs whether or not it holds a
+           live session has to be here.
+           Row 1 has two design languages, both deliberate: CELL_BTN for the cell controls pinned
+           right, and CELL_CHIP_BTN for the pressable chips in the info track (canvas unread, diff,
+           the note pencil) — those are sized like the chips they sit among so a cell with a note
+           is exactly as tall as one without. -->
         <div
           v-else
           class="cell-header flex min-h-[34px] flex-none flex-wrap items-center gap-x-2 gap-y-1 border-b px-2 py-0.5"
@@ -1017,29 +1125,15 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
              stay reachable no matter how much a dir's config crams in here. -->
           <div data-testid="cell-header-main" :class="CELL_HEADER_MAIN">
             <span class="cell-dot" :class="[CELL_DOT, statusClass, dotStatusClass, dotMissedClass]" :title="statusLabel" />
-            <!-- Normal grid: the dir is a button that opens it. As a filmstrip thumbnail the
-               header's job is to zoom (switch to this terminal), so the dir is inert text
-               and a click on it falls through to the header's zoom gesture. -->
-            <button
-              v-if="headerDir && !filmstrip"
-              type="button"
-              class="cell-dir flex-initial min-w-0 sm:min-w-[16ch] max-w-[60%] cursor-pointer truncate border-none bg-transparent p-0 text-left font-mono text-[11px] text-[var(--cell-header-fg,var(--text-dim))] [direction:rtl] hover:text-muted hover:underline"
-              :title="cwd ? `Open ${cwd}` : ''"
-              @click="openDir"
-            >
-              <span class="cell-dir-path [unicode-bidi:plaintext]">{{ headerDir }}</span>
-            </button>
-            <span
-              v-else-if="headerDir"
-              class="cell-dir flex-initial min-w-0 sm:min-w-[16ch] max-w-[60%] cursor-pointer truncate border-none bg-transparent p-0 text-left font-mono text-[11px] text-[var(--cell-header-fg,var(--text-dim))] [direction:rtl] hover:text-muted hover:underline"
-              :title="cwd ?? ''"
-            >
-              <span class="cell-dir-path [unicode-bidi:plaintext]">{{ headerDir }}</span>
-            </span>
+            <!-- The path is NOT here any more — it is the lead item on row 2 (see the
+               `header-lead` template below). It had `min-w-[16ch]`, a floor of roughly a third of
+               this track, and once it hit that floor the only thing left that could shrink was the
+               note. This row is what you scan across nine cells; the path is what you read about
+               the one in front of you, and row 2 is 34px away, not hidden. -->
             <!-- Info (dir badge / git / diff / model / tokens) is dropped on a filmstrip
                thumbnail, leaving only dir + what it's doing + a zoom button. -->
             <template v-if="!filmstrip">
-              <DirBadge :name="dirConfig.name" :color="dirConfig.badgeColor" />
+              <DirBadge :name="dirConfig.name" :color="dirConfig.badgeColor" :workspace="isWorkspace" />
               <!-- Unread Canvas output. Same chip vocabulary as the branch / context / token
                    chips beside it, deliberately: this is one more thing to triage at a glance,
                    not a new kind of alert. Clicking expands the cell with the pane open. -->
@@ -1047,16 +1141,18 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
                 v-if="unseenCanvas > 0"
                 type="button"
                 data-testid="cell-canvas-chip"
-                class="inline-flex flex-none cursor-pointer items-center gap-1 rounded-[10px] border border-border bg-elevated px-[7px] py-px font-mono text-[11px] hover:bg-hover"
+                class="gap-1"
+                :class="CELL_CHIP_BTN"
                 :title="`${unseenCanvas} unread from the agent — open the canvas`"
                 :aria-label="`${unseenCanvas} unread canvas results`"
                 @click.stop="emit('open-canvas')"
               >
-                <span class="material-symbols-outlined text-[13px]" aria-hidden="true">draw</span>{{ unseenCanvas }}
+                <span :class="CELL_CHIP_ICON" aria-hidden="true">draw</span>{{ unseenCanvas }}
               </button>
               <!-- Outside the chip loop on purpose: a prompt rather than a configurable chip, so it
                    appears whether or not the user kept the `work` chip. -->
               <CellTidyPrompt v-if="promptTidy && workItem.pr !== null" :pr="workItem.pr" @tidy="close()" @dismiss="dismissTidy()" />
+              <WorkCommentNotice v-if="workCommentNotice" :failure="workCommentNotice" @dismiss="dismissWorkCommentFailure(workCommentNotice)" />
               <template v-for="chip in cellChips" :key="chip.key">
                 <GitBranchChip v-if="chip.builtin === 'git'" :status="gitStatus" :hide-dirty="isWorktreeCell" />
                 <WorkItemChip v-else-if="chip.builtin === 'work'" :item="workItem" />
@@ -1064,7 +1160,8 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
                   v-else-if="chip.builtin === 'diff' && showDiffBadge && diff"
                   type="button"
                   data-testid="cell-wt-badge"
-                  class="inline-flex flex-none cursor-pointer items-center gap-1.5 rounded-[10px] border border-border bg-elevated px-[7px] py-px font-mono text-[11px] hover:bg-hover"
+                  class="gap-1.5"
+                  :class="CELL_CHIP_BTN"
                   :title="`View changes vs ${diff.base ?? 'base'}`"
                   @click="openDiff"
                 >
@@ -1108,9 +1205,10 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
               aria-label="Note for this session"
               spellcheck="false"
               @click.stop
-              @keydown.enter.prevent="saveMemo"
-              @keydown.escape.prevent="cancelMemoEdit"
-              @blur="saveMemo"
+              @keydown="onMemoKeydown"
+              @compositionstart="memoIme.onCompositionStart"
+              @compositionend="memoIme.onCompositionEnd"
+              @blur="onMemoBlur"
             />
             <span
               v-else
@@ -1119,25 +1217,37 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
               :title="headerTitleAttr"
               >{{ headerText }}</span
             >
-            <!-- Sized like the chips beside it rather than like a header action, so a cell with
-               a note is exactly as tall as one without. -->
+            <!-- One of the info track's pressable chips (CELL_CHIP_BTN), like the canvas and diff
+               badges above: sized like the chips beside it rather than like a header action, so a
+               cell with a note is exactly as tall as one without. The ink is the one thing it does
+               NOT share — accent once a note exists, so the pencil says whether there is one to
+               read when the note itself is scrolled out of a narrow header. -->
             <button
               v-if="sessionId && !memoEditing"
               type="button"
               data-testid="cell-memo-edit"
-              class="inline-flex flex-none cursor-pointer items-center rounded-[10px] px-1 py-px hover:bg-hover"
-              :class="memo ? 'text-accent' : 'text-dim'"
+              :class="[CELL_CHIP_BTN, memo ? 'text-accent' : 'text-dim']"
               :title="memo ? 'Edit this session\'s note' : 'Add a note to this session'"
               :aria-label="memo ? 'Edit this session\'s note' : 'Add a note to this session'"
               @click.stop="startMemoEdit"
             >
-              <span class="material-symbols-outlined text-[14px]" aria-hidden="true">edit_note</span>
+              <span :class="CELL_CHIP_ICON" aria-hidden="true">edit_note</span>
             </button>
           </div>
-          <!-- Expand/restore + close stay on row 1 (the info row) and OUTSIDE the info
-             track, so they're always pinned top-right. `.stop` so they don't trigger the
-             header's click-to-zoom. -->
+          <!-- The cell's own controls — reorder, expand/restore, park, close — stay on row 1 and
+             OUTSIDE the info track, so they're always pinned top-right. They act on the CELL
+             (where it sits in the grid, how big it is, whether it lives), not on the session
+             inside it, which is what separates them from row 2's actions; that is also why they
+             survive when there is no session. Reorder before the chrome buttons, which is the
+             order the command and launcher cells already use (CellShell). No `.stop`:
+             shouldZoomOnHeaderClick already ignores a click inside a button. -->
           <span class="cell-actions" :class="CELL_ACTIONS">
+            <button v-if="reorderable" class="cell-btn" :class="CELL_BTN" title="Move left" aria-label="Move terminal left" @click="emit('move', -1)">
+              <span class="material-symbols-outlined" aria-hidden="true">chevron_left</span>
+            </button>
+            <button v-if="reorderable" class="cell-btn" :class="CELL_BTN" title="Move right" aria-label="Move terminal right" @click="emit('move', 1)">
+              <span class="material-symbols-outlined" aria-hidden="true">chevron_right</span>
+            </button>
             <CellChromeButtons v-bind="chromeProps" :parked="parked" v-on="chromeEvents" @toggle-park="togglePark" />
           </span>
         </div>
@@ -1162,58 +1272,76 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
           @cwd="onServerCwd"
           @run="(cmd) => emit('runSpare', cmd)"
         >
-          <!-- Row 2 — the cell's icon actions, gathered onto the terminal's header row. -->
-          <template #header-actions>
-            <span v-if="githubUrl" ref="ghWrap" class="relative inline-flex flex-none">
+          <!-- Row 2 — actions on the SESSION, gathered onto the terminal's header row beside the
+             ones Terminal.vue puts there itself (Run, Skills, the configured header buttons,
+             voice). Anything that acts on the cell rather than on what is running inside it
+             belongs on row 1 with expand/close. -->
+          <!-- Row 2's LEAD — where this cell IS, and everything you might want to do with that
+             place. It replaces four always-visible icons (`reveal` / `files` / `terminal` / `gh`,
+             ex-DEFAULT_BUTTONS) and the GitHub button that stood beside them: all of them answered
+             "do something with this directory", the question the path itself asks, and `reveal` was
+             literally the path's own click. Occasional navigations do not each deserve a permanent
+             icon in a tiled cell. Reveal stays first so the one gesture that already existed —
+             click the path, get the folder — is still the shortest. -->
+          <template #header-lead>
+            <!-- Escape is bound on the WRAPPER, not on the menu. Opening the menu leaves focus on
+               the trigger button, so a handler on the menu itself only fires if something inside it
+               happens to be focused — which, in the ordinary flow of clicking the path and changing
+               your mind, is nothing. Keydown bubbles from the trigger to here, so this closes it
+               from wherever focus actually is. Focus returns to the trigger afterwards, or Escape
+               would strand the keyboard on a button that no longer exists. -->
+            <span ref="pathWrap" class="relative flex min-w-0 flex-auto items-center" @keydown.escape="closePathMenu">
               <button
+                v-if="headerDir"
+                ref="pathTrigger"
                 type="button"
-                data-testid="cell-gh"
-                class="inline-flex h-5 w-5 cursor-pointer items-center justify-center rounded-[4px] border-none bg-transparent p-0 text-dim hover:bg-hover hover:text-fg"
-                title="Open on GitHub"
-                aria-label="Open on GitHub"
+                data-testid="cell-dir"
+                class="cell-dir flex min-w-0 cursor-pointer items-center gap-0.5 border-none bg-transparent p-0 font-mono text-[11px] text-[var(--cell-header-fg,var(--text-dim))] hover:text-muted"
+                :title="cwd ?? ''"
                 aria-haspopup="true"
-                :aria-expanded="ghMenuOpen"
-                @click="ghMenuOpen = !ghMenuOpen"
+                :aria-expanded="pathMenuOpen"
+                @click="pathMenuOpen = !pathMenuOpen"
               >
-                <svg class="block h-[14px] w-[14px]" viewBox="0 0 16 16" aria-hidden="true">
-                  <path
-                    fill-rule="evenodd"
-                    d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82A7.6 7.6 0 0 1 8 4.6c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"
-                  />
-                </svg>
+                <span class="min-w-0" :class="DIR_TRUNCATE_FRONT"
+                  ><span class="cell-dir-path" :class="CELL_DIR_PATH">{{ headerDir }}</span></span
+                >
+                <!-- The path never showed that it was pressable — it opened a folder on click with
+                   nothing but a hover underline to say so. Now that a click costs a menu, the
+                   caret has to be there. -->
+                <span class="material-symbols-outlined flex-none text-[14px]" aria-hidden="true">arrow_drop_down</span>
               </button>
               <div
-                v-if="ghMenuOpen"
-                data-testid="cell-gh-menu"
-                class="absolute left-0 top-full z-20 mt-1 flex min-w-[132px] flex-col rounded-md border border-border bg-panel p-1 shadow-[0_6px_18px_rgba(0,0,0,0.35)]"
-                @keydown.escape="ghMenuOpen = false"
+                v-if="pathMenuOpen"
+                data-testid="cell-path-menu"
+                class="absolute left-0 top-full z-20 mt-1 flex min-w-[190px] flex-col rounded-md border border-border bg-panel p-1 shadow-[0_6px_18px_rgba(0,0,0,0.35)]"
               >
-                <button
-                  type="button"
-                  data-testid="cell-gh-item"
-                  class="cursor-pointer rounded-[4px] border-none bg-transparent px-2 py-1.5 text-left font-sans text-[12px] text-secondary hover:bg-hover hover:text-fg"
-                  @click="openGithub('')"
-                >
-                  Repository
+                <button type="button" data-testid="cell-path-item" :class="PATH_MENU_ITEM" @click="pathMenuAction(openDir)">
+                  <span class="material-symbols-outlined text-[15px]" aria-hidden="true">folder</span> Reveal in the file manager
                 </button>
-                <button
-                  type="button"
-                  data-testid="cell-gh-item"
-                  class="cursor-pointer rounded-[4px] border-none bg-transparent px-2 py-1.5 text-left font-sans text-[12px] text-secondary hover:bg-hover hover:text-fg"
-                  @click="openGithub('/issues')"
-                >
-                  Issues
+                <button type="button" data-testid="cell-path-item" :class="PATH_MENU_ITEM" @click="pathMenuAction(browseFiles)">
+                  <span class="material-symbols-outlined text-[15px]" aria-hidden="true">folder_open</span> Browse files in the app
                 </button>
-                <button
-                  type="button"
-                  data-testid="cell-gh-item"
-                  class="cursor-pointer rounded-[4px] border-none bg-transparent px-2 py-1.5 text-left font-sans text-[12px] text-secondary hover:bg-hover hover:text-fg"
-                  @click="openGithub('/pulls')"
-                >
-                  Pull requests
+                <button type="button" data-testid="cell-path-item" :class="PATH_MENU_ITEM" @click="pathMenuAction(newTerminalHere)">
+                  <span class="material-symbols-outlined text-[15px]" aria-hidden="true">terminal</span> New terminal here
                 </button>
+                <!-- GitHub only when the remote resolves to one — the same gate the button it
+                   replaced had, so this never offers a broken link. -->
+                <template v-if="githubUrl">
+                  <span class="my-1 h-px flex-none bg-border" aria-hidden="true" />
+                  <button type="button" data-testid="cell-path-item" :class="PATH_MENU_ITEM" @click="pathMenuAction(() => openGithub(''))">
+                    <span class="material-symbols-outlined text-[15px]" aria-hidden="true">public</span> Repository
+                  </button>
+                  <button type="button" data-testid="cell-path-item" :class="PATH_MENU_ITEM" @click="pathMenuAction(() => openGithub('/issues'))">
+                    <span class="material-symbols-outlined text-[15px]" aria-hidden="true">error</span> Issues
+                  </button>
+                  <button type="button" data-testid="cell-path-item" :class="PATH_MENU_ITEM" @click="pathMenuAction(() => openGithub('/pulls'))">
+                    <span class="material-symbols-outlined text-[15px]" aria-hidden="true">merge</span> Pull requests
+                  </button>
+                </template>
               </div>
             </span>
+          </template>
+          <template #header-actions>
             <span v-if="sessionId" ref="askWrap" class="relative inline-flex flex-none">
               <button
                 type="button"
@@ -1238,7 +1366,8 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
                   <button
                     type="button"
                     data-testid="cell-ask-item"
-                    class="flex-1 cursor-pointer rounded-[4px] border-none bg-transparent px-2 py-1.5 text-left font-sans text-[12px] text-secondary hover:bg-hover hover:text-fg"
+                    class="flex-1"
+                    :class="CELL_MENU_ITEM"
                     :title="`Bring ${target.label}'s last turn here`"
                     @click="askCell(target)"
                   >
@@ -1287,12 +1416,6 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
               @click="timelineOpen = true"
             >
               <span class="material-symbols-outlined" aria-hidden="true">history</span>
-            </button>
-            <button v-if="reorderable" class="cell-btn" :class="CELL_BTN" title="Move left" aria-label="Move terminal left" @click="emit('move', -1)">
-              <span class="material-symbols-outlined" aria-hidden="true">chevron_left</span>
-            </button>
-            <button v-if="reorderable" class="cell-btn" :class="CELL_BTN" title="Move right" aria-label="Move terminal right" @click="emit('move', 1)">
-              <span class="material-symbols-outlined" aria-hidden="true">chevron_right</span>
             </button>
           </template>
         </TerminalView>

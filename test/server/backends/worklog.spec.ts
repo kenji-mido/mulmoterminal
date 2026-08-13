@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect, vi } from "vitest";
 import { SCHEDULE_TYPES } from "@receptron/task-scheduler";
 import { worklogSystemTask, WORKLOG_PROMPT } from "../../../server/backends/worklog.js";

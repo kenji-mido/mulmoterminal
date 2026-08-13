@@ -50,13 +50,13 @@ function pathFor(kind: ShortcutKind, slug?: string): string {
 /** Open the index for a kind (collections / feeds). */
 export function browseGotoIndex(kind: ShortcutKind): void {
   clearRecord();
-  router.push({ path: pathFor(kind), state: overlayOriginState() });
+  void router.push({ path: pathFor(kind), state: overlayOriginState() });
 }
 
 /** Open one collection / feed's detail page. */
 export function browseGotoDetail(kind: ShortcutKind, slug: string): void {
   clearRecord();
-  router.push({ path: pathFor(kind, slug), state: overlayOriginState() });
+  void router.push({ path: pathFor(kind, slug), state: overlayOriginState() });
 }
 
 /** A ref/embed hop into another collection, optionally deep-linking a record. */
@@ -66,7 +66,7 @@ export function browseNavigateToRecord(targetSlug: string, recordId?: string): v
   // path. Always assign — a hop to the CURRENT page (no path change → no watcher
   // fire) with no recordId must still close any stale modal, not reuse it.
   const targetPath = pathFor("collection", targetSlug);
-  router.push({ path: targetPath, state: overlayOriginState() }).then(() => {
+  void router.push({ path: targetPath, state: overlayOriginState() }).then(() => {
     state.recordPath = recordId ? targetPath : null;
     state.selectedId = recordId ?? null;
   });
@@ -98,7 +98,7 @@ export function browseSetSelectedId(itemId: string | null): void {
 /** Close the browser overlay → back to the view it was opened from. */
 export function browseClose(): void {
   clearRecord();
-  router.push(overlayReturnPath());
+  void router.push(overlayReturnPath());
 }
 
 /** Derive the legacy BrowseView shape from the current route + record state. */

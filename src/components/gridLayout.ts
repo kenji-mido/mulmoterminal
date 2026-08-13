@@ -17,7 +17,7 @@ const DIMS: Record<Layout, { cols: number; rows: number }> = {
 export const MAX_CELLS = 9;
 
 export function isLayout(v: unknown): v is Layout {
-  return typeof v === "string" && (LAYOUTS as readonly string[]).includes(v);
+  return typeof v === "string" && LAYOUTS.some((layout) => layout === v);
 }
 
 export function dims(layout: Layout) {

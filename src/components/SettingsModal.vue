@@ -6,8 +6,9 @@
 // is one file under ./settings, and what stays here is what belongs to the modal itself. The
 // props/emits below are pure plumbing: they exist because the shells (and the specs) address
 // this component, and each one is handed straight to the section that reads it.
-import { ref, onMounted, onUnmounted, nextTick } from "vue";
-import { MODAL_FOCUSABLE, trapTabKey } from "../utils/focusTrap";
+import { ref } from "vue";
+import { MODAL_FOCUSABLE } from "../utils/focusTrap";
+import { useModalKeyboard } from "../composables/useModalKeyboard";
 import SettingsButton from "./SettingsButton.vue";
 import ThemeSection from "./settings/ThemeSection.vue";
 import TerminalFontSizeSection from "./settings/TerminalFontSizeSection.vue";
@@ -32,6 +33,7 @@ import type { QuickCommand } from "../../common/quickCommands";
 import type { PushKind } from "../../common/pushKinds";
 import type { NotifyKind } from "../../common/notifyKinds";
 import type { SoundMap } from "../composables/soundSettings";
+import type { SoundEmits } from "./settings/soundEmits";
 import type { BundledSkillName } from "../../common/bundledSkills";
 
 defineProps<{
@@ -51,39 +53,29 @@ defineProps<{
   dirPaths?: string[];
 }>();
 
-const emit = defineEmits<{
-  (e: "update-sound", file: string | null): void;
-  (e: "update-sound-kinds", kinds: NotifyKind[]): void;
-  (e: "update-sounds", sounds: SoundMap): void;
-  (e: "update-push-enabled", on: boolean): void;
-  (e: "update-push-kinds", kinds: PushKind[]): void;
-  (e: "update-repos", repos: string[]): void;
-  (e: "update-launchers", launchers: Launcher[]): void;
-  (e: "update-quick-commands", commands: QuickCommand[]): void;
-  (e: "update-user-mcp", servers: UserMcpServer[]): void;
-  // Hand a section over to the skill that owns it. Named by skill rather than by section
-  // ("configure-appearance") so a new button costs nothing outside this file.
-  (e: "launch-skill", skill: BundledSkillName): void;
-  (e: "close"): void;
-}>();
+// The sound events come from NotificationSoundsSection's own contract — this modal only forwards
+// them, so it must not spell them out a second time.
+const emit = defineEmits<
+  SoundEmits & {
+    (e: "update-push-enabled", on: boolean): void;
+    (e: "update-push-kinds", kinds: PushKind[]): void;
+    (e: "update-repos", repos: string[]): void;
+    (e: "update-launchers", launchers: Launcher[]): void;
+    (e: "update-quick-commands", commands: QuickCommand[]): void;
+    (e: "update-user-mcp", servers: UserMcpServer[]): void;
+    // Hand a section over to the skill that owns it. Named by skill rather than by section
+    // ("configure-appearance") so a new button costs nothing outside this file.
+    (e: "launch-skill", skill: BundledSkillName): void;
+    (e: "close"): void;
+  }
+>();
 
 const modalEl = ref<HTMLElement>();
 
-// Modal keyboard behavior: Escape closes; Tab is trapped within the dialog.
-function onKeydown(e: KeyboardEvent) {
-  if (e.key === "Escape") {
-    emit("close");
-    return;
-  }
-  if (e.key !== "Tab" || !modalEl.value) return;
-  trapTabKey(e, modalEl.value, MODAL_FOCUSABLE);
-}
-
-onMounted(() => {
-  document.addEventListener("keydown", onKeydown);
-  nextTick(() => modalEl.value?.querySelector<HTMLElement>("input, button")?.focus());
-});
-onUnmounted(() => document.removeEventListener("keydown", onKeydown));
+// Escape closes; Tab is trapped within the dialog. The first stop is an `input` where there is
+// one — the sections are mostly text fields, and landing on the Close button instead means
+// tabbing past the whole dialog to reach the setting you opened it for.
+useModalKeyboard({ modalEl, onClose: () => emit("close"), trapSelector: MODAL_FOCUSABLE, focusSelector: "input, button" });
 </script>
 
 <template>

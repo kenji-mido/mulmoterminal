@@ -24,6 +24,7 @@ import { claudeAdapter } from "../server/agents/claude.js";
 import { loadAppConfig } from "../server/config/app-config.js";
 import { cleanupSessionSettings, settingsArgument } from "../server/session/session-settings.js";
 import { requireResolution, resolveProvider, withoutUnset } from "../server/session/provider-env.js";
+import { isRecord } from "../common/isRecord.js";
 
 const TRIAL_TIMEOUT_MS = 240_000;
 const ANSI = new RegExp(`${String.fromCharCode(0x1b)}\\[[0-9;]*m`, "g");
@@ -66,7 +67,7 @@ function attempt(provider: string, model: string): { ok: boolean; seconds: numbe
   try {
     execFileSync(claudeAdapter.bin(), ["-p", PROBE_TASK, "--settings", settings, "--model", model, "--dangerously-skip-permissions"], {
       cwd,
-      env: withoutUnset(process.env, resolved.unset) as NodeJS.ProcessEnv,
+      env: withoutUnset(process.env, resolved.unset),
       encoding: "utf8",
       timeout: TRIAL_TIMEOUT_MS,
     });
@@ -75,11 +76,14 @@ function attempt(provider: string, model: string): { ok: boolean; seconds: numbe
     const ok = wrote.toUpperCase().includes(PROBE_WORD.toUpperCase());
     return { ok, seconds: Math.round((Date.now() - started) / 1000), detail: ok ? "" : `no tool write (wrote ${JSON.stringify(wrote)})` };
   } catch (err) {
-    const e = err as { stderr?: string; stdout?: string; message?: string; signal?: string };
+    // execFileSync attaches stderr/stdout/signal to what it throws, but a thrown value is
+    // `unknown` — read each field only if it is really a string.
+    const text = (value: unknown): string => (typeof value === "string" ? value : "");
+    const e = isRecord(err) ? err : {};
     // Keep the WHOLE message: the interesting part is rarely at the end — the tail is
     // usually Claude Code's benign "connectors are disabled" warning, which hid the real
     // 404 through the first sweep of this script.
-    const detail = ((e.stderr ?? "") + (e.stdout ?? "") + (e.message ?? "")).replace(ANSI, "").replace(/\s+/g, " ");
+    const detail = (text(e.stderr) + text(e.stdout) + text(e.message)).replace(ANSI, "").replace(/\s+/g, " ");
     return { ok: false, seconds: Math.round((Date.now() - started) / 1000), detail: e.signal === "SIGTERM" ? "timeout" : detail };
   } finally {
     cleanupSessionSettings(sessionId);

@@ -117,3 +117,35 @@ describe("useMcpToolGroups", () => {
     expect(posted).toEqual([]);
   });
 });
+
+// A 200 whose BODY cannot be read (#1393 made the deadline reach the body, and a truncated one
+// has always been possible). `jsonBody` absorbs that into `{}` and returns normally, so nothing
+// throws — and every switch would paint "off". The catch's own comment says why that is the worst
+// answer: flipping a wrong "off" runs `claude mcp remove` on a registration the user really has.
+describe("a 200 whose body cannot be read", () => {
+  const unreadableBody = () => {
+    globalThis.fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new DOMException("Aborted", "AbortError");
+      },
+    })) as unknown as typeof fetch;
+  };
+
+  it("shows no switches at all, rather than a full row of guessed 'off'", async () => {
+    unreadableBody();
+    const mcp = useMcpToolGroups();
+    await mcp.load("/repo");
+    // `dir` is what the UI gates the switches on — null means "no answer", not "all off".
+    expect(mcp.dir.value).toBeNull();
+    expect(TOOL_GROUPS.every((g) => mcp.enabled.value[g] === false)).toBe(true);
+  });
+
+  it("still reads a genuinely empty registration list as empty", async () => {
+    mockGroups({ "/repo": [] });
+    const mcp = useMcpToolGroups();
+    await mcp.load("/repo");
+    expect(mcp.dir.value).toBe("/repo"); // an answer arrived; it just had nothing in it
+  });
+});

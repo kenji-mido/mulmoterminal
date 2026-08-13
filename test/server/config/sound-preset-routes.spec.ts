@@ -1,10 +1,10 @@
 // @vitest-environment node
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import express from "express";
-import type { Server } from "node:http";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { appRequest } from "../../helpers/appRequest.js";
 import { readSoundPreset, SOUNDS_DIR } from "../../../server/config/sound-presets.js";
 import { soundPresetById } from "../../../common/notifySounds.js";
 
@@ -25,44 +25,34 @@ function mountPresetRoute(app: express.Express, cacheDir: string, fetchImpl: typ
 }
 
 describe("preset route status", () => {
-  let server: Server;
-  let base: string;
+  let request: ReturnType<typeof appRequest>;
   let dir: string;
   const offline = (async () => {
     throw new Error("getaddrinfo ENOTFOUND");
   }) as unknown as typeof fetch;
 
-  beforeEach(async () => {
+  beforeEach(() => {
     dir = mkdtempSync(path.join(tmpdir(), "mt-preset-route-"));
     const app = express();
     mountPresetRoute(app, dir, offline);
-    await new Promise<void>((resolve) => {
-      server = app.listen(0, "127.0.0.1", () => {
-        const addr = server.address();
-        base = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`;
-        resolve();
-      });
-    });
+    request = appRequest(app);
   });
 
-  afterEach(async () => {
-    await new Promise<void>((resolve) => server.close(() => resolve()));
-    rmSync(dir, { recursive: true, force: true });
-  });
+  afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
   it("answers 503 for a known preset it could not download — the client must retry", async () => {
-    const res = await fetch(`${base}/api/sound-preset/coin`);
+    const res = await request("/api/sound-preset/coin");
     expect(res.status).toBe(503);
   });
 
   it("answers 404 for a preset that does not exist — nothing to retry", async () => {
-    const res = await fetch(`${base}/api/sound-preset/nope`);
+    const res = await request("/api/sound-preset/nope");
     expect(res.status).toBe(404);
   });
 
   it("serves the cached bytes when they are there", async () => {
     writeFileSync(path.join(dir, "sound_coin.mp3"), "cached");
-    const res = await fetch(`${base}/api/sound-preset/coin`);
+    const res = await request("/api/sound-preset/coin");
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("audio/mpeg");
     expect(await res.text()).toBe("cached");

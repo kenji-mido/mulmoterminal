@@ -3,9 +3,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { DecisionRecord, DecisionsResponse } from "../../common/decisionLog.js";
-import { forEachJsonlLine } from "../infra/jsonl-file.js";
-import { byNewest, createDecisionScan } from "./decisions.js";
-import { createFileCache, type FileStamp } from "./file-cache.js";
+import { isRecord } from "../../common/isRecord.js";
+import { byNewest, copyDecisionState, decisionsOf, emptyDecisionState, foldDecision, type Ask, type DecisionScanState } from "./decisions.js";
+import type { FileStamp } from "./file-cache.js";
+import { createTranscriptFold } from "./transcript-fold.js";
 import { projectSessionsDir } from "./project-dir.js";
 import { safeReaddir } from "./session-reads.js";
 
@@ -14,9 +15,39 @@ import { safeReaddir } from "./session-reads.js";
 // response says how many were actually read, so a truncated scan is visible rather than implied.
 const MAX_TRANSCRIPTS = 200;
 
-// Parsing a transcript is the expensive part and the file is append-only, so the extraction is
-// memoised on (mtime, size) exactly like the session summary it sits next to.
-const cache = createFileCache<DecisionRecord[]>();
+// A sidecar is untrusted input whoever wrote it. `input` is the AskUserQuestion call's own argument
+// object and may be any JSON at all, so it is the one field with nothing to check.
+const isAsk = (value: unknown): value is Ask =>
+  isRecord(value) &&
+  typeof value.toolUseId === "string" &&
+  typeof value.ts === "string" &&
+  typeof value.sessionId === "string" &&
+  (value.cwd === null || typeof value.cwd === "string") &&
+  (value.resultText === null || typeof value.resultText === "string");
+
+const isDecisionState = (value: unknown): value is DecisionScanState =>
+  isRecord(value) &&
+  Array.isArray(value.asks) &&
+  value.asks.every(isAsk) &&
+  Array.isArray(value.pending) &&
+  value.pending.every((id) => typeof id === "string");
+
+// Reading a transcript is the expensive part and the file is append-only, so the scan is resumed
+// from where the last one stopped and kept beside a big file — the same fold the session list, the
+// summary, the timeline and the cost roll-up are on (#1377, #1386, #1402). A (mtime, size) memo was
+// not enough on its own: the session being written to never matches one, so the project's LARGEST
+// transcript was re-read in full every time the digest or the skill asked (2.2 s for 484 MB).
+//
+// No `cold` shortcut: a decision can sit anywhere in the file, and a question and its answer are
+// different records, so neither end of the file can answer for the middle.
+const decisionFold = createTranscriptFold<DecisionScanState>({
+  kind: "decisions",
+  version: 1,
+  isValue: isDecisionState,
+  empty: emptyDecisionState,
+  fold: foldDecision,
+  copy: copyDecisionState,
+});
 
 interface Transcript {
   file: string;
@@ -43,23 +74,11 @@ async function transcriptsNewestFirst(dir: string): Promise<Transcript[]> {
     .slice(0, MAX_TRANSCRIPTS);
 }
 
-// Line by line, never as one string: a transcript on this machine is 585 MB, which is past what
-// a JS string can hold, and reading it whole would drop exactly the longest sessions (#998).
-async function scanTranscript(transcript: Transcript): Promise<DecisionRecord[]> {
-  const scan = createDecisionScan();
-  await forEachJsonlLine(transcript.file, (line) => scan.addLine(line));
-  return scan.finish(transcript.sessionId);
-}
-
 // A transcript that could not be read is reported, not silently treated as one with no decisions:
 // the caller cannot otherwise tell a quiet project from a partial answer.
 async function decisionsIn(transcript: Transcript): Promise<DecisionRecord[] | null> {
-  const hit = cache.get(transcript.file, transcript.stamp);
-  if (hit) return hit;
   try {
-    const found = await scanTranscript(transcript);
-    cache.set(transcript.file, transcript.stamp, found);
-    return found;
+    return decisionsOf(await decisionFold.read(transcript.file, transcript.stamp), transcript.sessionId);
   } catch {
     return null;
   }
@@ -75,7 +94,10 @@ async function mapWithLimit<T, R>(items: T[], limit: number, run: (item: T) => P
   const results = new Array<R>(items.length);
   let next = 0;
   const worker = async (): Promise<void> => {
-    for (let i = next++; i < items.length; i = next++) results[i] = await run(items[i]);
+    for (let i = next++; i < items.length; i = next++) {
+      const item = items[i];
+      if (item !== undefined) results[i] = await run(item);
+    }
   };
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
   return results;

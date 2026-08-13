@@ -51,13 +51,29 @@ reorder them is to **list the ones you want** — there is no "remove" syntax.
 | id | Label | What it does |
 |---|---|---|
 | `pick-file` | Insert a file path | OS file dialog; inserts the chosen path(s) into the session |
-| `reveal` | Reveal in the file manager | Finder / Explorer / `xdg-open` |
-| `files` | Browse files in the app | The in-app file explorer |
-| `terminal` | New terminal here | A new grid cell running `$SHELL` in this directory |
 | `pr` | Open this branch's PR | Git repos only; **hidden when the branch has no open PR** |
-| `gh` | Open on GitHub | Only when a GitHub owner/repo resolves, so it never renders a broken link |
 
-Dropping just one (say `gh`) means writing the other five.
+Dropping just one means writing the other.
+
+### The four that are no longer buttons
+
+Reveal in the file manager, the in-app file explorer, a new terminal here, and Open on GitHub used
+to be default buttons. They are now items in the **path menu** — click the directory path on a
+session's terminal header row and they are all there, with Issues and Pull requests as well.
+
+They moved because every one of them answered "do something with the directory this cell is in",
+which is the question the path itself asks; `reveal` was the path's own click outright. Four
+permanent icons in a tiled cell for four occasional navigations was the wrong trade.
+
+Nothing about them changed as CONFIG. If a user wants any of them back as a button — one click
+instead of two — list it and it works exactly as before:
+
+```json
+{ "id": "files", "icon": "folder_open", "label": "Browse files in the app", "run": "open", "open": { "files": "${dir}" } }
+```
+
+Say when you do that: they will then have it twice, once as their button and once in the path menu.
+The menu is fixed and does not know what is on the toolbar.
 
 ## Propose only buttons that work here
 
@@ -132,8 +148,9 @@ always shown.
 agent == claude && isGitRepo
 ```
 
-`key !=` with the right-hand side left empty tests "resolves to something" — that is how the
-built-in GitHub button avoids rendering without a remote.
+`key !=` with the right-hand side left empty tests "resolves to something" — `"when": "repo != "`
+is what a GitHub button needs so it never renders as a bare `https://github.com/`. Use that rather
+than `isGitRepo`: a git repo with no remote, or one whose remote is not GitHub, is still a git repo.
 
 ## After writing
 
@@ -145,17 +162,15 @@ Then check the real header. A button that doesn't appear is nearly always `when`
 directory, an agent mismatch) or a `pr` button on a branch with no PR — both are working as
 designed, and both look like a broken config.
 
-## Example — trimming the defaults, globally
+## Example — pinning the defaults, globally
 
-Keeping everything except the GitHub button means listing the five that remain:
+The default set is short, so writing it out is the whole of it — this is the complete current
+default configuration, useful as the starting point for adding to or trimming:
 
 ```json
 {
   "buttons": [
     { "id": "pick-file", "icon": "attach_file", "label": "Insert a file path", "run": "open", "open": { "pickFile": true } },
-    { "id": "reveal", "icon": "folder", "label": "Reveal in the file manager", "run": "open", "open": { "reveal": "${dir}" } },
-    { "id": "files", "icon": "folder_open", "label": "Browse files in the app", "run": "open", "open": { "files": "${dir}" } },
-    { "id": "terminal", "icon": "terminal", "label": "New terminal here", "run": "open", "open": { "terminal": "${dir}" } },
     { "id": "pr", "icon": "merge", "label": "Open this branch's PR", "run": "open", "when": "isGitRepo", "open": { "pr": true } }
   ]
 }

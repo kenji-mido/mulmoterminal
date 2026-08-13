@@ -24,5 +24,5 @@ export function shellInvocation(command: string, replaceShell: boolean, platform
  *  browser sends only an index — the configured list is the allowlist — so a fractional,
  *  negative, or past-the-end index has to resolve to nothing rather than to undefined. */
 export function launcherAt<T>(list: readonly T[], index: number): T | null {
-  return Number.isInteger(index) && index >= 0 && index < list.length ? list[index] : null;
+  return Number.isInteger(index) && index >= 0 && index < list.length ? (list[index] ?? null) : null;
 }

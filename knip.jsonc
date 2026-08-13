@@ -1,7 +1,11 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "entry": ["server/cli-init.ts", "server/cli-google.ts", "bin/update-check.js", "test/**/*.spec.ts", "*.config.ts"],
-  "project": ["server/**/*.ts", "src/**/*.{ts,vue}", "bin/**/*.js", "common/**/*.ts"],
+  // `test/**/*.ts` and not just the specs: a helper under test/ is neither an entry (it is not
+  // a spec) nor was it a project file, so knip did not read it — and a dependency imported ONLY
+  // from a helper was reported as unused. The dependency is real; the scan simply could not see
+  // its one import site.
+  "project": ["server/**/*.ts", "src/**/*.{ts,vue}", "bin/**/*.js", "common/**/*.ts", "test/**/*.ts"],
   // Only the dependencies knip structurally cannot see, each with the reason it is
   // invisible. This was `.*` — every dependency ignored — which left the scan silent
   // about dependency rot. Anything absent from this list is checked now, so a

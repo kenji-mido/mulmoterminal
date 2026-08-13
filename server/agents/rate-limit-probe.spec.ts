@@ -1,21 +1,49 @@
+// @vitest-environment node
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { startRateLimitProbe, PROBE_PROMPT } from "./rate-limit-probe";
+import { startRateLimitProbe, probeArgs, PROBE_PROMPT } from "./rate-limit-probe";
 import { createRateLimitStore } from "./rate-limit-store";
 
-const CR = "\r";
-const ESC_CR = "\x1b\r";
-// Past BOOT_MS + TYPE_TO_SUBMIT_MS (4000 + 800), well short of PROBE_TIMEOUT_MS.
-const PAST_SUBMIT_MS = 5000;
+const pty = (over: Partial<{ kill: () => void; onData: (listener: (chunk: string) => void) => void }> = {}) => ({
+  kill: () => {},
+  onData: () => {},
+  ...over,
+});
 
 const deps = (over: Partial<Parameters<typeof startRateLimitProbe>[0]> = {}) => ({
-  spawn: () => ({ write: () => {}, kill: () => {} }),
+  spawn: () => pty(),
   host: "localhost",
   port: 34567,
   cwd: "/tmp",
   sessionId: "s",
   onSettled: () => {},
-  submitSequence: () => CR,
   ...over,
+});
+
+const SETTINGS_FILE = "/run/mulmoterminal/settings.json";
+
+// The probe asks by ARGUMENT, never at the keyboard. Typing was timed against a fixed 4-second
+// boot wait, and a TUI that is not accepting input yet discards the keystrokes — so on any host
+// slow to start, the question was never asked and the gauge could only time out and back off
+// (#1293). It also means the probe sends no Enter, which is what used to confirm the default
+// choice of whatever dialog was up.
+describe("probeArgs", () => {
+  it("carries the question as claude's own prompt argument", () => {
+    expect(probeArgs("sid", SETTINGS_FILE).at(-1)).toBe(PROBE_PROMPT);
+  });
+
+  it("keeps the session id we chose, so the transcript can be addressed by name", () => {
+    expect(probeArgs("sid", SETTINGS_FILE)).toEqual(expect.arrayContaining(["--session-id", "sid"]));
+  });
+
+  it("points claude at the settings file carrying the reporting statusLine", () => {
+    expect(probeArgs("sid", SETTINGS_FILE)).toEqual(expect.arrayContaining(["--settings", SETTINGS_FILE]));
+  });
+
+  // The probe uses no tools, so the user's MCP servers are pure startup cost — and an
+  // unauthenticated one measurably delays the first API response, which is the whole budget here.
+  it("loads none of the user's MCP configuration", () => {
+    expect(probeArgs("sid", SETTINGS_FILE)).toContain("--strict-mcp-config");
+  });
 });
 
 describe("startRateLimitProbe", () => {
@@ -48,7 +76,7 @@ describe("startRateLimitProbe", () => {
 
   it("kills the terminal it started when stopped", () => {
     const kill = vi.fn();
-    const stop = startRateLimitProbe(deps({ spawn: () => ({ write: () => {}, kill }) }));
+    const stop = startRateLimitProbe(deps({ spawn: () => pty({ kill }) }));
     stop();
     expect(kill).toHaveBeenCalled();
   });
@@ -59,63 +87,76 @@ describe("startRateLimitProbe", () => {
     const stop = startRateLimitProbe(
       deps({
         onSettled,
-        spawn: () => ({
-          write: () => {},
-          kill: () => {
-            throw new Error("already gone");
-          },
-        }),
+        spawn: () =>
+          pty({
+            kill: () => {
+              throw new Error("already gone");
+            },
+          }),
       }),
     );
     expect(() => stop()).not.toThrow();
     expect(onSettled).toHaveBeenCalledTimes(1);
   });
+
+  it("spawns in the directory it was given, asking the question by argument", () => {
+    const spawned: { args: string[]; cwd: string }[] = [];
+    startRateLimitProbe(
+      deps({
+        cwd: "/work",
+        spawn: (args, cwd) => {
+          spawned.push({ args, cwd });
+          return pty();
+        },
+      }),
+    )();
+    expect(spawned[0].cwd).toBe("/work");
+    expect(spawned[0].args.at(-1)).toBe(PROBE_PROMPT);
+  });
 });
 
-// The probe drives a real `claude` TUI, so it has to submit the way THAT host's Claude submits: on
-// an `esc-cr` host a bare CR is the newline, and the question would be typed but never asked — the
-// probe could then only time out, leaving the gauge stale with nothing on screen to say why (#1148).
-describe("submitting the probe's question", () => {
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  const askWith = (submitSequence: () => string) => {
-    vi.useFakeTimers();
-    const writes: string[] = [];
-    const stop = startRateLimitProbe(deps({ spawn: () => ({ write: (data: string) => writes.push(data), kill: () => {} }), submitSequence }));
-    vi.advanceTimersByTime(PAST_SUBMIT_MS);
+// The terminal is the only evidence a stalled probe leaves, so it has to come back out — and the
+// trust dialog has to be told apart from the silences nothing can name (#1293).
+describe("what a settled probe carries out", () => {
+  const settleWith = (chunks: readonly string[]) => {
+    const outcome = vi.fn();
+    const stop = startRateLimitProbe(
+      deps({
+        onSettled: outcome,
+        spawn: () => pty({ onData: (listener) => chunks.forEach((chunk) => listener(chunk)) }),
+      }),
+    );
     stop();
-    return writes;
+    return outcome.mock.calls[0][0];
   };
 
-  it("submits with the host's ESC+CR", () => {
-    expect(askWith(() => ESC_CR)).toEqual([PROBE_PROMPT, ESC_CR]);
+  it("hands back what the probe's terminal showed", () => {
+    expect(settleWith(["boot", "ing"]).screen).toBe("booting");
   });
 
-  it("submits with a plain CR on a default host", () => {
-    expect(askWith(() => CR)).toEqual([PROBE_PROMPT, CR]);
+  it("names the trust dialog when that is what is on screen", () => {
+    expect(settleWith(["Quick safety check: Is this a project you created or one you trust?\n1. Yes, I trust this folder\n2. No, exit"]).stall).toBe(
+      "trust-prompt",
+    );
   });
 
-  // Read per probe, so a `terminalSubmit` edit applies to the next refresh without a restart.
-  it("resolves the sequence when it submits, not when the probe starts", () => {
-    vi.useFakeTimers();
-    const writes: string[] = [];
-    let mode = CR;
-    const stop = startRateLimitProbe(deps({ spawn: () => ({ write: (data: string) => writes.push(data), kill: () => {} }), submitSequence: () => mode }));
-    mode = ESC_CR;
-    vi.advanceTimersByTime(PAST_SUBMIT_MS);
-    stop();
-    expect(writes[1]).toBe(ESC_CR);
+  it("names nothing for an ordinary screen", () => {
+    expect(settleWith(["Claude Code v2.1.220\n"]).stall).toBe("unknown");
   });
 
-  it("neither types nor submits once the probe has been stopped", () => {
-    vi.useFakeTimers();
-    const writes: string[] = [];
-    const stop = startRateLimitProbe(deps({ spawn: () => ({ write: (data: string) => writes.push(data), kill: () => {} }), submitSequence: () => ESC_CR }));
-    stop();
-    vi.advanceTimersByTime(PAST_SUBMIT_MS);
-    expect(writes).toEqual([]);
+  // A spawn that never happened has no terminal to read, and must still settle — the caller's
+  // in-flight flag is already set by the time this runs.
+  it("settles with an empty screen when the spawn throws", () => {
+    const outcome = vi.fn();
+    startRateLimitProbe(
+      deps({
+        onSettled: outcome,
+        spawn: () => {
+          throw new Error("claude is not installed");
+        },
+      }),
+    );
+    expect(outcome.mock.calls[0][0]).toEqual({ stall: "unknown", screen: "" });
   });
 });
 
@@ -126,6 +167,15 @@ describe("submitting the probe's question", () => {
 // browser polling at seconds for the whole of it.
 describe("ending the probe when its answer lands", () => {
   const windows = { fiveHour: { usedPercentage: 12, resetsAt_sec: 999 }, sevenDay: null };
+
+  // Half these tests assert the probe is STILL RUNNING, so nothing in them can stop it. The probe
+  // holds a temp settings directory that only its own stop() removes, and it is created by the
+  // production code — the test helper's registry never sees it (#1345). Left alone, each such test
+  // leaves a `mt-ratelimit-` directory behind on every run.
+  const running: (() => void)[] = [];
+  afterEach(() => {
+    running.splice(0).forEach((stopProbe) => stopProbe());
+  });
 
   const wire = () => {
     const killed = vi.fn();
@@ -140,9 +190,10 @@ describe("ending the probe when its answer lands", () => {
           stop = null;
           onSettled();
         },
-        spawn: () => ({ write: () => {}, kill: killed }),
+        spawn: () => pty({ kill: killed }),
       }),
     );
+    running.push(stop);
     return { store, killed, onSettled };
   };
 

@@ -21,11 +21,33 @@ function mockFetch(worktrees: WorktreeRow[] = [], sessions: SessionRow[] = []) {
   }) as unknown as typeof fetch;
 }
 
-const mountForm = (openSessionIds: string[] = [], over: { dir?: string; presets?: { label: string; path: string }[]; target?: LaunchAgent } = {}) =>
+const mountForm = (
+  openSessionIds: string[] = [],
+  over: { dir?: string; presets?: { label: string; path: string }[]; target?: LaunchAgent; defaultCwd?: string | null } = {},
+) =>
   mount(CellLaunchForm, {
-    props: { dir: "/repo", target: "claude" as LaunchAgent, choice: null, defaultCwd: "/repo", presets: [], openSessionIds, ...over },
+    // defaultCwd is deliberately NOT "/repo": the launcher treats the workspace differently — it
+    // states that every GUI tool is available instead of offering the switches, and hides the
+    // worktree section — so the ordinary case to mount is a PROJECT directory.
+    props: { dir: "/repo", target: "claude" as LaunchAgent, choice: null, defaultCwd: "/home/me/ws", presets: [], openSessionIds, ...over },
     global: { stubs: { ModelPicker: true } },
   });
+
+// The launch button of the chip for a given directory. The workspace chip is always first now, so
+// selecting a chip by position picks the wrong one.
+const launchButtonFor = (w: ReturnType<typeof mountForm>, path: string) => chipForPath(w, path).find('[data-testid="cell-chip-launch"]');
+
+// The chip pointing at exactly this directory. The title is the path, optionally followed by " — "
+// and a reason (running here / the workspace), so a WHOLE-path match is required: `startsWith(path)`
+// alone would let a request for `/repo` select `/repo-backup` (CodeRabbit on #1359).
+const chipForPath = (w: ReturnType<typeof mountForm>, path: string) => {
+  const chip = w.findAll('[data-testid="cell-chip"]').find((c) => {
+    const title = c.find('[data-testid="cell-chip-main"]').attributes("title") ?? "";
+    return title === path || title.startsWith(`${path} —`);
+  });
+  if (!chip) throw new Error(`no chip for ${path}`);
+  return chip;
+};
 
 const worktree = (over: Partial<WorktreeRow> = {}): WorktreeRow => ({ path: "/wt/fix-login", branch: "fix-login", task: "fix-login", dirty: false, ...over });
 
@@ -162,7 +184,9 @@ describe("a worktree reached without its row", () => {
     mockFetch([taken()]);
     const w = mountForm([], { presets: [{ label: "fix-login", path: "/wt/fix-login" }] });
     await flushPromises();
-    await w.find('[data-testid="cell-chip-launch"]').trigger("click");
+    // By path, not by position: the workspace chip leads the list, so the first launch button is
+    // no longer the worktree's.
+    await launchButtonFor(w, "/wt/fix-login").trigger("click");
     expect(w.emitted("start")).toBeUndefined();
     expect(w.emitted("update:dir")?.at(-1)).toEqual(["/wt/fix-login"]);
   });
@@ -173,7 +197,7 @@ describe("a worktree reached without its row", () => {
     mockFetch([taken()]);
     const w = mountForm([], { presets: [{ label: "fix-login", path: "/wt/fix-login" }] });
     await flushPromises();
-    const label = w.find('[data-testid="cell-chip-launch"]').attributes("aria-label") ?? "";
+    const label = launchButtonFor(w, "/wt/fix-login").attributes("aria-label") ?? "";
     expect(label).toContain("fix-login");
     expect(label).toContain("open in another terminal");
   });
@@ -182,7 +206,8 @@ describe("a worktree reached without its row", () => {
     mockFetch([taken()]);
     const w = mountForm([], { presets: [{ label: "repo", path: "/repo" }] });
     await flushPromises();
-    await w.find('[data-testid="cell-chip-launch"]').trigger("click");
+    // The workspace chip leads the row, so reach the ordinary directory's by path.
+    await launchButtonFor(w, "/repo").trigger("click");
     expect(w.emitted("start")?.[0]).toEqual(["/repo"]);
   });
 });
@@ -221,5 +246,258 @@ describe("a resume row", () => {
     expect(item.attributes("disabled")).toBeDefined();
     await item.trigger("click");
     expect(w.emitted("resume")).toBeUndefined();
+  });
+});
+
+// A write into the user's Claude Code config that fails has to SAY so — the checkbox goes back and
+// the row reads "failed", with the reason on the hover. The branch and the hover read the same
+// accessor since #1339 (the hover used to assert non-null what the branch had just tested), so
+// what is pinned here is that the message still arrives at the title.
+describe("an MCP group row whose write failed", () => {
+  it("puts the checkbox back and carries the reason on the hover", async () => {
+    globalThis.fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes("/api/gui-mcp-groups")) {
+        if (init?.method === "POST") return { ok: false, status: 500, json: async () => ({}) };
+        return { ok: true, json: async () => ({ groups: [] }) };
+      }
+      if (u.includes("/api/worktrees")) return { ok: true, json: async () => ({ isGit: true, base: "main", worktrees: [] }) };
+      if (u.includes("/api/sessions")) return { ok: true, json: async () => ({ cwd: "/repo", sessions: [] }) };
+      return { ok: true, json: async () => ({}) };
+    }) as unknown as typeof fetch;
+
+    const w = mountForm();
+    await flushPromises();
+    const toggle = w.find<HTMLInputElement>('[data-testid="cell-mcp-toggle-render"]');
+    await toggle.setValue(true);
+    await flushPromises();
+
+    const failed = w.findAll("span.text-err-text");
+    expect(failed).toHaveLength(1);
+    expect(failed[0].text()).toBe("failed");
+    expect(failed[0].attributes("title")).toBe("HTTP 500");
+    expect(toggle.element.checked).toBe(false);
+  });
+});
+
+// The workspace is where every GUI tool is reachable, so the launcher offers it whether or not it
+// has ever been recorded as a recent directory — the recorded list is auto-populated by launching,
+// which made the one directory that matters most the one you might not be able to click.
+describe("the workspace chip", () => {
+  // A Material Symbols icon IS its ligature text, so the glyph's name is part of the button's
+  // text() — the chip reads "workspacesws" unless the icon is subtracted. Subtracted by element
+  // rather than by the literal, so renaming the icon does not quietly stop stripping it.
+  const chipLabels = (w: ReturnType<typeof mountForm>) =>
+    w.findAll('[data-testid="cell-chip-main"]').map((chip) => {
+      const icon = chip.find('[data-testid="cell-chip-workspace"]');
+      return icon.exists() ? chip.text().replace(icon.text(), "") : chip.text();
+    });
+
+  it("is offered with no presets recorded at all", async () => {
+    const w = mountForm([], { presets: [], defaultCwd: "/home/me/ws" });
+    await flushPromises();
+    expect(chipLabels(w)).toEqual(["WORKSPACE"]);
+    expect(w.find('[data-testid="cell-chip-workspace"]').exists()).toBe(true);
+  });
+
+  it("leads the recorded directories, and only it is marked", async () => {
+    const w = mountForm([], { presets: [{ label: "one", path: "/a/one" }], defaultCwd: "/home/me/ws" });
+    await flushPromises();
+    expect(chipLabels(w)).toEqual(["WORKSPACE", "one"]);
+    expect(w.findAll('[data-testid="cell-chip-workspace"]')).toHaveLength(1);
+  });
+
+  // Nothing to remove: it is synthesised, so a delete would only put it back on the next render.
+  // The recorded chip beside it keeps its own.
+  it("has no remove button, while an ordinary chip does", async () => {
+    const w = mountForm([], { presets: [{ label: "one", path: "/a/one" }], defaultCwd: "/home/me/ws" });
+    await flushPromises();
+    expect(w.findAll('[data-testid="cell-chip"]')).toHaveLength(2);
+    expect(w.findAll('[data-testid="cell-chip-del"]')).toHaveLength(1);
+  });
+
+  // The icon cannot say WHY it is special, and nothing else on screen does.
+  it("says on hover what makes it worth picking", async () => {
+    const w = mountForm([], { presets: [], defaultCwd: "/home/me/ws" });
+    await flushPromises();
+    expect(w.find('[data-testid="cell-chip-main"]').attributes("title")).toContain("every GUI tool is available here");
+  });
+});
+
+// The workspace is handed the WHOLE GUI MCP at spawn whatever agent runs there
+// (carriesFullGuiMcp), so there is no per-directory choice to offer. Four switches there would be
+// worse than redundant: they write a per-folder registration that a claimed session then
+// ignores, i.e. controls that visibly do nothing.
+describe("the GUI tool groups in the workspace", () => {
+  const guiMcpFetch = () => {
+    globalThis.fetch = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/gui-mcp-groups")) return { ok: true, json: async () => ({ groups: [] }) };
+      if (u.includes("/api/worktrees")) return { ok: true, json: async () => ({ isGit: true, base: "main", worktrees: [] }) };
+      if (u.includes("/api/sessions")) return { ok: true, json: async () => ({ cwd: "/repo", sessions: [] }) };
+      return { ok: true, json: async () => ({}) };
+    }) as unknown as typeof fetch;
+  };
+
+  it("states that everything is available instead of offering the switches", async () => {
+    guiMcpFetch();
+    const w = mountForm([], { dir: "/home/me/ws", defaultCwd: "/home/me/ws" });
+    await flushPromises();
+    expect(w.find('[data-testid="cell-mcp-toggle-render"]').exists()).toBe(false);
+    expect(w.find('[data-testid="cell-mcp-all"]').exists()).toBe(true);
+  });
+
+  // Named, so the claim is checkable rather than a bare "all". Derived from TOOL_GROUP_HEADINGS,
+  // de-duplicated because render and media both read "Canvas".
+  it("names what 'all of them' covers", async () => {
+    guiMcpFetch();
+    const w = mountForm([], { dir: "/home/me/ws", defaultCwd: "/home/me/ws" });
+    await flushPromises();
+    const text = w.find('[data-testid="cell-mcp-all"]').text();
+    expect(text).toContain("Canvas");
+    expect(text).toContain("Workspace data");
+    expect(text).toContain("External accounts");
+  });
+
+  // An EMPTY field means the workspace (dirFor falls back to defaultCwd) — the case a comparison
+  // against the raw input would miss.
+  it("counts an empty directory field as the workspace", async () => {
+    guiMcpFetch();
+    const w = mountForm([], { dir: "", defaultCwd: "/home/me/ws" });
+    await flushPromises();
+    expect(w.find('[data-testid="cell-mcp-all"]').exists()).toBe(true);
+  });
+
+  // The invariant this must not break: a project directory still chooses, exactly as before.
+  it("still offers the switches in a project directory", async () => {
+    guiMcpFetch();
+    const w = mountForm([], { dir: "/repo", defaultCwd: "/home/me/ws" });
+    await flushPromises();
+    expect(w.find('[data-testid="cell-mcp-all"]').exists()).toBe(false);
+    expect(w.find('[data-testid="cell-mcp-toggle-render"]').exists()).toBe(true);
+    expect(w.find('[data-testid="cell-mcp-toggle-external"]').exists()).toBe(true);
+  });
+});
+
+// A worktree isolates work on ONE codebase onto a branch. The workspace is the hub a session works
+// FROM — where the shared wiki / collections / accounting state lives — which is exactly what a
+// detached branch would cut it off from, so offering the option there is offering a mistake.
+describe("worktrees in the workspace", () => {
+  it("hides the worktree section, git repo or not", async () => {
+    mockFetch([worktree({ session: null })]);
+    const w = mountForm([], { dir: "/home/me/ws", defaultCwd: "/home/me/ws" });
+    await flushPromises();
+    expect(w.find('[data-testid="cell-worktrees"]').exists()).toBe(false);
+    expect(w.find('[data-testid="worktree-reuse"]').exists()).toBe(false);
+  });
+
+  // The invariant: a project directory is untouched.
+  it("still offers it in a project directory", async () => {
+    mockFetch([worktree({ session: null })]);
+    const w = mountForm();
+    await flushPromises();
+    expect(w.find('[data-testid="cell-worktrees"]').exists()).toBe(true);
+  });
+});
+
+// The label names a ROLE, not a directory, so what the chip is called out loud adds the path —
+// every other chip's label already IS its directory.
+describe("what the workspace chip is called", () => {
+  it("shows the role notation and speaks the directory", async () => {
+    mockFetch();
+    const w = mountForm([], { presets: [], defaultCwd: "/home/me/ws" });
+    await flushPromises();
+    const main = w.find('[data-testid="cell-chip-main"]');
+    expect(main.text()).toContain("WORKSPACE");
+    const spoken = main.attributes("aria-label") ?? "";
+    expect(spoken).toContain("the workspace, /home/me/ws");
+    expect(spoken).not.toContain("WORKSPACE");
+  });
+
+  it("keeps the real path on the hover, where the other chips keep theirs", async () => {
+    mockFetch();
+    const w = mountForm([], { presets: [], defaultCwd: "/home/me/ws" });
+    await flushPromises();
+    expect(w.find('[data-testid="cell-chip-main"]').attributes("title")).toContain("/home/me/ws");
+  });
+
+  it("speaks the launch button the same way", async () => {
+    mockFetch();
+    const w = mountForm([], { presets: [], defaultCwd: "/home/me/ws" });
+    await flushPromises();
+    const spoken = w.find('[data-testid="cell-chip-launch"]').attributes("aria-label") ?? "";
+    expect(spoken).toContain("the workspace, /home/me/ws");
+    expect(spoken).not.toContain("WORKSPACE");
+  });
+});
+
+// #1372: every list under the field describes the directory the field named when it was fetched,
+// and the field is editable the whole time. What used to happen is that the previous directory's
+// resume rows stayed clickable — through a 300ms debounce and a round trip — under the new
+// directory's name, and a click resumed exactly the session it offered.
+describe("changing the directory", () => {
+  const oldSession = { id: "s-old", title: "an old chat", mtime: 1 };
+  // Comfortably over the form's own 300ms debounce: the wait is real time, and on a runner also
+  // building it is the load spike rather than any one test that decides how long this takes.
+  const UNTIL_LOADED_TIMEOUT_MS = 3000;
+  const POLL_MS = 25;
+
+  // A server that answers per directory, so "the rows came back" can be told from "the rows never
+  // left" — the default mock replies the same thing whatever it is asked about.
+  function mockFetchPerDir(rows: Record<string, { worktrees: WorktreeRow[]; sessions: SessionRow[] }>) {
+    globalThis.fetch = vi.fn(async (url: string) => {
+      const u = String(url);
+      const cwd = new URL(u, "http://localhost").searchParams.get("cwd") ?? "";
+      const here = rows[cwd] ?? { worktrees: [], sessions: [] };
+      if (u.includes("/api/worktrees")) return { ok: true, json: async () => ({ isGit: true, base: "main", worktrees: here.worktrees }) };
+      if (u.includes("/api/sessions")) return { ok: true, json: async () => ({ cwd, sessions: here.sessions }) };
+      return { ok: true, json: async () => ({}) };
+    }) as unknown as typeof fetch;
+  }
+
+  // Real timers: the debounce is what this is about, and faking it here would only pin that the
+  // reload is scheduled — which the spec above already covers. Gives up LOUDLY rather than falling
+  // through, so a loaded runner that never finished loading says so instead of failing on the row
+  // assertion below, which would read as "the fix regressed" (#1314).
+  const untilLoaded = async (w: ReturnType<typeof mountForm>): Promise<void> => {
+    await flushPromises(); // a mount's own load is in flight before the row it renders exists
+    for (let waited_ms = 0; waited_ms < UNTIL_LOADED_TIMEOUT_MS; waited_ms += POLL_MS) {
+      if (!w.find('[data-testid="cell-dir-loading"]').exists()) return;
+      await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+      await flushPromises();
+    }
+    throw new Error(`the launcher was still loading ${UNTIL_LOADED_TIMEOUT_MS}ms after the directory changed`);
+  };
+
+  it("drops the previous directory's rows in the same tick, before the debounce has even elapsed", async () => {
+    mockFetch([worktree({ session: null })], [oldSession]);
+    const w = mountForm();
+    await flushPromises();
+    expect(w.find('[data-testid="cell-resume-item"]').exists()).toBe(true);
+    expect(w.find('[data-testid="worktree-reuse"]').exists()).toBe(true);
+    expect(w.find('[data-testid="cell-dir-loading"]').exists()).toBe(false);
+
+    await w.setProps({ dir: "/elsewhere" });
+
+    expect(w.find('[data-testid="cell-resume-item"]').exists()).toBe(false);
+    expect(w.find('[data-testid="worktree-reuse"]').exists()).toBe(false);
+    expect(w.find('[data-testid="cell-dir-loading"]').exists()).toBe(true);
+  });
+
+  it("shows the new directory's own rows once they land, and stops saying it is loading", async () => {
+    mockFetchPerDir({
+      "/repo": { worktrees: [worktree({ session: null })], sessions: [oldSession] },
+      "/elsewhere": { worktrees: [], sessions: [{ id: "s-new", title: "the other project", mtime: 2 }] },
+    });
+    const w = mountForm();
+    await untilLoaded(w);
+    expect(w.find('[data-testid="ri-title"]').text()).toBe("an old chat");
+
+    await w.setProps({ dir: "/elsewhere" });
+    await untilLoaded(w);
+
+    expect(w.find('[data-testid="cell-dir-loading"]').exists()).toBe(false);
+    expect(w.find('[data-testid="ri-title"]').text()).toBe("the other project");
+    expect(w.find('[data-testid="worktree-reuse"]').exists()).toBe(false);
   });
 });

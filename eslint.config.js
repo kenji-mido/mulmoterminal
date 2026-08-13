@@ -18,6 +18,9 @@ export default [
     languageOptions: {
       parserOptions: {
         parser: tseslint.parser,
+        project: ["./tsconfig.app.json"],
+        tsconfigRootDir: import.meta.dirname,
+        extraFileExtensions: [".vue"],
       },
       globals: {
         ...globals.browser,
@@ -35,6 +38,27 @@ export default [
           element: "style",
           message:
             "Use Tailwind utilities (see docs/styling.md). If this genuinely can't be a utility, add the file to the scoped-CSS allowlist in eslint.config.js with a reason.",
+        },
+      ],
+      // The assertion bans below reach `<script>` only: typescript-eslint's rules never visit
+      // the TEMPLATE body, which vue-eslint-parser exposes as a separate AST. So
+      // `@input="…($event.target as HTMLInputElement).value"` was invisible to
+      // consistent-type-assertions even at `error`, and `!` was invisible to
+      // no-non-null-assertion. `vue/no-restricted-syntax` is the one rule that walks that AST,
+      // so the same two bans are spelled here as selectors.
+      "vue/no-restricted-syntax": [
+        "error",
+        {
+          // `as const` is excluded, because consistent-type-assertions excludes it too and the
+          // two halves of one SFC must not disagree. It is also not what the ban is about: a
+          // const assertion narrows a literal the compiler can already see, rather than claiming
+          // a type the compiler could not prove.
+          selector: 'TSAsExpression:not([typeAnnotation.typeName.name="const"])',
+          message: "Do not use type assertions — narrow in <script> and pass the result to the template.",
+        },
+        {
+          selector: "TSNonNullExpression",
+          message: "Do not use non-null assertions — narrow in <script> and pass the result to the template.",
         },
       ],
     },
@@ -110,6 +134,211 @@ export default [
     files: ["**/*.{ts,tsx,mts,cts}", "**/*.vue"],
     rules: {
       "@typescript-eslint/no-unused-vars": ["error", { ignoreRestSiblings: true }],
+    },
+  },
+  {
+    // `as` casts, which CLAUDE.md forbids ("MUST use type guards instead") and nothing was
+    // enforcing — so they accumulated to 90 in the app while the rule existed only on paper.
+    // A cast asserts a type the compiler could not prove; a type guard PROVES it, and the
+    // difference shows up at runtime, on the data you least control.
+    //
+    // ERROR since #1231 finished: the 149 assertions the app started with are gone, and the
+    // allowlist below is the only way to keep one — with a reason, since inline eslint-disable is
+    // forbidden and hides the debt at the scene.
+    //
+    // `**/*.vue` here reaches the SCRIPT block only — typescript-eslint's rules never walk the
+    // template AST, so an `as` inside `@input="…"` passed this rule at `error` (#1339). The same
+    // ban for the template is the `vue/no-restricted-syntax` selectors in the `.vue` block above.
+    files: ["**/*.{ts,tsx,mts,cts}", "**/*.vue"],
+    rules: {
+      "@typescript-eslint/consistent-type-assertions": ["error", { assertionStyle: "never" }],
+    },
+  },
+  {
+    // Type-aware lint, on the APP ONLY — the two promise rules from #1301's sibling (#1300).
+    //
+    // Scoped to server/src/common rather than everything: the type program is the whole cost of
+    // this pass, so keeping tests out of it keeps that program smaller. WARN, not error, for the
+    // same reason #1231 started at warn — the count stays visible without CI going red while the
+    // real ones are read one at a time.
+    //
+    // Only these two: they catch things NO syntactic rule can. A missing `await` makes a rejection
+    // vanish and the call look like it succeeded; an async callback handed to an API that ignores
+    // the returned promise does the same. The `no-unsafe-*` family is the rest of #1300 and is a
+    // separate piece of work — 139 findings that mostly say "this is untyped", not "this is wrong".
+    //
+    // .ts only. A .vue file needs vue-eslint-parser as the PARSER (with tseslint.parser underneath
+    // for the script block), and pointing tseslint.parser straight at one fails to parse the SFC.
+    // Wiring type info through the Vue block is its own change; the promise mistakes this catches
+    // live in the composables and the server either way.
+    files: ["server/**/*.ts", "src/**/*.ts", "common/**/*.ts"],
+    // Specs are out, as #1300 asks: they are not in either project, so the parser cannot place
+    // them — and keeping them out is what keeps the type program small.
+    ignores: ["**/*.spec.ts", "**/*.test.ts"],
+    languageOptions: {
+      parser: tseslint.parser,
+      // Explicit projects, not `projectService: true`: the root tsconfig.json references only
+      // app and node, so the service could not place any server/** file and reported 321 parse
+      // errors. Naming both projects is what actually covers the code these rules are for.
+      parserOptions: { project: ["./tsconfig.app.json", "./tsconfig.server.json"], tsconfigRootDir: import.meta.dirname },
+    },
+    rules: {
+      "@typescript-eslint/no-floating-promises": "warn",
+      "@typescript-eslint/no-misused-promises": "warn",
+      // Two more from the type-aware family, at ERROR because both are now at zero and each
+      // catches something no syntactic rule can: an `await` on a value that is not a promise
+      // (which reads as async and is not), and a template/String() that turns an object into the
+      // literal text "[object Object]" — a wrong value that travels instead of throwing.
+      "@typescript-eslint/await-thenable": "error",
+      "@typescript-eslint/no-base-to-string": "error",
+      // The `any` family (#1300). All five are at ZERO, and they are the rules that catch what
+      // `no-explicit-any` cannot: an `any` that arrives from outside — JSON.parse, a dynamic
+      // import, express's req.body, Response.json() — and then type-checks against every use it
+      // reaches. See the exclusion block below for the ONE place they cannot be trusted.
+      "@typescript-eslint/no-unsafe-argument": "error",
+      "@typescript-eslint/no-unsafe-assignment": "error",
+      "@typescript-eslint/no-unsafe-call": "error",
+      "@typescript-eslint/no-unsafe-member-access": "error",
+      "@typescript-eslint/no-unsafe-return": "error",
+      // The type-aware sonarjs rules, read one finding at a time in #1300. They had been configured
+      // as errors for a long time and never ran, because nothing built a type program until this
+      // block did — so what looks like a demotion below is the first time any of them was judged.
+      //
+      // ERROR — at zero, and each catches something real:
+      "sonarjs/different-types-comparison": "error",
+      "sonarjs/no-alphabetical-sort": "error",
+      "sonarjs/no-misleading-array-reverse": "error",
+      // ERROR here, off for `.vue` below: Vue composes emit types by intersecting call-signature
+      // interfaces, which this rule reads as "a type without members".
+      "sonarjs/no-useless-intersection": "error",
+      // It was off on the claim that it fights no-floating-promises. It does not (#1362): S3735
+      // returns early for a thenable, for `void 0`, for an IIFE, and for a call whose type is
+      // any/unknown — and with no type info at all, for ANY call. So every fire-and-forget `void` in
+      // server/src/common, 160-odd of them with the 66 from #1300 among those, is invisible to it.
+      // Turning the rule on reported THREE, all `void map.delete(…)` squeezing a statement into an
+      // arrow's `: void` body and none of them a promise; those are block bodies now.
+      "sonarjs/void-use": "error",
+      //
+      // WARN — the findings are external APIs we use ON PURPOSE, so this cannot reach zero, but a
+      // NEW deprecation is worth seeing. The five standing ones: `Server` from the MCP SDK (x3),
+      // whose own notice says to keep using it for the low-level `setRequestHandler` API we are on;
+      // `document.execCommand("copy")`, the synchronous copy that works on an existing selection
+      // where the async Clipboard API does not; and `e.returnValue`, which legacy Chrome/Edge still
+      // require to raise the beforeunload prompt.
+      "sonarjs/deprecation": "warn",
+      //
+      // OFF — every finding was a false positive, and the reason is structural rather than
+      // incidental, so the rule will keep producing them:
+      //
+      // Flags a function whose returns differ in type — but all three findings DECLARED a union
+      // return type (`"tool" | { said } | null`, `JsonValue`, `HeaderChip | null`). The union is
+      // the contract; collapsing it would mean boxing every answer to satisfy the rule.
+      "sonarjs/function-return-type": "off",
+      // Wants an initial value on `reduce()`. Both findings are provably non-empty — one guards
+      // `length === 0` on the line above, the other reduces `[head, ...rest]` — and the rule cannot
+      // see either. An initial value there would be dead code that also changes the result type.
+      "sonarjs/reduce-initial-value": "off",
+      // Wants two functions instead of a boolean parameter. Its one finding takes `secret` from a
+      // caller that COMPUTES it (`Object.keys(env).length > 0`), so splitting the function just
+      // moves the same branch to the call site.
+      "sonarjs/no-selector-parameter": "off",
+    },
+  },
+  {
+    // The same two rules for .vue. RULES ONLY — no `languageOptions` here on purpose: setting
+    // `parser` would replace vue-eslint-parser and every SFC would fail to parse ("'>' expected").
+    // The type program for these comes from the `**/*.vue` block above, which passes
+    // `project` + `extraFileExtensions` THROUGH vue-eslint-parser to tseslint.parser.
+    files: ["src/**/*.vue"],
+    rules: {
+      "@typescript-eslint/no-floating-promises": "warn",
+      "@typescript-eslint/no-misused-promises": "warn",
+      // OFF here, error everywhere else (#1300). The rule calls an interface holding nothing but
+      // CALL signatures "a type without members", so `GridCellEmits & { (e: "session", id): void }`
+      // reads as a useless intersection. That composition is how Vue's type-based `defineEmits<>`
+      // reuses a child's contract, and dropping it would drop the child's events — all four
+      // findings were that, and every one of them was in a `.vue`.
+      "sonarjs/no-useless-intersection": "off",
+    },
+  },
+  {
+    // The `any` family is OFF wherever a `.vue` component type is in play, and that is a LIMIT OF
+    // THE LINTER rather than a hole in the code.
+    //
+    // This exclusion is the `any` family ONLY. It is not a general "linter cannot see `.vue`":
+    // the assertion bans DO cover SFCs, script side through consistent-type-assertions and
+    // template side through the `vue/no-restricted-syntax` selectors (#1339).
+    //
+    // ESLint's type program does not generate SFC component types, so `InstanceType<typeof
+    // SomeComponent>` — and any type imported from a `.vue` — resolves to the error type. Every
+    // read through such a value is then reported as unsafe. `vue-tsc` resolves them fully: calling
+    // a made-up method through one of these refs is rejected with the whole instance type, so this
+    // code IS type-checked, just not by this pass (measured on #1300: 58 reports, 0 fixable).
+    //
+    // The `.ts` files listed here are the ones that import a type or component FROM a `.vue`; they
+    // inherit the same blind spot. A new file that does the same belongs on this list — with the
+    // import named, so the entry can be deleted if the type program ever learns SFCs.
+    files: [
+      "**/*.vue",
+      "src/main.ts", // App.vue
+      "src/plugins-registry.ts", // CollectionCardView.vue
+      "src/composables/collectionUi.ts", // PinToggle.vue
+      "src/components/filesPaneStore.ts", // FilesPaneState from FilesPane.vue
+    ],
+    rules: {
+      "@typescript-eslint/no-unsafe-argument": "off",
+      "@typescript-eslint/no-unsafe-assignment": "off",
+      "@typescript-eslint/no-unsafe-call": "off",
+      "@typescript-eslint/no-unsafe-member-access": "off",
+      "@typescript-eslint/no-unsafe-return": "off",
+    },
+  },
+  {
+    // Type-assertion allowlist. Every entry is a place where NO amount of local typing can
+    // express the truth, because the type that is wrong belongs to someone else. Each says which
+    // upstream and what would remove it — delete the entry when that lands.
+    //
+    // Nothing here is "we could not be bothered": a host-side fix was written and merged for the
+    // one case that had one (mulmoclaude#2721 widened `modalTeleportTarget`, and the assertion it
+    // forced is gone from this repo as of collection-plugin 1.2.3).
+    files: [
+      // @modelcontextprotocol/sdk declares `class StreamableHTTPServerTransport implements
+      // Transport` while typing that class's onclose/onerror/onmessage accessors `T | undefined`
+      // where Transport spells them `?: T`. Under exactOptionalPropertyTypes the class therefore
+      // fails the interface it claims to implement. Upstream issue (open, and it names this exact
+      // workaround): https://github.com/modelcontextprotocol/typescript-sdk/issues/2083
+      "server/routes/mcp-routes.ts",
+      // gui-chat-protocol declares `dispatch<T = unknown>(args): Promise<T>` and
+      // `subscribe<T>(name, handler: (payload: T) => void)`. The PLUGIN chooses T and the HOST has
+      // to produce it from an untyped response / channel frame — unverifiable by construction, so
+      // any implementation asserts. (The same shape in OUR OWN generics — wikiApi's getJson,
+      // useSessionFeed, postConfigField — was fixed by taking a reader from the caller; that is
+      // not open here, because changing the protocol's signatures breaks every plugin that
+      // annotates its handler.) Moving the assertion onto the payload (`handler(data as T)`)
+      // relocates it rather than removing it, so it stays where the unprovable claim is made.
+      "src/composables/pluginRuntime.ts",
+      // The same shape one layer out: @mulmoclaude/accounting-plugin declares
+      // `AccountingApiCall = <T = unknown>(path, opts) => Promise<ApiResult<T>>`, and the
+      // collection package's CollectionApiResult<T> seam matches it. The PLUGIN picks T; the host
+      // can only hand it a body nothing has checked. `fetchJson` itself now REQUIRES a reader
+      // (#1300), so every caller that can check does — these two cannot, and say so at the seam
+      // with a one-line `asDeclared` rather than pushing the hole back into fetchJson for all of
+      // them. Removing these needs the packages to take a reader, as gui-chat-protocol's own
+      // `fetchJson<T>` already does: receptron/gui-chat-protocol#30.
+      "src/composables/accountingUi.ts",
+      "src/composables/collectionUi.ts",
+    ],
+    rules: {
+      "@typescript-eslint/consistent-type-assertions": "off",
+    },
+  },
+  {
+    // Tests may build values the types forbid on purpose: a malformed payload to prove the
+    // parser rejects it, a partial stub standing in for a big interface. Asserting there is
+    // the point of the test, not a hole in the app.
+    files: ["**/*.spec.{ts,tsx,js}", "**/*.test.{ts,tsx,js}", "test/**/*.{ts,tsx,js}"],
+    rules: {
+      "@typescript-eslint/consistent-type-assertions": "off",
     },
   },
   {

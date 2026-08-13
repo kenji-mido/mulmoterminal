@@ -26,10 +26,12 @@ import type { PushKind } from "../../common/pushKinds.js";
 import { type TerminalSubmitMode } from "../../common/terminalSubmit.js";
 import { launchOptions } from "./launch-options.js";
 import { badArrayField, badNullableArrayField, badObjectField } from "./config-body.js";
+import { setDeclaredGitlabHosts } from "../git/forge-host.js";
 import { getUpdateStatus } from "./update-status.js";
 import { readSoundPreset } from "./sound-presets.js";
 import { isNotifyKind } from "../../common/notifyKinds.js";
 import { parsePresetRef, soundPresetById } from "../../common/notifySounds.js";
+import { requestBody } from "../routes/requestBody.js";
 
 export const APP_CONFIG_FILE = path.join(os.homedir(), ".mulmoterminal", "config.json");
 const CONFIG_FILE = APP_CONFIG_FILE;
@@ -40,6 +42,19 @@ let config: AppConfig = loadAppConfig(CONFIG_FILE);
 export function getPrRepos(): string[] {
   return config.prRepos;
 }
+
+// The hosts declared as self-hosted GitLab (#1332) — read live, like the repos above, so a POST
+// that changes them reaches the next `glab` call without a restart. A hand edit of config.json
+// still needs one, exactly as `prRepos` does.
+export function getGitlabHosts(): string[] {
+  return config.gitlabHosts;
+}
+
+// Wired here rather than in mountConfigRoutes: the forge layer answers "which CLI reads this host"
+// for git status polls and header context too, not only for mounted routes, and this module is
+// already loaded at import time by everything that reads the config. The edge runs config -> git
+// on purpose — forge-host must not import this module back (see setDeclaredGitlabHosts).
+setDeclaredGitlabHosts(getGitlabHosts);
 
 // The saved directories and the recorded clone-per-repo choices, for the repo -> dir reverse
 // lookup (#1172). Read live for the same reason as the repos above: choosing a clone writes the
@@ -165,7 +180,7 @@ export function mountConfigRoutes(app: Express, claudeCwd: string, buildId: stri
   });
 
   app.post("/api/config", (req, res) => {
-    const body = req.body ?? {};
+    const body = requestBody(req.body);
     // Partial update: keep the field the request omits so saving the sound doesn't
     // wipe the presets (and vice-versa). cwdPresets, when present, must be an array.
     const badField = badArrayField(body);

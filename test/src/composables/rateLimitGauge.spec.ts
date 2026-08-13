@@ -168,4 +168,23 @@ describe("rateLimitReadout note", () => {
     const expired = { fiveHour: { usedPercentage: 83, resetsAt_sec: Math.floor(NOW / 1000) - 60 }, sevenDay: null };
     expect(noteOf(snap({ claude: expired, claudeProbe: "no-claude" }), NOW)).toContain("PATH");
   });
+
+  // #1293. The probe now waits on a trust dialog instead of confirming it by accident, so a user
+  // whose workspace was never trusted gets a permanent `n/a` — and the one thing they need to know
+  // is that ten seconds in a terminal fixes it. "Retrying, less often each time" does not say that.
+  it("says how to clear a trust prompt when that is what the probe is stuck on", () => {
+    const note = noteOf(snap({ claudeProbe: "no-report", claudeStall: "trust-prompt" }), NOW);
+    expect(note).toContain("trust prompt");
+    expect(note).toContain("claude");
+  });
+
+  it("falls back to the general silence when the screen proved nothing", () => {
+    expect(noteOf(snap({ claudeProbe: "no-report", claudeStall: "unknown" }), NOW)).toContain("Retrying");
+  });
+
+  // A stall belongs to a silence and nothing else; a state that carries its own reason must not be
+  // overwritten by one left over from an earlier probe.
+  it("ignores a stall that does not belong to the current state", () => {
+    expect(noteOf(snap({ claudeProbe: "no-claude", claudeStall: "trust-prompt" }), NOW)).toContain("PATH");
+  });
 });

@@ -7,6 +7,7 @@ import { claudeAdapter } from "../agents/claude.js";
 import { TOOL_GROUPS, isToolGroup } from "../../common/toolGroups.js";
 import { registerGuiMcpGroup, unregisterGuiMcpGroup, registeredGuiMcpGroups } from "../infra/gui-mcp-registration.js";
 import { syncAntigravityMcpConfig } from "../agents/antigravity-mcp.js";
+import { requestBody } from "./requestBody.js";
 
 export function mountGuiMcpRoutes(app: Express): void {
   // Which GUI tool groups this directory has registered with Claude Code, so the launcher can
@@ -35,8 +36,9 @@ export function mountGuiMcpRoutes(app: Express): void {
   // in the directory — so that file is rewritten from the registry the switch just changed. One
   // switch, every agent, and still only one place that RECORDS the answer.
   app.post("/api/gui-mcp-groups", async (req, res) => {
-    const cwd = existingWorkspace(typeof req.body?.cwd === "string" ? req.body.cwd : null);
-    const { group, enabled } = req.body ?? {};
+    const body = requestBody(req.body);
+    const cwd = existingWorkspace(typeof body.cwd === "string" ? body.cwd : null);
+    const { group, enabled } = body;
     if (!cwd) return res.status(400).json({ ok: false, message: "unknown directory" });
     if (!isToolGroup(group)) return res.status(400).json({ ok: false, message: `unknown tool group: ${group}` });
     // Checked rather than coerced: this writes to the user's Claude Code config, and a missing

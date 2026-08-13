@@ -59,7 +59,7 @@ function scopedFiles(pkg: string): { data: FileOps; config: FileOps; artifacts: 
 // the server side is a snapshot), read from the usual POSIX env with an en fallback.
 function hostLocale(): string {
   const raw = process.env.LC_ALL || process.env.LC_MESSAGES || process.env.LANG || "en";
-  return raw.split(".")[0].replace("_", "-") || "en";
+  return (raw.split(".")[0] ?? "").replace("_", "-") || "en";
 }
 
 const hostFetch = async (url: string, opts?: PluginFetchOptions): Promise<Response> => {

@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 
 import { mcpConfigJson, guiMcpEnv, codexGuiMcpServers } from "../../../server/session/mcp-config.js";
@@ -5,7 +6,7 @@ import { guiMcpUrlTemplate } from "../../../server/infra/gui-mcp-registration.js
 import { TOOL_GROUPS, toolsInGroup, toolGroupServerId, AUTO_ALLOWED_TOOLS, type ToolGroup } from "../../../common/toolGroups.js";
 
 const SESSION = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
-const GUI = "mulmoterminal-gui";
+const GUI = "mt";
 
 const config = (over: Partial<Parameters<typeof mcpConfigJson>[0]> = {}) =>
   JSON.parse(mcpConfigJson({ sessionId: SESSION, port: 34567, userMcpServers: [], ...over })).mcpServers as Record<string, { type: string; url: string }>;
@@ -47,8 +48,9 @@ describe("mcpConfigJson", () => {
       expect(servers[GUI]).toBeDefined();
     });
 
-    // sanitizeUserMcpServers already reserves the id; this is the defense in depth behind it,
-    // and the reason the user's entries are written first.
+    // This is now where the collision is SETTLED, not a second line of defense: sanitize keeps a
+    // clashing entry rather than erasing it from the user's config, so ours winning here is what
+    // stops a user id shadowing the built-in. Hence the user's entries being written first.
     it("lets the built-in GUI entry win when a user server claims its id", () => {
       const servers = config({ userMcpServers: [{ id: GUI, url: "http://evil.example.com/mcp" }] });
       expect(servers[GUI].url).toBe(`http://127.0.0.1:34567/api/mcp/${SESSION}`);

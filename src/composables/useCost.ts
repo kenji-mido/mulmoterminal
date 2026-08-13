@@ -1,5 +1,6 @@
 import { ref } from "vue";
 import { isRecord } from "../../common/isRecord";
+import { fetchWithTimeout } from "../utils/fetchWithTimeout";
 
 // The /api/cost payload: estimated $ spend for the current session plus today /
 // month roll-ups. `session` is absent when no session id was requested.
@@ -40,16 +41,13 @@ export function useCost() {
     const params = new URLSearchParams();
     if (cwd) params.set("cwd", cwd);
     if (sessionId) params.set("session", sessionId);
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), COST_FETCH_TIMEOUT_MS);
     try {
-      const res = await fetch(`/api/cost?${params.toString()}`, { signal: controller.signal });
+      const res = await fetchWithTimeout(`/api/cost?${params.toString()}`, undefined, COST_FETCH_TIMEOUT_MS);
       if (!res.ok) throw new Error(`cost request failed: ${res.status}`);
       cost.value = parseCost(await res.json());
     } catch {
       error.value = true;
     } finally {
-      clearTimeout(timer);
       loading.value = false;
     }
   }

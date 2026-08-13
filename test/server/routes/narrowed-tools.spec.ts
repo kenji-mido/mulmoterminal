@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 
 import { narrowedTools, type ToolSummary } from "../../../server/routes/tool-routes.js";

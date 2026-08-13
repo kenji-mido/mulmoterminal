@@ -1,23 +1,22 @@
 // @vitest-environment node
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll } from "vitest";
 import express from "express";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import path from "node:path";
-import type { Server } from "node:http";
+import { appRequest } from "../../helpers/appRequest.js";
 import { initArtifactsBackend } from "../../../server/backends/artifacts.js";
 import { mountHtmlDispatchRoute, mountHtmlFileRoute, mountHtmlPreviewRoute } from "../../../server/backends/html.js";
 import { initOpenPathBackend, resetOpenPathBackend, resolveHtmlRequest } from "../../../server/backends/openPath.js";
+import { makeTempDir } from "../../support/tempDir";
 
-let server: Server;
-let base: string;
+let request: ReturnType<typeof appRequest>;
 let ws: string;
 const REL = "artifacts/html/2026/06/page.html";
 // A page OUTSIDE artifacts/html — what presentHtml's `path` form is for.
 const REPO_REL = "docs/report.html";
 
-beforeAll(async () => {
-  ws = mkdtempSync(path.join(tmpdir(), "mt-html-"));
+beforeAll(() => {
+  ws = makeTempDir("mt-html-");
   mkdirSync(path.join(ws, "artifacts", "html", "2026", "06"), { recursive: true });
   writeFileSync(path.join(ws, REL), "<!doctype html><html><body>ORIGINAL</body></html>");
   mkdirSync(path.join(ws, "docs", ".hidden"), { recursive: true });
@@ -32,17 +31,11 @@ beforeAll(async () => {
   mountHtmlDispatchRoute(app);
   mountHtmlPreviewRoute(app, { workspace: ws });
   mountHtmlFileRoute(app);
-  await new Promise<void>((resolve) => {
-    server = app.listen(0, () => resolve());
-  });
-  const addr = server.address();
-  base = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`;
+  request = appRequest(app);
 });
 
-afterAll(() => server?.close());
-
 const dispatch = (body: unknown) =>
-  fetch(`${base}/api/plugin/presentHtml`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  request("/api/plugin/presentHtml", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 
 describe("html dispatch route", () => {
   it("loadHtml returns the page bytes", async () => {
@@ -89,7 +82,7 @@ describe("html dispatch route", () => {
 
 describe("html preview route", () => {
   it("serves the page with the preview CSP + nosniff", async () => {
-    const res = await fetch(`${base}/${REL}`);
+    const res = await request(`/${REL}`);
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toContain("text/html");
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");
@@ -114,19 +107,19 @@ describe("html preview route", () => {
   ];
 
   it("trusts exactly the audited CDN origins", async () => {
-    const csp = (await fetch(`${base}/${REL}`)).headers.get("content-security-policy") ?? "";
+    const csp = (await request(`/${REL}`)).headers.get("content-security-policy") ?? "";
     // Bare `https:` in img-src/media-src is a scheme, not an origin — the `//` keeps it out.
     const served = [...new Set(csp.match(/https:\/\/[^\s;]+/g) ?? [])].sort();
     expect(served).toEqual([...AUDITED_CDNS].sort());
   });
 
   it("403s a path that escapes artifacts/html", async () => {
-    const res = await fetch(`${base}/artifacts/html/${encodeURIComponent("../../etc/passwd")}`);
+    const res = await request(`/artifacts/html/${encodeURIComponent("../../etc/passwd")}`);
     expect([403, 404]).toContain(res.status); // blocked either by containment or non-.html
   });
 
   it("404s a missing file", async () => {
-    expect((await fetch(`${base}/artifacts/html/nope.html`)).status).toBe(404);
+    expect((await request("/artifacts/html/nope.html")).status).toBe(404);
   });
 });
 
@@ -135,7 +128,7 @@ describe("html preview route", () => {
 // dotfiles, %2F smuggling) are core's, tested in MulmoClaude.
 describe("htmlfile route", () => {
   it("serves a workspace page with the same CSP as the artifacts preview", async () => {
-    const res = await fetch(`${base}/htmlfile/ws/docs/report.html`);
+    const res = await request("/htmlfile/ws/docs/report.html");
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("REPO");
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");
@@ -153,13 +146,13 @@ describe("htmlfile route", () => {
   const htmlFileAbsUrl = (abs: string) => ["abs", ...abs.split(path.sep).filter(Boolean).map(encodeURIComponent)].join("/");
 
   it("serves a page by absolute path", async () => {
-    const res = await fetch(`${base}/htmlfile/${htmlFileAbsUrl(path.join(ws, REPO_REL))}`);
+    const res = await request(`/htmlfile/${htmlFileAbsUrl(path.join(ws, REPO_REL))}`);
     expect(res.status).toBe(200);
     expect(await res.text()).toContain("REPO");
   });
 
   it("404s an unknown scope", async () => {
-    expect((await fetch(`${base}/htmlfile/nope/docs/report.html`)).status).toBe(404);
+    expect((await request("/htmlfile/nope/docs/report.html")).status).toBe(404);
   });
 
   it("refuses a traversal segment at the resolver", async () => {
@@ -170,19 +163,19 @@ describe("htmlfile route", () => {
   });
 
   it("404s a %2F-smuggled separator (the parser decodes per segment)", async () => {
-    expect((await fetch(`${base}/htmlfile/ws/docs%2F..%2Fdocs/report.html`)).status).toBe(404);
+    expect((await request("/htmlfile/ws/docs%2F..%2Fdocs/report.html")).status).toBe(404);
   });
 
   it("404s a dotfile segment — the tool's path gate refuses these too", async () => {
-    expect((await fetch(`${base}/htmlfile/ws/docs/.hidden/secret.html`)).status).toBe(404);
+    expect((await request("/htmlfile/ws/docs/.hidden/secret.html")).status).toBe(404);
   });
 
   it("404s a non-HTML path", async () => {
-    expect((await fetch(`${base}/htmlfile/ws/docs/report.txt`)).status).toBe(404);
+    expect((await request("/htmlfile/ws/docs/report.txt")).status).toBe(404);
   });
 
   it("404s a directory named like a page", async () => {
     mkdirSync(path.join(ws, "docs", "folder.html"), { recursive: true });
-    expect((await fetch(`${base}/htmlfile/ws/docs/folder.html`)).status).toBe(404);
+    expect((await request("/htmlfile/ws/docs/folder.html")).status).toBe(404);
   });
 });

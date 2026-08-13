@@ -1,3 +1,4 @@
+// @vitest-environment node
 // The broker feeding the tools pane's call history — the only source codex / agy have, since
 // neither reports tool calls the way claude's hooks do (server/mcp/gui-call-history.ts).
 //

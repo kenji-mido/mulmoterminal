@@ -39,8 +39,11 @@ class ResizeObserverStub {
   disconnect() {}
 }
 
+// At module scope, not inside a test: a component's module load is not the test's work, and
+// billing it to `testTimeout` is what makes the first test of a file the one that flakes.
+const Terminal = (await import("../../../src/components/Terminal.vue")).default;
+
 const mountTerminal = async () => {
-  const Terminal = (await import("../../../src/components/Terminal.vue")).default;
   return mount(Terminal, { props: { sessionId: null, connectKey: 1, persistKey: "input-spec", cwd: "/proj/input-spec" } });
 };
 
@@ -80,7 +83,6 @@ describe("Terminal.vue reports the user typing", () => {
   // silently becomes a native listener — firing on composition and bypassing the pointer/focus
   // filtering in terminalUserInput entirely, which is the whole reason the event exists.
   it("declares `input` as a component emit, which is what shadows the native one", async () => {
-    const Terminal = (await import("../../../src/components/Terminal.vue")).default;
     expect(declaredEmits(Terminal)).toContain("input");
   });
 });

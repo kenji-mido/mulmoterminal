@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import { batchCommandLine, escapeBatchArgument, UnsafeArgumentError } from "../../../server/infra/cmd-escape";
 

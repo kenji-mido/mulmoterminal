@@ -1,3 +1,6 @@
+// @vitest-environment node
+// Nothing here touches a DOM — it is fs and this module's predicates — and the default jsdom
+// environment cost this file 624ms of setup per run for nothing (2.24s -> 1.06s without it).
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -157,6 +160,13 @@ describe("probe transcript removal", () => {
   //
   // This test covers the count, not the limit: it cannot lower `ulimit` for its own process, so on
   // a machine with a high one it would pass either way. The measurement above is the evidence.
+  // A per-test timeout, not the 15s baseline. This test writes 601 files and the sweep reads all
+  // 601 back, and that 1200-operation floor is REAL disk rather than work this process controls:
+  // alone it costs 271ms (setup 60ms, sweep 208ms — 0.35ms/file, so the sweep itself is not slow),
+  // but under the full suite ~19 workers share one disk and the same test took 5.4s and 9.7s on
+  // two samples. A CI runner with a slower disk goes further still, and what it would report is a
+  // timeout — which reads as "the sweep broke" rather than "the machine was busy" (#1328). Kept at
+  // 601 deliberately: the count is the claim this test makes. A real hang still trips this.
   it("gets through a directory of many transcripts", async () => {
     const count = 600;
     for (let i = 0; i < count; i++) write(`probe-${i}.jsonl`, probe());
@@ -164,7 +174,7 @@ describe("probe transcript removal", () => {
 
     expect(await sweepLegacyProbeTranscripts(cwd)).toBe(count);
     expect(remains()).toEqual(["real.jsonl"]);
-  });
+  }, 60_000);
 
   it("only looks inside the project it was given", async () => {
     const other = path.join(home, "other-project");

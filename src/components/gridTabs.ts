@@ -2,6 +2,7 @@ import type { RunCommand } from "./runCommand";
 import { dirPriority } from "../../common/dirPriorityOrder";
 import { asTerminalAgent, type TerminalAgent } from "../../common/sessionAgent";
 import { isRecord } from "../../common/isRecord";
+import { isUnknownArray } from "../../common/isUnknownArray";
 import type { AttentionStatus } from "./attentionStatus";
 
 // The grid is ONE flat, ordered list of terminal cells, split into pages of 9
@@ -102,7 +103,7 @@ export function addCell(state: GridState): GridState {
 // cancelable, so it's excluded.
 export function cancelableLaunchUid(state: GridState): number | null {
   const last = state.cells[state.cells.length - 1];
-  return state.cells.length > 1 && isLaunchCell(last) ? last.uid : null;
+  return state.cells.length > 1 && last !== undefined && isLaunchCell(last) ? last.uid : null;
 }
 
 // A session id lives in AT MOST one cell: the server binds a session to one connection (a
@@ -240,15 +241,18 @@ export function moveZoom(state: GridState, order: readonly number[], dir: -1 | 1
 //     focus disagree the moment the selection moves, and then expanding jumps somewhere the
 //     user was not.
 //
-//  5. Entering the zoom needs two running cells (toggleExpand's rule, #374); LEAVING it is
-//     never refused, whatever state the grid got into.
+//  5. Entering the zoom is never refused for a cell that exists, and LEAVING it is never
+//     refused either, whatever state the grid got into. It USED to need two running cells
+//     (#374). Do not restore that: the zoomed row is the only place the Canvas / Tools / Files
+//     panes exist, so the rule made them unreachable on a one-terminal grid, silently. The full
+//     account, and the tests that hold it, are at toggleExpand below.
 // ---------------------------------------------------------------------------------------
 
-// Zoom `order[at]`, honouring invariant 5. Shared by every action that ENTERS the zoom so the
-// rule cannot be forgotten at one entry point.
+// Zoom `order[at]`. Shared by every action that ENTERS the zoom, so what entering means cannot
+// drift between entry points.
 function zoomAt(state: GridState, order: readonly number[], at: number): GridState {
   const uid = order[at];
-  if (uid === undefined || runningCount(state.cells) < 2) return state;
+  if (uid === undefined) return state;
   if (!state.cells.some((c) => c.uid === uid)) return state;
   return { ...state, expanded: uid };
 }
@@ -307,7 +311,7 @@ export function nextAttention(
   // NEVER enlarges or collapses — that is toggleZoom's job alone. Zoomed, this moves which
   // terminal is enlarged; un-zoomed, it brings the candidate's page on screen and leaves the
   // grid a grid. A key that sometimes changed the whole layout would be unpredictable.
-  return zoomedUid(state) !== null ? { ...state, expanded: order[at] } : { ...state, page: Math.floor(at / PAGE_SIZE) };
+  return zoomedUid(state) !== null ? { ...state, expanded: order[at] ?? null } : { ...state, page: Math.floor(at / PAGE_SIZE) };
 }
 
 /** The uid of the terminal `nextAttention` would move to, or null. Exported so the caller can
@@ -319,7 +323,7 @@ export function nextAttentionUid(
   fromUid: number | null = null,
 ): number | null {
   const at = nextCandidate(state, order, statusByUid, zoomedUid(state) ?? fromUid);
-  return at === undefined ? null : order[at];
+  return at === undefined ? null : (order[at] ?? null);
 }
 
 // The index in `order` of the next terminal worth going to, starting after `from`, or undefined
@@ -340,21 +344,44 @@ function nextCandidate(state: GridState, order: readonly number[], statusByUid: 
   for (const status of ATTENTION_ORDER) {
     // Absent = idle, the convention AttentionStatus documents: a cell whose status has not been
     // reported yet must not fall out of the search entirely.
-    const at = rotated.find((i) => occupied.has(order[i]) && (statusByUid[order[i]] ?? "idle") === status);
+    const at = rotated.find((i) => {
+      const uid = order[i];
+      return uid !== undefined && occupied.has(uid) && (statusByUid[uid] ?? "idle") === status;
+    });
     if (at !== undefined) return at;
   }
   return undefined;
 }
 
-// Zooming shows one cell big with the others as a filmstrip beside it, so it only means
-// anything when there IS another cell to switch to. With a single occupied cell the expand button
-// used to swap a working layout for a filmstrip containing nothing, and squeeze the
-// terminal's status bar and input off the bottom of the viewport for no gain (#374).
+// ENTERING THE ZOOM IS NOT GATED ON A SECOND CELL. Do not put that rule back (2026-08-03).
 //
-// Collapsing is never refused: whatever a state got into, ⤡ has to get out of it.
+// It was here from #374, which read zooming as only "one cell big, the rest as a filmstrip": with
+// nothing to switch to, the button swapped a working layout for an empty filmstrip and squeezed the
+// terminal's status bar off the bottom of the viewport, for no gain. On that reading the refusal is
+// right, and that is exactly why it is worth writing down why it is nevertheless gone — the issue
+// still reads as sound, and re-deriving it from the issue alone lands straight back on the guard.
+//
+// What the reading missed: the zoomed row is ALSO the only place the right-hand panes exist
+// (Canvas, Tools, Files — see TerminalGrid.vue's .zoom-row). Nothing sits beside a tiled cell. So on
+// a one-terminal grid the refusal did not merely decline a layout, it locked those panes away
+// entirely: the unread-canvas chip did nothing when clicked, and an agent drawing to the Canvas had
+// nowhere to be shown. That is how it was found — the owner ran the new auto-reveal (an agent's
+// drawing enlarges its cell and opens the Canvas) on a grid with one terminal, and NOTHING
+// happened. There is no error in that failure mode, on either side: the reveal asks for the zoom,
+// the state politely declines, and the feature simply appears not to work.
+//
+// The cost #374 weighed is also smaller than it looked: the thing beside the enlarged cell is the
+// roster/filmstrip, which is a mode the user toggles, and enlarging your one terminal turns out to
+// be a thing to want on its own terms. Owner's call, after hitting it live.
+//
+// Pinned by "zooms the only occupied cell" / "ENTERS the zoom with one running cell" in
+// gridTabs.spec.ts and "enlarges even when that terminal is the only one" in
+// gridCanvasAutoExpand.spec.ts. A change that reinstates the guard fails all three.
+//
+// Collapsing is never refused either: whatever a state got into, ⤡ has to get out of it.
 export function toggleExpand(state: GridState, uid: number, order: readonly number[] = []): GridState {
   if (state.expanded === uid) return { ...state, expanded: null, page: pageHolding(order, uid, state.page) };
-  if (runningCount(state.cells) < 2) return state;
+  if (!state.cells.some((c) => c.uid === uid)) return state;
   return { ...state, expanded: uid };
 }
 
@@ -378,7 +405,10 @@ export function moveCell(state: GridState, uid: number, dir: -1 | 1): GridState 
   if (!canMoveCell(state.cells, uid, dir)) return state;
   const i = state.cells.findIndex((c) => c.uid === uid);
   const cells = state.cells.slice();
-  [cells[i], cells[i + dir]] = [cells[i + dir], cells[i]];
+  const here = cells[i];
+  const there = cells[i + dir];
+  if (!here || !there) return state; // out of range — nothing to swap
+  [cells[i], cells[i + dir]] = [there, here];
   return { ...state, cells };
 }
 
@@ -472,14 +502,16 @@ const asLauncher = (v: unknown): CellLauncher | null => {
 // A cell entry is kept if its session/cwd are well-formed; uid is validated only to
 // match the persisted `expanded` (it is renumbered below regardless).
 const isCell = (c: unknown): c is Cell => {
-  const o = c as Cell | null;
-  return !!o && (o.session === null || isUuid(o.session)) && (o.cwd === null || typeof o.cwd === "string");
+  if (!isRecord(c)) return false;
+  const sessionOk = c.session === null || (typeof c.session === "string" && isUuid(c.session));
+  return sessionOk && (c.cwd === null || typeof c.cwd === "string");
 };
 
 export function parseGridState(raw: string | null): GridState | null {
   try {
-    const parsed = JSON.parse(raw ?? "");
-    if (!Array.isArray(parsed?.cells)) return null;
+    const parsed: unknown = JSON.parse(raw ?? "");
+    if (!isRecord(parsed) || !isUnknownArray(parsed.cells)) return null;
+    const { expanded: storedExpanded, page: storedPage } = parsed;
     // Keep only running cells (the trailing launch cell is ephemeral) and renumber
     // uids from position. Persisted uids are untrusted: duplicates would collide
     // v-for keys, and a near-MAX_SAFE_INTEGER value would overflow the nextUid
@@ -501,17 +533,22 @@ export function parseGridState(raw: string | null): GridState | null {
       .slice(0, MAX_TERMINALS);
     // Every field a cell keeps across a reload is named HERE — a persisted key this literal does
     // not rebuild is dropped silently, with nothing to typecheck against.
-    const cells: Cell[] = running.map((c: Cell, i: number) => ({
-      uid: i,
-      session: c.session,
-      cwd: c.cwd,
-      launcher: asLauncher(c.launcher),
-      agent: storedCellAgent(asTerminalAgent(c.agent)),
-      ...(c.parked === true ? { parked: true as const } : {}),
-    }));
-    const expandedIdx = running.findIndex((c: Cell) => c.uid === parsed.expanded);
-    const expanded = typeof parsed.expanded === "number" && expandedIdx >= 0 ? expandedIdx : null;
-    const page = Number.isSafeInteger(parsed.page) && parsed.page >= 0 ? parsed.page : 0;
+    const cells: Cell[] = running.map((c, i) => {
+      // Spread, not assigned: `agent` is absent for a Claude cell, and under
+      // exactOptionalPropertyTypes a key holding undefined is not the same as no key.
+      const agent = storedCellAgent(asTerminalAgent(c.agent));
+      return {
+        uid: i,
+        session: c.session,
+        cwd: c.cwd,
+        launcher: asLauncher(c.launcher),
+        ...(agent === undefined ? {} : { agent }),
+        ...(c.parked === true ? { parked: true as const } : {}),
+      };
+    });
+    const expandedIdx = running.findIndex((c) => c.uid === storedExpanded);
+    const expanded = typeof storedExpanded === "number" && expandedIdx >= 0 ? expandedIdx : null;
+    const page = typeof storedPage === "number" && Number.isSafeInteger(storedPage) && storedPage >= 0 ? storedPage : 0;
     return clampPage(ensureEntry({ cells, expanded, page, nextUid: cells.length, sortMode: asSortMode(parsed.sortMode) }));
   } catch {
     return null;
@@ -521,13 +558,15 @@ export function parseGridState(raw: string | null): GridState | null {
 // Migrate the legacy single-grid shape ({ sessions, cwds, expanded:position }).
 export function migrateLegacy(raw: string | null): GridState | null {
   try {
-    const parsed = JSON.parse(raw ?? "");
-    if (!Array.isArray(parsed?.sessions)) return null;
+    const parsed: unknown = JSON.parse(raw ?? "");
+    if (!isRecord(parsed) || !isUnknownArray(parsed.sessions)) return null;
+    const cwds = isUnknownArray(parsed.cwds) ? parsed.cwds : [];
     const cells: Cell[] = [];
-    parsed.sessions.forEach((s: unknown, i: number) => {
-      if (isUuid(s)) cells.push({ uid: cells.length, session: s, cwd: typeof parsed.cwds?.[i] === "string" ? parsed.cwds[i] : null });
+    parsed.sessions.forEach((s, i) => {
+      if (isUuid(s)) cells.push({ uid: cells.length, session: s, cwd: typeof cwds[i] === "string" ? cwds[i] : null });
     });
-    const expanded = typeof parsed.expanded === "number" && parsed.expanded >= 0 && parsed.expanded < cells.length ? cells[parsed.expanded].uid : null;
+    const { expanded: storedExpanded } = parsed;
+    const expanded = typeof storedExpanded === "number" && storedExpanded >= 0 && storedExpanded < cells.length ? (cells[storedExpanded]?.uid ?? null) : null;
     return clampPage(ensureEntry({ cells, expanded, page: 0, nextUid: cells.length, sortMode: "manual" }));
   } catch {
     return null;

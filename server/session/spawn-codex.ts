@@ -10,8 +10,8 @@ import { codexGuiMcpServers } from "./mcp-config.js";
 import { codexSessionsRoot, snapshotSessions, watchForCodexSession } from "../agents/codex-session.js";
 import { codexRolloutPath } from "../agents/codex-sessions.js";
 import { trackCodexActivity } from "./codex-activity-track.js";
-import { claimedCodexRollouts, codexRolloutIds, ptys } from "./registry.js";
-import { ptySpawn } from "./pty-spawn.js";
+import { claimedCodexRollouts, claimFullGuiMcp, codexRolloutIds, ptys } from "./registry.js";
+import { ptySpawn, ptyWouldReattach } from "./pty-spawn.js";
 import { ptyStartLine } from "./pty-exit-log.js";
 import { wireAgentPtyRelay } from "./pty-relay.js";
 import { attachCodexAutoRun } from "./draft-injection.js";
@@ -71,13 +71,24 @@ export function createCodexSpawner(deps: SpawnDeps) {
     //     rows). codex cannot read that config itself, so the groups arrive resolved here.
     // A grid cell whose directory registered nothing gets no MCP at all, exactly as before.
     //
-    // DELIBERATELY not given claude's workspace-cwd rule (carriesFullGuiMcp, PR2): a codex cell in
-    // the workspace stays on its directory's registered groups. That rule exists to make a
-    // workspace cell equivalent to the SINGLE VIEW so the single view can be deleted, and the
-    // single view only ever ran claude — so there is no codex behaviour it would be preserving,
-    // and applying it would be a new capability rather than a migrated one. Revisit if a reason
-    // turns up; it is one call to carriesFullGuiMcp with `cwd`.
-    const guiMcpServers = codexGuiMcpServers({ sessionId, port: PORT, groups: mcpGroups, allTools: attachGuiMcp });
+    // The workspace-cwd rule APPLIES here, and it did not use to. It was withheld on the grounds
+    // that it exists to make a workspace cell equivalent to the single view, and the single view
+    // only ever ran claude — so extending it to codex was a new capability rather than a migrated
+    // one. The owner's call (2026-08-03) is that the workspace cell is agent-agnostic: two cells in
+    // the same directory differing only by which agent runs in them should not differ in what the
+    // agent can reach. So a codex session in the workspace gets the whole GUI MCP, as claude's does.
+    //
+    // It is a real widening, because codex approves per SERVER: everything on that URL is waved
+    // through at once — the external accounts (google, X), the paid generation, and
+    // spawnBackgroundChat, which belongs to no group and is therefore reachable ONLY this way. All
+    // of it was already auto-allowed for claude in the same cell, which is the asymmetry this
+    // closes; it is still the widest thing this flag does, and the reason it is spelled out here.
+    // The claim is RELEASED here as well as made — a codex session resumed into a project directory
+    // reuses the id, and a stale claim would stand its group urls down with nothing left to serve
+    // them (Codex review on #1399). claimFullGuiMcp owns both directions so neither spawn path can
+    // apply half the rule.
+    const allTools = claimFullGuiMcp(sessionId, attachGuiMcp, cwd, ptyWouldReattach(sessionId, true));
+    const guiMcpServers = codexGuiMcpServers({ sessionId, port: PORT, groups: mcpGroups, allTools });
     const args = buildCodexArgs({ resume: resumeRolloutId, model: deps.codexModel, guiMcpServers });
     const { term, tmux, reattached } = ptySpawn(sessionId, deps.codexBin, args, cwd, true, { binEnvVar: codexAdapter.binEnvVar });
     const spawnedAtMs = Date.now();

@@ -1,8 +1,9 @@
 ---
-title: スマホ通知（Web Push）
+title: エージェントが呼んだらスマホに通知する
+nav_title: スマホ通知
 layout: default
 parent: 日本語
-nav_order: 9
+nav_order: 7
 description: タスク完了・入力待ちをスマホへ Web Push で通知する設定。並列エージェントを回しながら席を立つための仕組み。
 ---
 

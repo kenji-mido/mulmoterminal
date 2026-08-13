@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 
 import { upstreamFailureMessage } from "../../../server/routes/plugin-narration.js";

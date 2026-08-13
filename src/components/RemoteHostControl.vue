@@ -15,11 +15,22 @@ import ToolbarPopover from "./ToolbarPopover.vue";
 import { auth } from "../config/firebase";
 // Session parking (localStorage) + reconnect-outcome decision live in a plain module
 // so they're unit-testable without mounting this Firebase-importing component.
-import { healthOrFallback, loadStoredSession, persistSession, reconnectAction, type FetchResult, type RemoteHostStatus } from "./remoteHostSession";
+import {
+  healthOrFallback,
+  loadStoredSession,
+  persistSession,
+  reconnectAction,
+  type FetchResult,
+  type RemoteHostStatus,
+  isRemoteHostStatus,
+} from "./remoteHostSession";
 import { registerRemoteHostSelfHeal } from "./remoteHostSelfHeal";
 import { remoteHostAlarm, remoteHostView } from "./remoteHostView";
 import { usePubSub } from "../composables/usePubSub";
 import type { RunnerHealth } from "../../common/remoteHostHealth";
+import { isRecord } from "../../common/isRecord";
+import { jsonBody } from "../jsonBody";
+import { fetchWithTimeout, SLOW_COMMAND_TIMEOUT_MS } from "../utils/fetchWithTimeout";
 
 // Mobile companion PWA — shown in the dropdown as help text (not fetched here).
 const MOBILE_URL = "https://mulmoserver.web.app";
@@ -62,16 +73,24 @@ async function fetchStatus(url: string, method: "GET" | "POST", body?: unknown):
   try {
     // RequestInit spells its fields exact, and `body: undefined` is not the same as no body —
     // so a GET here has to omit both keys rather than send them empty.
-    const res = await fetch(url, {
-      method,
-      ...(body ? { headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {}),
-    });
+    const res = await fetchWithTimeout(
+      url,
+      {
+        method,
+        ...(body ? { headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {}),
+      },
+      SLOW_COMMAND_TIMEOUT_MS,
+    );
     if (!res.ok) {
-      const detail = await res.json().catch(() => null);
-      return { ok: false, error: (detail && typeof detail.error === "string" && detail.error) || `HTTP ${res.status}`, httpStatus: res.status };
+      const detail = await jsonBody(res);
+      return { ok: false, error: typeof detail.error === "string" && detail.error ? detail.error : `HTTP ${res.status}`, httpStatus: res.status };
     }
-    const data = (await res.json()) as { status: RemoteHostStatus; session: string | null; health?: unknown };
-    return { ok: true, status: data.status, session: data.session ?? null, health: healthOrFallback(data.health, data.status.connected) };
+    const data: unknown = await res.json();
+    const status = isRecord(data) ? data.status : undefined;
+    if (!isRemoteHostStatus(status)) return { ok: false, error: "malformed remote-host status", httpStatus: res.status };
+    const session = isRecord(data) ? data.session : null;
+    const health = isRecord(data) ? data.health : undefined;
+    return { ok: true, status, session: typeof session === "string" ? session : null, health: healthOrFallback(health, status.connected) };
   } catch (err) {
     return { ok: false, error: errorText(err), httpStatus: 0 };
   }

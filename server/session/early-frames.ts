@@ -9,20 +9,24 @@
 //
 // So the socket is listened to from the start, into a buffer, and the buffer is replayed in
 // arrival order once there is a pty to give it to.
-import type { WebSocket } from "ws";
+import type { RawData, WebSocket } from "ws";
 
-export interface EarlyFrames<T> {
+export interface EarlyFrames {
   /** Replay what arrived, in order, and stop buffering. Safe to call when nothing arrived. */
-  release: (deliver: (raw: T) => void) => void;
+  release: (deliver: (raw: RawData) => void) => void;
   /** Drop what arrived and stop buffering — for a connection that never gets its session. */
   discard: () => void;
 }
 
-export function bufferEarlyFrames<T>(ws: Pick<WebSocket, "on" | "off">): EarlyFrames<T> {
-  const pending: T[] = [];
-  const collect = (raw: T) => pending.push(raw);
-  ws.on("message", collect as (...args: unknown[]) => void);
-  const stop = () => ws.off("message", collect as (...args: unknown[]) => void);
+// `RawData` rather than a generic: it is what the socket actually hands the listener, and an
+// unconstrained `T` could not receive it — which is what the two assertions here were undoing.
+// A caller wanting something narrower still passes its own handler to `release` (a function
+// accepting the wider type is usable where the narrower one is expected).
+export function bufferEarlyFrames(ws: Pick<WebSocket, "on" | "off">): EarlyFrames {
+  const pending: RawData[] = [];
+  const collect = (raw: RawData) => pending.push(raw);
+  ws.on("message", collect);
+  const stop = () => ws.off("message", collect);
   return {
     release(deliver) {
       // Detached BEFORE the replay: a frame arriving mid-replay must reach the real listener the

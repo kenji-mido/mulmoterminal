@@ -85,6 +85,15 @@ function claudeInstalled() {
 const PATH_TOOLS = [
   { cmd: "git", versionArg: "--version", required: true, why: "worktrees, per-cell branch/diff, PR footer", hint: "brew install git  ·  apt install git" },
   { cmd: "gh", versionArg: "--version", required: true, why: "PRs & Issues view + one-click PRs", hint: "https://cli.github.com  (then: gh auth login)" },
+  // Optional rather than a second required tool: github.com is what the app is built around, and a
+  // user with no GitLab project should not be told they are missing something (#981).
+  {
+    cmd: "glab",
+    versionArg: "--version",
+    required: false,
+    why: "the PRs & Issues view for gitlab.com projects",
+    hint: "brew install glab  (then: glab auth login)",
+  },
   { cmd: "tmux", versionArg: "-V", required: false, why: "sessions survive a restart", hint: "brew install tmux  ·  apt install tmux" },
   { cmd: "codex", versionArg: "--version", required: false, why: "run OpenAI Codex as an agent", hint: "npm install -g @openai/codex" },
   {

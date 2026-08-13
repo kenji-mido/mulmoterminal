@@ -52,7 +52,8 @@ const trimmedString = (value: unknown): string | null => (typeof value === "stri
 function codexPromptForTurn(docs: Record<string, unknown>[], completeIndex: number, turnId: string | null): string | null {
   let start = -1;
   for (let i = completeIndex - 1; i >= 0; i--) {
-    const started = eventPayload(docs[i], "task_started");
+    const doc = docs[i];
+    const started = doc === undefined ? null : eventPayload(doc, "task_started");
     if (started && (turnId === null || started.turn_id === turnId)) {
       start = i;
       break;
@@ -60,7 +61,8 @@ function codexPromptForTurn(docs: Record<string, unknown>[], completeIndex: numb
   }
   if (start < 0) return null;
   for (let i = start + 1; i < completeIndex; i++) {
-    const message = eventPayload(docs[i], "user_message");
+    const doc = docs[i];
+    const message = doc === undefined ? null : eventPayload(doc, "user_message");
     if (message) {
       const text = trimmedString(message.message);
       if (text) return text;
@@ -80,7 +82,8 @@ export function lastTurnFromCodexRollout(raw: string): LastTurn {
  *  doesn't have to rebuild a string just to hand it back. */
 export function lastTurnFromCodexRolloutDocs(docs: Record<string, unknown>[]): LastTurn {
   for (let i = docs.length - 1; i >= 0; i--) {
-    const complete = eventPayload(docs[i], "task_complete");
+    const doc = docs[i];
+    const complete = doc === undefined ? null : eventPayload(doc, "task_complete");
     if (!complete) continue;
     const reply = trimmedString(complete.last_agent_message);
     if (!reply) continue;

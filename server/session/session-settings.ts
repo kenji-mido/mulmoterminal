@@ -44,6 +44,15 @@ export function mcpConfigArgument(sessionId: string, json: string, platform: Nod
   return mustUseFile(false, platform) ? writePrivate(mcpConfigFile(sessionId), json) : json;
 }
 
+// The same payload for a LAUNCHER chip, which is not an argv at all: it is a command line the user
+// wrote, run through the login shell, so the config has to be inserted as shell TEXT. That makes
+// the file unconditional rather than Windows-only — a few hundred bytes of JSON with nested quotes
+// passing through a shell is a quoting problem with no good answer, and a path has neither quotes
+// nor metacharacters. Same file as above, so reap's cleanupSessionSettings already drops it.
+export function mcpConfigFileArgument(sessionId: string, json: string): string {
+  return writePrivate(mcpConfigFile(sessionId), json);
+}
+
 // Run a spawn, taking the session's settings file with it if the spawn throws. A session
 // that never starts never reaches reap(), where the cleanup normally happens — so without
 // this a failed spawn leaves a token-bearing file behind (#579).

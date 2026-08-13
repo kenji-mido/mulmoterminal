@@ -2,15 +2,18 @@
 import { describe, it, expect, vi } from "vitest";
 
 import {
+  SCREEN_HISTORY_ROWS,
   agentFromPaneCommand,
   buildScreenMeta,
   buildSessionList,
   captureSessionScreen,
   definedScreenMeta,
+  screenWindow,
   type CaptureScreenDeps,
   type ScreenMetaSources,
   type SessionListInput,
 } from "../../../../server/backends/remoteHost/terminalScreen.js";
+import type { ScreenRow } from "../../../../server/session/screen-rows.js";
 import { undefinedPaths } from "@mulmoclaude/core/remote-host/server";
 
 const ESC = String.fromCharCode(0x1b);
@@ -156,6 +159,56 @@ describe("buildSessionList", () => {
   it("carries the per-session title and cwd through", () => {
     const sessions = buildSessionList(listInput({ liveIds: ["a"], detailOf: () => ({ title: "Fix the parser", cwd: "/repo", agent: "shell" }) }));
     expect(sessions[0]).toMatchObject({ title: "Fix the parser", cwd: "/repo" });
+  });
+});
+
+const plainRows = (texts: readonly string[]): ScreenRow[] => texts.map((text) => ({ text, dim: "" }));
+
+// The window the phone is shown: the newest SCREEN_HISTORY_ROWS rows, under a byte ceiling.
+// Both capture paths hand their rows through this, so tmux and the fallback renderer answer
+// the same session identically (mulmoserver#139).
+describe("screenWindow", () => {
+  it("keeps a short screen whole", () => {
+    expect(screenWindow(plainRows(["one", "two", "three"])).map((row) => row.text)).toEqual(["one", "two", "three"]);
+  });
+
+  // Oldest-first, because the live prompt, the ghost text and any menu are all at the bottom.
+  it("drops the oldest rows once the history is longer than the window", () => {
+    const rows = screenWindow(plainRows(Array.from({ length: SCREEN_HISTORY_ROWS + 50 }, (_, index) => `line-${index}`)));
+    expect(rows).toHaveLength(SCREEN_HISTORY_ROWS);
+    expect(rows[0].text).toBe("line-50");
+    expect(rows.at(-1)?.text).toBe(`line-${SCREEN_HISTORY_ROWS + 49}`);
+  });
+
+  // The blanks below the last line are the unused part of the pane. Counting them would spend
+  // the window on emptiness — a session using two rows of a 40-row pane would lose 38 real ones.
+  it("spends the window on content rather than on the pane's empty rows", () => {
+    const rows = screenWindow(plainRows([...Array.from({ length: SCREEN_HISTORY_ROWS + 10 }, (_, index) => `line-${index}`), ...Array(38).fill("")]));
+    expect(rows).toHaveLength(SCREEN_HISTORY_ROWS);
+    expect(rows.at(-1)?.text).toBe(`line-${SCREEN_HISTORY_ROWS + 9}`);
+  });
+
+  // The reply is written to a Firestore command doc, which rejects anything over 1 MiB. Only
+  // an unusually wide pane can reach this — 300 rows of a 200-column pane is well under it.
+  it("stops at the byte ceiling even when the row count would allow more", () => {
+    const wide = "あ".repeat(2000); // 6 KB per row: 300 of them would be 1.8 MB
+    const rows = screenWindow(plainRows(Array.from({ length: SCREEN_HISTORY_ROWS }, (_, index) => `${index}:${wide}`)));
+    expect(rows.length).toBeLessThan(SCREEN_HISTORY_ROWS);
+    expect(rows.reduce((bytes, row) => bytes + Buffer.byteLength(row.text, "utf8") + 1, 0)).toBeLessThanOrEqual(256 * 1024);
+    // Truncated from the top: the newest row is the one that must survive.
+    expect(rows.at(-1)?.text.startsWith(`${SCREEN_HISTORY_ROWS - 1}:`)).toBe(true);
+  });
+
+  // A row too big for the ceiling on its own must END the window, not be skipped over — the
+  // rows above it would leave the phone a window with a hole in the middle of it.
+  it("stops at an oversized row instead of stepping over it", () => {
+    const rows = screenWindow(plainRows(["ancient", "あ".repeat(256 * 1024), "newest"]));
+    expect(rows.map((row) => row.text)).toEqual(["newest"]);
+  });
+
+  it("survives a session with nothing on screen at all", () => {
+    expect(screenWindow(plainRows(["", "", ""]))).toEqual([]);
+    expect(screenWindow([])).toEqual([]);
   });
 });
 

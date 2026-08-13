@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import { formatHandoff, DEFAULT_HANDOFF_LIMITS } from "../../../server/session/handoff-text.js";
 

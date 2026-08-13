@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect, vi } from "vitest";
 import type { WebSocket } from "ws";
 import { startAndWire } from "../../../server/routes/ws-routes.js";
@@ -65,7 +66,7 @@ function harness() {
     },
     handleClientClose,
   };
-  const early = bufferEarlyFrames<{ toString(): string }>(asWebSocket(socket));
+  const early = bufferEarlyFrames(asWebSocket(socket));
   return { socket, delivered, handleClientClose, deps, early };
 }
 

@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import { bufferEarlyFrames } from "../../../server/session/early-frames.js";
 
@@ -28,12 +29,12 @@ const socket = () => new FakeSocket() as unknown as FakeSocket & Parameters<type
 describe("bufferEarlyFrames", () => {
   it("replays what arrived before the session existed, in order", () => {
     const ws = socket();
-    const early = bufferEarlyFrames<string>(ws);
-    ws.emit("resize-80x24");
-    ws.emit("input-a");
+    const early = bufferEarlyFrames(ws);
+    ws.emit(Buffer.from("resize-80x24"));
+    ws.emit(Buffer.from("input-a"));
 
     const delivered: string[] = [];
-    early.release((raw) => delivered.push(raw));
+    early.release((raw) => delivered.push(raw.toString()));
     expect(delivered).toEqual(["resize-80x24", "input-a"]);
   });
 
@@ -41,29 +42,29 @@ describe("bufferEarlyFrames", () => {
   // drains again — the terminal would go dead after its first keystroke.
   it("stops collecting once released", () => {
     const ws = socket();
-    const early = bufferEarlyFrames<string>(ws);
+    const early = bufferEarlyFrames(ws);
     early.release(() => {});
     expect(ws.listenerCount).toBe(0);
   });
 
   it("delivers nothing when nothing arrived", () => {
     const ws = socket();
-    const early = bufferEarlyFrames<string>(ws);
+    const early = bufferEarlyFrames(ws);
     const delivered: string[] = [];
-    early.release((raw) => delivered.push(raw));
+    early.release((raw) => delivered.push(raw.toString()));
     expect(delivered).toEqual([]);
   });
 
   // A connection whose spawn failed has no pty to replay into.
   it("drops what it holds when discarded", () => {
     const ws = socket();
-    const early = bufferEarlyFrames<string>(ws);
-    ws.emit("input-a");
+    const early = bufferEarlyFrames(ws);
+    ws.emit(Buffer.from("input-a"));
     early.discard();
     expect(ws.listenerCount).toBe(0);
 
     const delivered: string[] = [];
-    early.release((raw) => delivered.push(raw));
+    early.release((raw) => delivered.push(raw.toString()));
     expect(delivered).toEqual([]);
   });
 });

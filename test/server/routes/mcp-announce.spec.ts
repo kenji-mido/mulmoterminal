@@ -7,11 +7,9 @@
 // every group for the all-tools one it can only have been given by --mcp-config.
 import { describe, it, expect, beforeEach, afterAll } from "vitest";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import express from "express";
 import request from "supertest";
+import { takeScratchHome } from "../../support/scratchHome.js";
 
 // The group route PERSISTS what it learned, under a MULMOTERMINAL_HOME derived from the home
 // directory at import time — so point HOME somewhere disposable BEFORE importing, or this spec
@@ -22,18 +20,20 @@ import request from "supertest";
 // Leaving HOME pointed at a directory this file then deletes would hand the next file in the same
 // worker a home that does not exist, so it is put back — the module registry is per file, so the
 // next file's imports read the restored value.
-const HOME = mkdtempSync(path.join(os.tmpdir(), "mt-mcp-announce-"));
-const REAL_HOME = process.env.HOME;
-process.env.HOME = HOME;
-afterAll(() => {
-  if (REAL_HOME === undefined) delete process.env.HOME;
-  else process.env.HOME = REAL_HOME;
-  rmSync(HOME, { recursive: true, force: true });
-});
-
+const scratchHome = takeScratchHome("mt-mcp-announce-");
 const { mountMcpRoutes, TOOL_GROUPS_CHANNEL } = await import("../../../server/routes/mcp-routes.js");
 const { TOOL_GROUPS } = await import("../../../common/toolGroups.js");
-const { hasAllGuiTools } = await import("../../../server/session/registry.js");
+const { hasAllGuiTools, whenToolGroupsPersisted } = await import("../../../server/session/registry.js");
+
+// Registered after the import above because it awaits something that import provides. The persist
+// queue has to drain BEFORE the directory goes, or it is recreated behind us: each append starts
+// with `mkdir(MULMOTERMINAL_HOME, { recursive: true })` and the route does not wait for it. Without
+// the await this spec leaves a `mt-mcp-announce-` directory in $TMPDIR on every run — reproducible
+// on its own, not only under the full suite (#1345).
+afterAll(async () => {
+  await whenToolGroupsPersisted();
+  scratchHome.release();
+});
 
 const published: { channel: string; data: Record<string, unknown> }[] = [];
 const app = express();

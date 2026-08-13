@@ -8,6 +8,7 @@
 import { computed, ref, watch } from "vue";
 import { parseDirConfigDetail, sortDirPathsByName, type DirConfigDetailView } from "./dirConfigDetail";
 import { presetLabel } from "./presets";
+import { fetchWithTimeout } from "../utils/fetchWithTimeout";
 
 const props = defineProps<{ paths: string[] }>();
 
@@ -22,7 +23,7 @@ async function load(path: string) {
   if (loaded.value.has(path)) return;
   loaded.value = new Set([...loaded.value, path]);
   try {
-    const res = await fetch(`/api/dir-config-detail?cwd=${encodeURIComponent(path)}`);
+    const res = await fetchWithTimeout(`/api/dir-config-detail?cwd=${encodeURIComponent(path)}`);
     if (!res.ok) throw new Error(`dir-config-detail ${res.status} for ${path}`);
     details.value = { ...details.value, [path]: parseDirConfigDetail(await res.json()) };
   } catch {

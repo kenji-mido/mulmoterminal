@@ -10,13 +10,16 @@
 // reload. Letting the failure event through makes every rejected write to
 // .mulmoterminal.json tell every watching client to re-read a file that did not change.
 
+// `| undefined` on each, matching ToolCallStart below: under exactOptionalPropertyTypes an absent
+// key and a key holding undefined are different types, and the hook route reads these fields off
+// an unverified request body, so it answers undefined rather than omitting them.
 export interface ToolHookPayload {
-  tool_use_id?: string;
-  tool_name?: string;
+  tool_use_id?: string | undefined;
+  tool_name?: string | undefined;
   tool_input?: unknown;
   tool_output?: unknown;
   tool_response?: unknown;
-  duration_ms?: number;
+  duration_ms?: number | undefined;
 }
 
 export interface ToolCallStart {

@@ -5,7 +5,22 @@ import { canAddLauncher, canAddMcpServer, canAddRepo } from "../../../src/compon
 describe("canAddRepo", () => {
   it("accepts owner/repo", () => {
     expect(canAddRepo("receptron/mulmoterminal", [])).toBe(true);
-    expect(canAddRepo("a.b_c-d/e.f_g-h", [])).toBe(true);
+    expect(canAddRepo("a_c-d/e.f_g-h", [])).toBe(true);
+  });
+
+  // The field now takes what the config can store, which is the same rule (#981): an entry may
+  // name its host for a repository that is not on GitHub. Before this the form rejected exactly
+  // what the file accepted.
+  it("accepts a host-qualified entry, including a nested GitLab group", () => {
+    expect(canAddRepo("gitlab.com/group/project", [])).toBe(true);
+    expect(canAddRepo("gitlab.com/group/sub/project", [])).toBe(true);
+  });
+
+  // A DOT in the first segment is what marks a host, so `a.b/c` reads as host `a.b` with one
+  // segment after it — not a repository anywhere. It could never have been a GitHub repo either:
+  // owner and organisation names may hold only alphanumerics and hyphens.
+  it.each([["a.b_c-d/e.f_g-h"], ["owner/repo/extra"], ["owner//repo"]])("rejects the ambiguous %s", (entry) => {
+    expect(canAddRepo(entry, [])).toBe(false);
   });
 
   it("trims before validating", () => {

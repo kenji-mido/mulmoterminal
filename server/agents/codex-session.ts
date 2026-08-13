@@ -91,9 +91,11 @@ export function pickFreshSession(root: string, before: Set<string>, cwd: string 
     .filter((file) => !before.has(file) && !claimed?.has(file))
     .map((file) => ({ file, meta: readSessionMeta(file) }))
     .filter((x): x is { file: string; meta: CodexSessionMeta } => x.meta !== null);
-  if (found.length === 1) return { ...found[0].meta, file: found[0].file };
+  const sole = found.length === 1 ? found[0] : undefined;
+  if (sole) return { ...sole.meta, file: sole.file };
   const matches = cwd ? found.filter((x) => x.meta.cwd === cwd) : [];
-  if (matches.length === 1) return { ...matches[0].meta, file: matches[0].file };
+  const soleMatch = matches.length === 1 ? matches[0] : undefined;
+  if (soleMatch) return { ...soleMatch.meta, file: soleMatch.file };
   return null;
 }
 

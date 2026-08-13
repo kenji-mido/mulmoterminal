@@ -11,9 +11,13 @@ describe("worktreeFailureMessage", () => {
     expect(worktreeFailureMessage(reason)).toBe(expected);
   });
 
-  // The push half succeeded — the message has to say so, or the user re-pushes.
-  it("tells the user their push landed even though the PR did not", () => {
-    expect(worktreeFailureMessage("no-github")).toContain("push succeeded");
+  // The push half succeeded — the message has to say so, or the user re-pushes. It must NOT say
+  // "not a GitHub repo": since #981 this reason covers any forge we cannot open a request on, and
+  // naming GitHub told a GitLab user something both wrong and useless.
+  it("tells the user their push landed even though the request did not", () => {
+    const message = worktreeFailureMessage("no-forge");
+    expect(message.toLowerCase()).toContain("push succeeded");
+    expect(message).not.toContain("GitHub");
   });
 
   it.each([[undefined], [null], [""], ["something-new"]])("falls back to a plain failure for %j", (reason) => {

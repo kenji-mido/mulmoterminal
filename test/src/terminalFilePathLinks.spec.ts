@@ -62,3 +62,21 @@ describe("findFilePathLinks", () => {
     expect(texts("no paths on this line at all")).toEqual([]);
   });
 });
+
+// The loop used to `continue` on `match.index === undefined`. That guard was dead: matchAll
+// requires a global regex and the spec sets `index` on every match it yields, which is why the
+// type is `number`. These pin what it was silently protecting — the FIRST match, at index 0, and
+// a run of them — so removing it stays a no-op.
+describe("every match carries its index (the removed undefined guard)", () => {
+  it("finds a path that starts at index 0", () => {
+    expect(findFilePathLinks("src/main.ts is the entry")).toEqual([{ start: 0, end: 11, text: "src/main.ts" }]);
+  });
+
+  it("finds every path on a line, in order, with ranges that slice back to the text", () => {
+    const line = "see src/a.ts and lib/b.css and docs/c.md";
+    const hits = findFilePathLinks(line);
+
+    expect(hits.map((h) => h.text)).toEqual(["src/a.ts", "lib/b.css", "docs/c.md"]);
+    for (const hit of hits) expect(line.slice(hit.start, hit.end)).toBe(hit.text);
+  });
+});

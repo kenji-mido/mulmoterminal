@@ -10,7 +10,8 @@
 import { ref, onUnmounted } from "vue";
 import { fetchLastTurn } from "../composables/useHandoff";
 import { copyOutcomeFor, copyOutcomeMessage, clipboardAvailable } from "./codeBlockCopy";
-import { trapTabKey, MODAL_FOCUSABLE } from "../utils/focusTrap";
+import { MODAL_FOCUSABLE } from "../utils/focusTrap";
+import { modalKeydownHandler } from "../composables/useModalKeyboard";
 import type { TerminalAgent } from "../../common/sessionAgent";
 
 const props = defineProps<{ sessionId: string; cwd: string | null; agent: TerminalAgent }>();
@@ -22,6 +23,15 @@ const manual = ref<string | null>(null);
 const box = ref<HTMLTextAreaElement>();
 const modalEl = ref<HTMLElement | null>(null);
 let noteTimer: ReturnType<typeof setTimeout> | undefined;
+
+// The shared modal keyboard contract, but registered only while the dialog is open — this component
+// is always mounted (it is a cell button), so listening for its whole lifetime would swallow Escape
+// for everything else.
+//
+// MODAL_FOCUSABLE rather than the default selector: this dialog's first stop is the `textarea`
+// holding the code, and the default list is buttons only — the trap would then wrap Tab onto the
+// Close button and the text itself would be unreachable from the keyboard.
+const onKeydown = modalKeydownHandler({ modalEl, onClose: () => closeManual(), trapSelector: MODAL_FOCUSABLE });
 
 const flash = (message: string): void => {
   note.value = message;
@@ -47,7 +57,7 @@ async function copyLastBlock(): Promise<void> {
     } catch {
       // Permission or focus refused it. The text is already in hand, so offer it rather than
       // reporting a failure the user cannot act on.
-      showForManualCopy(outcome.text);
+      void showForManualCopy(outcome.text);
     }
   } catch {
     flash("Could not read this session's last turn");
@@ -66,23 +76,6 @@ async function showForManualCopy(text: string): Promise<void> {
   // one key, or one long-press on a phone.
   box.value?.focus();
   box.value?.select();
-}
-
-// Modal keyboard behavior, same as TimelineOverlay and SettingsModal: Escape closes, Tab stays
-// inside. On the document rather than the dialog element — bound to the element it would only
-// fire while focus is already inside, so one click on the backdrop would kill Escape. Registered
-// only while open so it cannot swallow either key for anything else.
-//
-// MODAL_FOCUSABLE rather than the default selector: this dialog's first stop is the `textarea`
-// holding the code, and the default list is buttons only — the trap would then wrap Tab onto the
-// Close button and the text itself would be unreachable from the keyboard.
-function onKeydown(e: KeyboardEvent): void {
-  if (e.key === "Escape") {
-    closeManual();
-    return;
-  }
-  if (e.key !== "Tab" || !modalEl.value) return;
-  trapTabKey(e, modalEl.value, MODAL_FOCUSABLE);
 }
 
 function closeManual(): void {

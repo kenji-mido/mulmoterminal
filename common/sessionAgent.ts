@@ -16,7 +16,7 @@ export type TerminalAgent = (typeof TERMINAL_AGENTS)[number];
 // A remembered agent — a persisted grid cell, a localStorage toggle, a query param — read back.
 // Validated rather than cast: anything unrecognised is Claude, which is also what an older
 // persisted cell (written before the field existed) means.
-export const asTerminalAgent = (value: unknown): TerminalAgent => (TERMINAL_AGENTS.some((agent) => agent === value) ? (value as TerminalAgent) : "claude");
+export const asTerminalAgent = (value: unknown): TerminalAgent => (typeof value === "string" && isTerminalAgent(value) ? value : "claude");
 
 // Narrowing rather than coercing, for the callers that must be able to say "this is not an agent
 // at all": a shell is a session kind but not something a cell can be relaunched AS, and reading

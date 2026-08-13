@@ -13,7 +13,7 @@ export type TerminalSubmitMode = (typeof TERMINAL_SUBMIT_MODES)[number];
 export const DEFAULT_TERMINAL_SUBMIT_MODE: TerminalSubmitMode = "cr";
 
 export const isTerminalSubmitMode = (value: unknown): value is TerminalSubmitMode =>
-  typeof value === "string" && (TERMINAL_SUBMIT_MODES as readonly string[]).includes(value);
+  typeof value === "string" && TERMINAL_SUBMIT_MODES.some((mode) => mode === value);
 
 // CR on its own. ESC+CR is what a terminal emits for Alt/Meta+Enter.
 const CR = "\r";

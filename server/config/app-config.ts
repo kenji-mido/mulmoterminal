@@ -31,6 +31,9 @@ import { sanitizeCockpitLines, DEFAULT_COCKPIT_LINES, type CockpitLines } from "
 import { normalizeFontFamily } from "../../common/terminalFontFamily.js";
 import { readTextFile } from "../infra/read-text-file.js";
 import { writeFileAtomicSync } from "../files/atomic-write.js";
+import { isRepoEntry } from "../../common/repoEntry.js";
+import { sanitizeGitlabHosts } from "../../common/gitlabHosts.js";
+import { GUI_SERVER_ID } from "../../common/toolGroups.js";
 
 export interface AppConfig {
   cwdPresets: CwdPreset[];
@@ -46,6 +49,10 @@ export interface AppConfig {
   sounds: Partial<Record<NotifyKind, string>>;
   // GitHub repos ("owner/repo") whose open PRs the cross-repo PR view aggregates.
   prRepos: string[];
+  // Hosts that run a self-hosted GitLab (#1332), e.g. "gitlab.hogefuga.com". A host named here is
+  // read with `glab`, exactly as gitlab.com is; nothing else can tell them apart from the URL.
+  // config.json only — no Settings control, so a hand edit needs a restart like `prRepos` does.
+  gitlabHosts: string[];
   // Which local clone work on a repo starts in, for the repos the user has chosen one for (#1172).
   // Only the CHOICE is stored: which clones exist at all is derived from `cwdPresets` on every
   // read, so adding a clone needs no second edit and a stale entry cannot invent a directory.
@@ -147,9 +154,19 @@ export function sanitizeCustomThemes(input: unknown): CustomTheme[] {
 const MCP_ID_RE = /^[A-Za-z0-9_-]+$/;
 const MCP_URL_RE = /^https?:\/\/\S+$/;
 const MCP_SERVERS_MAX = 20;
-// The built-in GUI MCP server name — reserved so a user entry can't shadow it and
-// break mcp__mulmoterminal-gui__* tool routing.
-const RESERVED_MCP_IDS = new Set(["mulmoterminal-gui"]);
+// A user entry named like the built-in GUI MCP server is KEPT, not dropped. Dropping it was the
+// obvious implementation and it destroys data: the sanitized config is what gets written back on
+// the next save, so a user whose own server happened to be called `mt` would lose the entry from
+// their config file for good, having changed some unrelated setting. `mt` is short enough to be a
+// name someone had already chosen (Codex review on #1355), and it was a legal id before this
+// release. Their entry survives; the collision is settled at spawn instead, where mcpConfigJson
+// writes the built-in last and so overwrites the clashing key.
+//
+// Exactly ONE id is in that position, and it is deliberately not the LEGACY list: mcpConfigJson
+// writes `GUI_SERVER_ID` and nothing else, so a user server still called `mulmoterminal-gui` is
+// reachable and works. Warning about it would be telling someone to rename a server that is fine
+// (Codex review, second pass). The legacy ids remain meaningful only where we still WRITE them —
+// the Antigravity config merge.
 export function sanitizeUserMcpServers(input: unknown): UserMcpServer[] {
   if (!Array.isArray(input)) return [];
   const seen = new Set<string>();
@@ -159,7 +176,16 @@ export function sanitizeUserMcpServers(input: unknown): UserMcpServer[] {
     if (!parsed.success) continue;
     const id = parsed.data.id.trim();
     const url = parsed.data.url.trim();
-    if (!MCP_ID_RE.test(id) || RESERVED_MCP_IDS.has(id) || !MCP_URL_RE.test(url) || seen.has(id)) continue;
+    if (!MCP_ID_RE.test(id) || !MCP_URL_RE.test(url) || seen.has(id)) continue;
+    // Said out loud because this is the one entry that is well-formed and still will not work: the
+    // built-in overwrites it at spawn, so without a line in the log the symptom is a server that is
+    // present in the config and absent in the session. The rejections above are visibly malformed
+    // and stay silent.
+    if (id === GUI_SERVER_ID) {
+      console.warn(
+        `[mcp] userMcpServers: "${id}" is MulmoTerminal's own GUI MCP server id, so that entry is unreachable — the built-in wins. Rename it to use it.`,
+      );
+    }
     seen.add(id);
     out.push({ id, url });
     if (out.length >= MCP_SERVERS_MAX) break;
@@ -217,16 +243,21 @@ export function sanitizeQuickCommands(input: unknown): QuickCommand[] {
   return out;
 }
 
-// "owner/repo" only — the value is passed to `gh pr list --repo`, so reject anything
-// that isn't a plain slug (no spaces, flags, or paths). Trimmed, de-duplicated.
-const REPO_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+// `owner/repo`, or `host/owner/repo` for a repository that is not on GitHub — GitLab nests groups,
+// so the tail can be longer than two segments (#981).
+//
+// What may be STORED is `isRepoEntry` in common/, the same rule the two issue-start endpoints and
+// the Settings field apply. It was written out four times, and widening only this one meant an
+// entry the user could save was rejected by everything downstream — including the form meant to
+// accept it (#981).
+
 export function sanitizeRepos(input: unknown): string[] {
   if (!Array.isArray(input)) return [];
   const seen = new Set<string>();
   for (const v of input) {
     if (typeof v !== "string") continue;
     const r = v.trim();
-    if (REPO_RE.test(r)) seen.add(r);
+    if (isRepoEntry(r)) seen.add(r);
   }
   return [...seen];
 }
@@ -240,7 +271,7 @@ export function sanitizeRepoDirs(input: unknown): Record<string, string> {
   if (!isRecord(input)) return {};
   const out: Record<string, string> = {};
   for (const [repo, dir] of Object.entries(input)) {
-    if (!REPO_RE.test(repo.trim()) || typeof dir !== "string") continue;
+    if (!isRepoEntry(repo.trim()) || typeof dir !== "string") continue;
     const resolved = dir.trim();
     if (path.isAbsolute(resolved)) out[repo.trim()] = resolved;
   }
@@ -355,6 +386,7 @@ export const emptyConfig = (): AppConfig => ({
   soundKinds: [...DEFAULT_SOUND_KINDS],
   sounds: {},
   prRepos: [],
+  gitlabHosts: [],
   repoDirs: {},
   launchers: [],
   quickCommands: [],
@@ -392,13 +424,14 @@ export function sanitizeProviders(input: unknown): Provider[] {
 // Sanitize a parsed config object into an AppConfig. Pure; `raw` is whatever JSON.parse
 // produced (any shape), so every field is defended by its own sanitizer.
 function sanitizeAppConfig(raw: unknown): AppConfig {
-  const o = (raw ?? {}) as Record<string, unknown>;
+  const o: Record<string, unknown> = isRecord(raw) ? raw : {};
   return {
     cwdPresets: sanitizePresets(o.cwdPresets),
     soundFile: sanitizeSoundFile(o.soundFile),
     soundKinds: sanitizeSoundKinds(o.soundKinds),
     sounds: sanitizeSounds(o.sounds),
     prRepos: sanitizeRepos(o.prRepos),
+    gitlabHosts: sanitizeGitlabHosts(o.gitlabHosts),
     repoDirs: sanitizeRepoDirs(o.repoDirs),
     launchers: sanitizeLaunchers(o.launchers),
     quickCommands: sanitizeQuickCommands(o.quickCommands),
@@ -503,6 +536,7 @@ export function mergeConfigUpdate(base: AppConfig, body: Record<string, unknown>
     soundKinds: updated("soundKinds", sanitizeSoundKinds, base.soundKinds),
     sounds: updated("sounds", sanitizeSounds, base.sounds),
     prRepos: updated("prRepos", sanitizeRepos, base.prRepos),
+    gitlabHosts: updated("gitlabHosts", sanitizeGitlabHosts, base.gitlabHosts),
     repoDirs: updated("repoDirs", sanitizeRepoDirs, base.repoDirs),
     launchers: updated("launchers", sanitizeLaunchers, base.launchers),
     quickCommands: updated("quickCommands", sanitizeQuickCommands, base.quickCommands),
@@ -538,6 +572,7 @@ export function toPublicAppConfig(config: AppConfig): AppConfig {
     soundKinds: config.soundKinds,
     sounds: config.sounds,
     prRepos: config.prRepos,
+    gitlabHosts: config.gitlabHosts,
     repoDirs: config.repoDirs,
     launchers: config.launchers,
     quickCommands: config.quickCommands,

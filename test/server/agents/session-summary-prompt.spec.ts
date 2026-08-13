@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import { SESSION_SUMMARY_PROMPT } from "../../../server/agents/session-summary-prompt.js";
 

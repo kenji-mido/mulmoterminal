@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import { quickCommandsForAgent } from "../../../../server/backends/remoteHost/quickCommands.js";
 import type { QuickCommand } from "../../../../common/quickCommands.js";

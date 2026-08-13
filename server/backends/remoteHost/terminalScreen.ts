@@ -3,7 +3,7 @@
 // Both entry points are dependency-injected and free of server/index.ts internals, so the
 // join rules and the capture fallback are unit-testable without a live PTY or tmux.
 import { parseStyledRows, rowsToScreen, suggestionFromRows, type ScreenRow } from "../../session/screen-rows.js";
-import type { SessionAgent } from "../../../common/sessionAgent.js";
+import { TERMINAL_AGENTS, type SessionAgent } from "../../../common/sessionAgent.js";
 import { workItemHeadline, type PrPhase, type WorkItem } from "../../../common/prPhase.js";
 import type { QuickCommandChip } from "./quickCommands.js";
 import { basename } from "node:path";
@@ -23,9 +23,11 @@ const AGENT_DEFAULT_COMMAND: Record<AgentKind, string> = { claude: "claude", cod
 
 const agentCommands = (): Record<string, SessionAgent> => {
   const map: Record<string, SessionAgent> = {};
-  for (const [kind, command] of Object.entries(AGENT_DEFAULT_COMMAND)) {
-    map[command] = kind as SessionAgent;
-    map[basename(getAgentAdapter(kind as AgentKind).bin())] = kind as SessionAgent;
+  // Over the KIND list rather than Object.entries, which widens the keys of a Record back to
+  // `string` and cost three assertions to undo.
+  for (const kind of TERMINAL_AGENTS) {
+    map[AGENT_DEFAULT_COMMAND[kind]] = kind;
+    map[basename(getAgentAdapter(kind).bin())] = kind;
   }
   return map;
 };
@@ -127,6 +129,21 @@ export function buildSessionList({ liveIds, tmuxIds, isResumable, isGridSession,
       .sort(byLiveThenTitle)
   );
 }
+
+// How much scrollback the phone is shown above the visible pane. One pane's worth is too
+// little to read on a phone — the output that explains what just happened has already
+// scrolled off (mulmoserver#139).
+export const SCREEN_HISTORY_ROWS = 300;
+
+// The second bound, and the reason it exists: the reply is written to a Firestore command
+// doc, which rejects anything over 1 MiB. Before the history the row count alone kept the
+// screen small (see the note at the top of handlers/terminalSession.ts); it no longer does.
+// 300 rows of a 200-column pane in Japanese is ~180 KB, so this only bites on a pane far
+// wider than any phone will ever read comfortably — it is a ceiling, not a budget.
+const SCREEN_MAX_BYTES = 256 * 1024;
+
+// Newline, counted alongside each row so the cap measures the string the phone receives.
+const ROW_SEPARATOR_BYTES = 1;
 
 export interface ScreenSource {
   buffer: string;
@@ -257,13 +274,42 @@ const quickCommandsOf = (id: string, read: CaptureScreenDeps["quickCommandsOf"])
   }
 };
 
+// The blank rows below the last line are the unused part of the visible pane, not content.
+// Dropped BEFORE the row cap, or a session using two lines of a 40-row pane would be sent a
+// window of 262 real lines instead of 300. rowsToScreen already trimEnd()s them out of the
+// string, so nothing about the screen the phone draws changes.
+const withoutTrailingBlanks = (rows: readonly ScreenRow[]): readonly ScreenRow[] => rows.slice(0, rows.findLastIndex((row) => row.text.trim() !== "") + 1);
+
+// The newest rows that fit in SCREEN_MAX_BYTES. Scanned from the bottom and stopped at the
+// first row that doesn't fit: skipping an oversized row to keep smaller ones above it would
+// hand the phone a window with a hole in it.
+const withinByteCap = (rows: readonly ScreenRow[]): ScreenRow[] =>
+  rows.reduceRight<{ kept: ScreenRow[]; bytes: number; full: boolean }>(
+    (state, row) => {
+      if (state.full) return state;
+      const bytes = state.bytes + Buffer.byteLength(row.text, "utf8") + ROW_SEPARATOR_BYTES;
+      if (bytes > SCREEN_MAX_BYTES) return { ...state, full: true };
+      return { kept: [row, ...state.kept], bytes, full: false };
+    },
+    { kept: [], bytes: 0, full: false },
+  ).kept;
+
+// What the phone is shown, from whichever capture path produced the rows. Both paths are
+// asked for the same history, but only this decides the window — otherwise a host with tmux
+// and one without would answer the same session differently.
+//
+// Oldest-first is the only direction to drop in: the live prompt, the agent's ghost text and
+// any menu the phone offers as chips are all at the bottom.
+export const screenWindow = (rows: readonly ScreenRow[]): ScreenRow[] => withinByteCap(withoutTrailingBlanks(rows).slice(-SCREEN_HISTORY_ROWS));
+
 export async function captureSessionScreen(id: string, deps: CaptureScreenDeps): Promise<SessionScreen> {
   // Concurrently: the meta read shells out to git, which is otherwise pure latency added to
   // every screen the phone pulls.
   const [rows, meta] = await Promise.all([screenRowsOf(id, deps), screenMetaOf(id, deps.metaOf)]);
+  const windowRows = screenWindow(rows);
   return {
-    screen: rowsToScreen(rows).trimEnd(),
-    suggestion: suggestionFromRows(rows),
+    screen: rowsToScreen(windowRows).trimEnd(),
+    suggestion: suggestionFromRows(windowRows),
     quickCommands: quickCommandsOf(id, deps.quickCommandsOf),
     ...meta,
   };

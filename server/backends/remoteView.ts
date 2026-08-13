@@ -207,14 +207,15 @@ async function updateViaView(
   // Shape the returned item like a getItems item — same host-computed fields
   // (derived, toggle, embed) — then inline the view's declared image fields.
   const [enriched] = await deps.enrichItems(collection, [result.item]);
-  const item = enriched as RemoteViewItem;
+  // enrichItems answers one item per input, so the single element is there — read it as such.
+  const item = enriched ?? result.item;
   const baseBytes = Buffer.byteLength(JSON.stringify(item), "utf8");
   if (baseBytes > REMOTE_VIEW_ITEMS_MAX_BYTES) return { kind: "too-large", bytes: baseBytes };
   const imageFields = inlineFields(view, collection.schema, undefined);
   if (imageFields.length > 0) {
     await inlineImages([item], imageFields, clampImageMaxEdge(view.imageMaxEdge), deps.resolveThumbnail, REMOTE_VIEW_ITEMS_MAX_BYTES - baseBytes);
   }
-  return { kind: "ok", op: "update", item: item as CollectionItem };
+  return { kind: "ok", op: "update", item };
 }
 
 export const mutateRemoteView = createMutateRemoteView({ storeFor, enrichItems, resolveThumbnail });
@@ -287,7 +288,7 @@ export const createRemoteViewItems =
     // loaded, derived formulas evaluated, toggles/embeds resolved — the phone
     // gets plain resolved scalars so mobile numbers match desktop exactly.
     const items = await deps.listRecords(collection);
-    const derived = (await deps.enrichItems(collection, items)) as RemoteViewItem[];
+    const derived = await deps.enrichItems(collection, items);
     const page = pageFromItems(derived, request, collection.schema.primaryKey);
     const baseBytes = Buffer.byteLength(JSON.stringify(page), "utf8");
     if (baseBytes > REMOTE_VIEW_ITEMS_MAX_BYTES) return { kind: "too-large", bytes: baseBytes };

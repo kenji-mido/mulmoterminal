@@ -137,7 +137,7 @@ export const createTerminalInputSender = (deps: TerminalInputDeps) => {
     const link = run.catch(() => undefined);
     chains.set(sessionId, link);
     // Drop the entry once it is the last one, so sessions don't accumulate forever.
-    link.then(() => {
+    void link.then(() => {
       if (chains.get(sessionId) === link) {
         chains.delete(sessionId);
       }

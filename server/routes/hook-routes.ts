@@ -4,6 +4,7 @@
 // (#548 step 3g) — the fan-out is what made the route long, not the route itself.
 import type { Express, Request, Response } from "express";
 import { SESSION_ID_RE } from "../config/env.js";
+import { isRecord } from "../../common/isRecord.js";
 import { dirConfigWriteTarget } from "../config/dir-config.js";
 import { writtenFilePath } from "../files/tool-writes.js";
 import { activityHookEffects, pushKindFor, resolveHookCwd, resolveHookSessionId } from "../session/activity-hook.js";
@@ -17,7 +18,7 @@ import { notifyTaskFinished } from "../session/task-push.js";
 import { preferredHeaderPrompt } from "../session/transcript.js";
 import { failPendingTranslation } from "../session/translation-worker.js";
 import type { SessionActivityDeps } from "../session/session-activity-deps.js";
-import { publishesDirConfig, toolHookRecord, type ToolCallEnd, type ToolCallStart } from "../session/tool-hook.js";
+import { publishesDirConfig, toolHookRecord, type ToolCallEnd, type ToolCallStart, type ToolHookPayload } from "../session/tool-hook.js";
 
 // The header shows one line, so a longer prompt is stored truncated rather than in full.
 
@@ -56,18 +57,20 @@ function handleActivityHook(deps: HookDeps, sessionId: string, event: string, ac
   if (event === "Stop") void runCompletionHook(sessionId, { didError: false }).catch((err) => console.error(`[completion-hook] ${messageOf(err)}`));
 }
 
-interface HookToolPayload {
-  tool_use_id?: string;
-  tool_name?: string;
-  tool_input?: unknown;
-  tool_output?: unknown;
-  tool_response?: unknown;
-  duration_ms?: number;
-}
+// The tool fields of a hook body. Read rather than trusted: the payload is whatever the hook
+// POSTed, and the `unknown` fields are forwarded to toolHookRecord without being opened here.
+const toolPayload = (body: Record<string, unknown>): ToolHookPayload => ({
+  tool_use_id: typeof body.tool_use_id === "string" ? body.tool_use_id : undefined,
+  tool_name: typeof body.tool_name === "string" ? body.tool_name : undefined,
+  tool_input: body.tool_input,
+  tool_output: body.tool_output,
+  tool_response: body.tool_response,
+  duration_ms: typeof body.duration_ms === "number" ? body.duration_ms : undefined,
+});
 
 // Pre/PostToolUse hooks feed the per-session tool-call history; toolHookRecord decides what
 // each event means and this applies it.
-async function handleToolHook(deps: HookDeps, sessionId: string, event: string, p: HookToolPayload, cwd: string | undefined) {
+async function handleToolHook(deps: HookDeps, sessionId: string, event: string, p: ToolHookPayload, cwd: string | undefined) {
   const record = toolHookRecord(event, p);
   if (record?.phase === "start") await deps.recordToolCallStart(sessionId, record.call);
   if (record?.phase === "end") await deps.recordToolCallEnd(sessionId, record.call);
@@ -141,12 +144,28 @@ async function applyHeaderHooks(deps: HookDeps, sessionId: string, event: string
   void deps.maybeGenerateTitle(sessionId, cwd);
 }
 
+// The scalar fields the handler reads straight off a hook body, checked once here so the flow
+// below reads as flow. Every one is a string on a well-formed payload and anything at all on a
+// malformed one, which is why none of them is taken on trust.
+function hookFields(body: Record<string, unknown>) {
+  return {
+    event: typeof body.hook_event_name === "string" ? body.hook_event_name : "",
+    toolName: typeof body.tool_name === "string" ? body.tool_name : undefined,
+    message: typeof body.message === "string" ? body.message : "",
+    // Which KIND of notification — a subagent finishing arrives here as `agent_completed`, and
+    // must not be read as the agent waiting on the user (#874).
+    notificationType: typeof body.notification_type === "string" ? body.notification_type : undefined,
+  };
+}
+
 // Claude hooks (Stop / Notification / Pre|PostToolUse / SessionStart) POST their payload here so
 // we can flag which background sessions have new activity / build tool history.
 async function handleHookRequest(deps: HookDeps, req: Request, res: Response) {
-  const body = req.body || {};
+  // express hands `req.body` back as `any`, so every field below is read through a check —
+  // this is a request body from outside, not a shape anything has verified.
+  const body: Record<string, unknown> = isRecord(req.body) ? req.body : {};
   const sessionId = resolveHookSessionId(req.headers["x-mt-session"], body.session_id, (id) => SESSION_ID_RE.test(id));
-  const event = body.hook_event_name;
+  const { event, toolName, message, notificationType } = hookFields(body);
   if (!sessionId && body.session_id) {
     // Rejecting silently would make hooks look simply broken; the id shape is the
     // precondition for using it as a Firestore doc id and as push routing.
@@ -162,18 +181,9 @@ async function handleHookRequest(deps: HookDeps, req: Request, res: Response) {
     // Live sessions only: a tracked turn is reclaimed by reap, which itself does nothing without a
     // pty — so tracking an id with no pty (any well-formed uuid may be posted here) would never be
     // reclaimed. A session whose pty is gone simply reports no phase, as it does before its first tool.
-    if (entry) deps.noteWorkPhase(sessionId, event, typeof body.tool_name === "string" ? body.tool_name : undefined);
-    handleActivityHook(
-      deps,
-      sessionId,
-      event,
-      active,
-      typeof body.message === "string" ? body.message : "",
-      // Which KIND of notification — a subagent finishing arrives here as
-      // `agent_completed`, and must not be read as the agent waiting on the user (#874).
-      typeof body.notification_type === "string" ? body.notification_type : undefined,
-    );
-    await handleToolHook(deps, sessionId, event, body, cwd);
+    if (entry) deps.noteWorkPhase(sessionId, event, toolName);
+    handleActivityHook(deps, sessionId, event, active, message, notificationType);
+    await handleToolHook(deps, sessionId, event, toolPayload(body), cwd);
     // A hidden translation worker that ends its turn while still pending never called
     // submitTranslation — fail it now rather than hang until the timeout. (When it DID
     // submit, the entry is already resolved and this reject is a no-op.)

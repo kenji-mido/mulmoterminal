@@ -1,8 +1,9 @@
 ---
-title: GitHub — cross-repo PRs & Issues
+title: From a GitHub issue to a running agent in one click
+nav_title: GitHub
 layout: default
 parent: English
-nav_order: 10
+nav_order: 9
 description: See every registered repository's open PRs and issues in one cross-repo view.
 ---
 
@@ -45,6 +46,41 @@ Add to **`prRepos`** (an array of `"owner/repo"` strings) in `~/.mulmoterminal/c
   "prRepos": ["acme/web", "acme/api"]
 }
 ```
+
+An entry may also name its host — `"gitlab.com/group/project"`. **GitLab projects are read too**,
+with `glab` in the same role `gh` plays for GitHub: the list, starting work from an issue, work
+comments, and opening a merge request all work. GitLab groups nest, so
+`gitlab.com/group/sub/project` is fine. A bare `owner/repo` still means github.com, so nothing you
+already have changes.
+
+An entry on any OTHER host shows a row naming that host, rather than silently contributing nothing.
+
+One difference worth knowing: a GitLab row's CI dot is usually blank, because GitLab's
+merge-request list carries no pipeline status and reading it costs one call per merge request. A
+cell watching a single branch does read it, so the phase pill in the cockpit is accurate.
+
+### A GitLab of your own (self-hosted)
+
+`gitlab.example.com` cannot be recognised from its address — nothing in the name says whether that
+host runs GitLab, Gitea or a wiki. So you say so once, in the same file:
+
+```json
+{
+  "gitlabHosts": ["gitlab.example.com"],
+  "prRepos": ["gitlab.example.com/group/project"]
+}
+```
+
+A declared host then behaves **exactly like gitlab.com**: the list, starting work from an issue,
+work comments, and opening a merge request. Two things it needs:
+
+1. **`glab` logged in to that host** — `glab auth login --hostname gitlab.example.com`. This app
+   stores no token of its own; it runs your `glab`, the same arrangement as `gh`.
+2. **A server restart** after editing `config.json` by hand — the same as `prRepos` written by
+   hand, since the file is read at start-up.
+
+Until the host is declared, its row says so and names the key to add. Not covered yet: a port in
+the host name (`gitlab.example.com:8443`), an http-only instance, and GitHub Enterprise.
 
 → See [Configuration](config.html) for the full key list.
 
@@ -94,8 +130,14 @@ your answer (`repoDirs` in the config); after that it is one click. **If you hav
 repo**, the button is disabled and says so — register the directory in Settings → directory presets
 to enable it.
 
+**Pressing it again for the same issue does not make a second worktree.** One issue has one
+worktree: the existing one opens, along with the session left in it if there is one. If that
+session is still open in another terminal, nothing happens and the button says so — the same
+one-session-per-worktree rule as everywhere else.
+
 > The issue body is text written by whoever opened the issue, which is often not you. That is why it
-> is left in the input box rather than sent: the Enter is yours.
+> is left in the input box rather than sent: the Enter is yours. A **resumed** session gets nothing
+> typed into it — it already has a conversation of its own.
 
 ## Prerequisite: sign in to the GitHub CLI
 

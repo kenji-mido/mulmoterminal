@@ -10,8 +10,7 @@
 // file, load it, resolve it, build the args — rather than calling the check directly, so
 // they fail if any link in that chain stops applying it.
 import { describe, it, expect } from "vitest";
-import { mkdtempSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { loadDirConfig } from "../../../server/config/dir-config.js";
@@ -19,13 +18,14 @@ import { effectiveChoice } from "../../../server/session/launch-choice.js";
 import { resolveProvider, type ProviderConfig, type ProviderResult } from "../../../server/session/provider-env.js";
 import { buildClaudeArgs } from "../../../server/agents/claude-args.js";
 import { MODEL_ID_ALLOWED } from "../../../common/modelIds.js";
+import { makeTempDir } from "../../support/tempDir";
 
 const PROVIDERS: ProviderConfig[] = [{ id: "openrouter", label: "OpenRouter", baseUrl: "https://openrouter.ai/api", tokenEnv: "OPENROUTER_API_KEY" }];
 const ENV = { OPENROUTER_API_KEY: "sk-test" } as NodeJS.ProcessEnv;
 
 // What a session in a directory holding this config would resolve to.
 function resolveDir(config: Record<string, unknown>): ProviderResult {
-  const dir = mkdtempSync(path.join(tmpdir(), "mt-dir-choice-"));
+  const dir = makeTempDir("mt-dir-choice-");
   writeFileSync(path.join(dir, ".mulmoterminal.json"), JSON.stringify(config));
   const loaded = loadDirConfig(dir);
   return resolveProvider(effectiveChoice({ dir: { provider: loaded.provider, model: loaded.model }, resuming: false }), PROVIDERS, ENV);
@@ -110,7 +110,7 @@ describe("the rest of a directory's config", () => {
   // The lenient contract predates this: one bad field must not stop a directory's colours
   // and header from loading. Only the launch is refused.
   it("still loads when the model is unusable", () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "mt-dir-choice-"));
+    const dir = makeTempDir("mt-dir-choice-");
     writeFileSync(path.join(dir, ".mulmoterminal.json"), JSON.stringify({ name: "acme", theme: "nord", model: "not a model id" }));
     const loaded = loadDirConfig(dir);
     expect(loaded.name).toBe("acme");

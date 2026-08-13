@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import { appendBoundedOutput, stripTerminalQueries, terminalModePrefix } from "../../../server/session/terminal-replay.js";
 

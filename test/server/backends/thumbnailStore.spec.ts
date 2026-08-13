@@ -1,11 +1,11 @@
 // @vitest-environment node
 import { describe, it, expect, beforeAll } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync, symlinkSync } from "node:fs";
 import path from "node:path";
 
 import { initCollectionsBackend } from "../../../server/backends/collections.js";
 import { createThumbnailResolver, clearThumbnailCache } from "../../../server/backends/thumbnailStore.js";
+import { makeTempDir } from "../../support/tempDir";
 
 // A stub resize so the test needs no native sharp binary — echoes a marker
 // derived from the input so we can assert the pipeline ran.
@@ -16,7 +16,7 @@ describe("thumbnail resolver", () => {
   let ws = "";
 
   beforeAll(() => {
-    ws = mkdtempSync(path.join(tmpdir(), "mt-thumb-"));
+    ws = makeTempDir("mt-thumb-");
     mkdirSync(path.join(ws, "data"), { recursive: true });
     writeFileSync(path.join(ws, "data", "pic.png"), Buffer.from([1, 2, 3, 4]));
     // Sets the workspace root the resolver reads via getWorkspaceRoot().
@@ -39,7 +39,7 @@ describe("thumbnail resolver", () => {
 
   it("refuses a symlink under the workspace that points OUTSIDE it (no exfiltration)", async () => {
     // A file outside the workspace, and a symlink under it that targets the file.
-    const outside = mkdtempSync(path.join(tmpdir(), "mt-outside-"));
+    const outside = makeTempDir("mt-outside-");
     const secret = path.join(outside, "secret.png");
     writeFileSync(secret, Buffer.from([9, 9, 9, 9]));
     symlinkSync(secret, path.join(ws, "data", "link.png"));

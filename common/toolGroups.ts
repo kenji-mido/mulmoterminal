@@ -96,7 +96,44 @@ export const toolsInGroup = (group: ToolGroup): string[] => [...GROUP_BY_TOOL].f
 // `mcp__<server id>__<tool>`, and the id comes from the USER's config key — so this is a
 // convention the enable-it-for-this-folder affordance has to write, and a user who registers
 // the same URL under another name simply gets permission prompts (nothing breaks).
+//
+// DELIBERATELY long, and deliberately NOT the same id as GUI_SERVER_ID below. The two are
+// reached by different routes (see that constant), so the same tool is named
+// `mcp__mulmoterminal-render__presentChart` in a project cell and `mcp__mt__presentChart` in a
+// workspace one. That is not drift to be tidied up: shortening these would break every
+// `.mcp.json` and `claude mcp add -s local` entry users have already written against them,
+// which the launcher's per-group switch also reads back and the setup guide documents. It needs
+// a migration over existing per-folder configs, not a rename. README's "MCP server ids" section
+// is the long version.
 export const toolGroupServerId = (group: ToolGroup): string => `mulmoterminal-${group}`;
+
+// The MCP server id the SINGLE VIEW registers — every tool on one URL, rather than the per-group
+// ids above. Unlike those, a user never writes this one: it is generated per spawn into
+// `--mcp-config` (claude) or `-c mcp_servers.<id>.url=` (codex), so it is ours to name.
+//
+// Which of the two ids a session gets is decided by `carriesFullGuiMcp` in
+// server/session/spawn-claude.ts: the single view, a cell-less chat, and a cell whose cwd IS the
+// workspace carry this one; a cell in a project directory is handed no --mcp-config at all and
+// reaches the group ids through the user's own per-folder config. Both are live, on purpose.
+//
+// It is SHORT because the id is not what the agent sees — the client prefixes every tool with it.
+// claude turns `presentChart` into `mcp__<id>__presentChart` and codex into `mcp-<id>-presentChart`
+// (with `-` in the id normalised to `_`), so a long id is paid on every tool name in every listing.
+// `mulmoterminal-gui` cost 17 characters per tool to say what the surrounding config already says.
+//
+// It had been spelled out at four sites (this server's registration, the advertised server name,
+// the allowedTools prefix and the reserved-id list). It lives here now because both the server and
+// the UI-facing config validation decide from it — see the `common/` rule in CLAUDE.md.
+export const GUI_SERVER_ID = "mt";
+
+// Ids this project has shipped for the SAME single-view server before. Not live: kept so the place
+// that must recognise our own past output still does — the Antigravity config merge, which deletes
+// our entries by id and would otherwise leave a stale `mulmoterminal-gui` behind forever.
+//
+// Only where we WROTE them, though. A legacy id is not reserved against the user's own
+// `userMcpServers`: nothing writes it any more, so a server someone names `mulmoterminal-gui`
+// today is reachable and works, and treating it as ours would be claiming a name we abandoned.
+export const LEGACY_GUI_SERVER_IDS: readonly string[] = ["mulmoterminal-gui"];
 
 // The tools MulmoTerminal pre-approves via `--allowedTools`, so they run without a permission
 // prompt. A list of TOOLS, not of groups: a group says which tools a directory can reach, and

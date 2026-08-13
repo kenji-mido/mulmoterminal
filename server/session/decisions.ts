@@ -1,10 +1,14 @@
 // Reading past decisions back out of a Claude transcript (#997, step 1 of #991).
 //
-// Fed one line at a time rather than a parsed file, for two reasons measured on real transcripts:
+// Fed one record at a time rather than a whole file, for two reasons measured on real transcripts:
 // this machine has a 585 MB one, which `readFileSync(..., "utf8")` cannot even represent
 // (`ERR_STRING_TOO_LONG` above ~512 MB), and holding every tool result to look for an answer
-// costs more memory than the answers are worth. A streaming scan keeps both bounded, and the
-// lines that matter are a rounding error in the file.
+// costs more memory than the answers are worth. A streaming fold keeps both bounded, and the
+// records that matter are a rounding error in the file.
+//
+// The state it folds into is plain JSON, which is what lets the same fold be RESUMED from where a
+// previous one stopped and kept beside the file (#1402) — a transcript only ever grows, so a scan
+// that has to start over is paying for bytes it already read.
 import type { DecisionAnswerKind, DecisionOption, DecisionQuestion, DecisionRecord } from "../../common/decisionLog.js";
 import { isRecord } from "../../common/isRecord.js";
 import { splitLines } from "../infra/split-lines.js";
@@ -155,7 +159,7 @@ function questionsOf(input: unknown, text: string | null): DecisionQuestion[] {
     const question = str(q.question);
     const options = optionsOf(q.options);
     const later = starts.slice(i + 1).filter((at) => at >= 0);
-    const parsed = text === null ? { answer: null, fromOptions: false } : answerFor(question, text, starts[i], later, options);
+    const parsed = text === null ? { answer: null, fromOptions: false } : answerFor(question, text, starts[i] ?? 0, later, options);
     return {
       question,
       header: str(q.header),
@@ -167,7 +171,7 @@ function questionsOf(input: unknown, text: string | null): DecisionQuestion[] {
   });
 }
 
-interface Ask {
+export interface Ask {
   toolUseId: string;
   ts: string;
   cwd: string | null;
@@ -175,6 +179,23 @@ interface Ask {
   input: unknown;
   resultText: string | null;
 }
+
+/** Everything the scan knows so far. Plain JSON on purpose: the same value is written beside a big
+ *  transcript so the next process resumes instead of re-reading it (#1402), and a Map would not
+ *  survive that trip. `pending` holds the ids of asks still waiting for their tool_result. */
+export interface DecisionScanState {
+  asks: Ask[];
+  pending: string[];
+}
+
+export const emptyDecisionState = (): DecisionScanState => ({ asks: [], pending: [] });
+
+/** A resumed fold mutates what it was handed (an answer is written onto the ask it belongs to), and
+ *  the value it resumes from has already been given to a caller — so each ask is copied too. */
+export const copyDecisionState = (state: DecisionScanState): DecisionScanState => ({
+  asks: state.asks.map((ask) => ({ ...ask })),
+  pending: [...state.pending],
+});
 
 function parseLine(line: string): Record<string, unknown> | null {
   try {
@@ -190,7 +211,7 @@ const contentBlocks = (o: Record<string, unknown>): Record<string, unknown>[] =>
   return Array.isArray(content) ? content.filter(isRecord) : [];
 };
 
-function collectAsks(o: Record<string, unknown>, asks: Ask[], awaiting: Map<string, Ask>): void {
+function collectAsks(state: DecisionScanState, o: Record<string, unknown>): void {
   if (o.type !== "assistant") return;
   for (const block of contentBlocks(o)) {
     if (block.type !== "tool_use" || block.name !== ASK_TOOL) continue;
@@ -202,76 +223,56 @@ function collectAsks(o: Record<string, unknown>, asks: Ask[], awaiting: Map<stri
       input: block.input,
       resultText: null,
     };
-    asks.push(ask);
-    if (ask.toolUseId) awaiting.set(ask.toolUseId, ask);
+    state.asks.push(ask);
+    // Each id at most once, as the Map this replaced held it: a second ask claiming an id already
+    // waiting does not earn that id a second answer.
+    if (ask.toolUseId && !state.pending.includes(ask.toolUseId)) state.pending.push(ask.toolUseId);
   }
 }
 
-function collectAnswer(o: Record<string, unknown>, awaiting: Map<string, Ask>): void {
+function collectAnswer(state: DecisionScanState, o: Record<string, unknown>): void {
   for (const block of contentBlocks(o)) {
     if (block.type !== "tool_result" || typeof block.tool_use_id !== "string") continue;
-    const ask = awaiting.get(block.tool_use_id);
+    const at = state.pending.indexOf(block.tool_use_id);
+    if (at < 0) continue;
+    // findLast, not find: an id repeated in one transcript answers to the LAST ask that claimed it,
+    // which is what the Map this replaced held.
+    const ask = state.asks.findLast((a) => a.toolUseId === block.tool_use_id);
     if (!ask) continue;
     ask.resultText = resultText(block.content);
-    awaiting.delete(block.tool_use_id);
+    state.pending.splice(at, 1);
   }
 }
 
-export interface DecisionScan {
-  /** Feed one JSONL line, in file order — an answer always trails its question. */
-  addLine(line: string): void;
-  /** The decisions found so far, oldest first. `fallbackSessionId` covers a line that carries none. */
-  finish(fallbackSessionId: string): DecisionRecord[];
+/** One record into the scan, in file order. Answers first: a tool_result can only belong to an ask
+ *  from an EARLIER record, and running it first is what keeps that true within a record too. */
+export function foldDecision(state: DecisionScanState, record: Record<string, unknown>): void {
+  collectAnswer(state, record);
+  collectAsks(state, record);
 }
 
-const mentionsPendingAsk = (line: string, awaiting: Map<string, Ask>): boolean => {
-  for (const id of awaiting.keys()) {
-    if (line.includes(id)) return true;
-  }
-  return false;
-};
-
-export function createDecisionScan(): DecisionScan {
-  const asks: Ask[] = [];
-  const awaiting = new Map<string, Ask>();
-  return {
-    addLine(line) {
-      // Substring tests before JSON.parse. Only a handful of lines in a transcript are a question
-      // or its answer, and parsing the rest is what makes scanning a large session expensive; a
-      // false positive here costs one parse and is then rejected on structure.
-      //
-      // BOTH tests run on every candidate line, and neither short-circuits the other: a line can
-      // carry the word AskUserQuestion and still be somebody's answer — "AskUserQuestion って
-      // 何？" typed as a free-text answer is the case both reviewers caught, and it would have
-      // recorded a question the user did answer as unanswered.
-      const isAsk = line.includes(ASK_TOOL);
-      const isAnswer = awaiting.size > 0 && mentionsPendingAsk(line, awaiting);
-      if (!isAsk && !isAnswer) return;
-      const o = parseLine(line);
-      if (!o) return;
-      if (isAsk) collectAsks(o, asks, awaiting);
-      if (isAnswer) collectAnswer(o, awaiting);
-    },
-    finish(fallbackSessionId) {
-      return asks
-        .map((a) => ({
-          sessionId: a.sessionId || fallbackSessionId,
-          cwd: a.cwd,
-          ts: a.ts,
-          toolUseId: a.toolUseId,
-          questions: questionsOf(a.input, a.resultText),
-        }))
-        .filter((d) => d.questions.length > 0);
-    },
-  };
+/** The decisions the state holds, oldest first. `fallbackSessionId` covers a record that names none. */
+export function decisionsOf(state: DecisionScanState, fallbackSessionId: string): DecisionRecord[] {
+  return state.asks
+    .map((a) => ({
+      sessionId: a.sessionId || fallbackSessionId,
+      cwd: a.cwd,
+      ts: a.ts,
+      toolUseId: a.toolUseId,
+      questions: questionsOf(a.input, a.resultText),
+    }))
+    .filter((d) => d.questions.length > 0);
 }
 
-/** Whole-file convenience for callers that already hold the text (and for tests). Streaming
- *  callers feed `createDecisionScan()` directly — see server/routes/decision-routes.ts. */
+/** Whole-string convenience for callers that already hold the text (and for tests). A file is folded
+ *  record by record instead — see decision-scan.ts — through the same `foldDecision`. */
 export function decisionsFromJsonl(raw: string, fallbackSessionId: string): DecisionRecord[] {
-  const scan = createDecisionScan();
-  for (const line of splitLines(raw)) scan.addLine(line);
-  return scan.finish(fallbackSessionId);
+  const state = emptyDecisionState();
+  for (const line of splitLines(raw)) {
+    const record = parseLine(line);
+    if (record) foldDecision(state, record);
+  }
+  return decisionsOf(state, fallbackSessionId);
 }
 
 /** Newest first. A record with no timestamp sorts last rather than jumping to the top. */

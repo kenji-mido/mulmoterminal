@@ -26,7 +26,7 @@ PTY persistence, reattach, grid, pubsub, MCP broker, and GUI panel are all share
 | **Resume** | `--resume <id>` | `resume <id>` **subcommand** (global flags must precede it) | `buildCodexArgs` places `resume` after the flags |
 | **Transcript on disk** | `~/.claude/projects/**/<id>.jsonl` | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | watch for the session's whole lifetime, and attribute only unambiguously |
 | **When the transcript appears** | written as the turn runs | **only after the first user turn** — can be minutes | never assume a rollout exists right after spawn |
-| **MCP delivery** | `--mcp-config <json>` + `--strict-mcp-config` | TOML config | inline `-c mcp_servers.mulmoterminal-gui.url="…"` — see below |
+| **MCP delivery** | `--mcp-config <json>` (additive — the user's own servers still load) | TOML config | inline `-c mcp_servers.mt.url="…"` — see below |
 | **Tool permission** | per-tool `--allowedTools` | per-server only (coarse) | `default_tools_approval_mode="approve"` on the one GUI server |
 | **System prompt** | `--system-prompt <str>` | **none** — it must be prepended to the user message (or live in AGENTS.md) | collection *actions* are self-contained natural language, so they carry their own instructions |
 | **Draft-ready TUI marker** | `shift+tab to cycle` (stable) | **no stable marker** — the input placeholder rotates | claude sets `draftReadyMarker`; codex omits it, so editable-draft injection is claude-only |

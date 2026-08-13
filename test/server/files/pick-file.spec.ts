@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import { pickFileCommand, parsePickerOutput } from "../../../server/files/pick-file.js";
 import { PS_UTF8_STDOUT } from "../../../server/files/win-powershell-utf8.js";

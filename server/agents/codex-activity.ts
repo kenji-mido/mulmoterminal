@@ -32,7 +32,7 @@ export function nextReadRange(offset: number, size: number): { from: number; to:
 // than parsed as a line. Text ending in a newline leaves nothing pending.
 export function takeCompleteLines(pending: string, chunk: string): { lines: string[]; pending: string } {
   const parts = (pending + chunk).split("\n");
-  return { lines: parts.slice(0, -1).filter((line) => line.trim()), pending: parts[parts.length - 1] };
+  return { lines: parts.slice(0, -1).filter((line) => line.trim()), pending: parts[parts.length - 1] ?? "" };
 }
 
 // The `event_msg` payload type of a line, or null for anything else. A `turn_context` row

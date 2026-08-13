@@ -1,11 +1,12 @@
 // @vitest-environment node
 import { describe, it, expect, vi } from "vitest";
 import { PassThrough } from "node:stream";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import type { Response } from "express";
 import { streamErrorAction, streamFileToResponse } from "../../../server/backends/streamFile.js";
+import { makeTempDir } from "../../support/tempDir";
 
 describe("streamErrorAction", () => {
   it("sends a 500 while the response is still open", () => {
@@ -36,7 +37,7 @@ const SETTLE_TIMEOUT_MS = 3000;
 
 describe("streamFileToResponse", () => {
   it("serves an existing file", async () => {
-    const dir = mkdtempSync(path.join(tmpdir(), "mt-stream-"));
+    const dir = makeTempDir("mt-stream-");
     const file = path.join(dir, "a.txt");
     writeFileSync(file, "hello");
     const { res, stream, status } = fakeRes(false);

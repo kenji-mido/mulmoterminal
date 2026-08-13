@@ -1,3 +1,4 @@
+// @vitest-environment node
 // Express decides whether a thrown error's stack goes into the response body, and it decides it
 // from NODE_ENV at app creation. #955 removed the launcher's NODE_ENV=production — which was
 // leaking into every user terminal — so the guarantee has to come from the app itself now.

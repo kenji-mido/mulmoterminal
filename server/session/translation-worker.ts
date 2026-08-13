@@ -26,14 +26,18 @@ export interface TranslationWorkerDeps {
 // In-flight worker requests. `resolve` comes from the worker's own submitTranslation call;
 // `reject` from the Stop hook when a worker ends its turn WITHOUT submitting, so a
 // misbehaved turn fails fast instead of waiting out the full timeout.
-const pendingTranslations = new Map<string, { resolve: (translations: string[]) => void; reject: (err: Error) => void }>();
+// `unknown`, not `string[]`: what arrives is whatever the worker passed to submitTranslation, and
+// the ONE place that decides whether it is a translation result is isValidTranslationResult at the
+// await below. Declaring string[] here made the promise assert a shape nothing had checked — the
+// awaiting code already distrusted it and re-declared the value as unknown.
+const pendingTranslations = new Map<string, { resolve: (translations: unknown) => void; reject: (err: Error) => void }>();
 
 /** Hand a worker's answer to the request waiting for it. False when no request is
  *  in flight for that id — already settled, timed out, or not a worker at all. */
 export function submitTranslation(sessionId: string, translations: unknown): boolean {
   const pending = pendingTranslations.get(sessionId);
   if (!pending) return false;
-  pending.resolve(Array.isArray(translations) ? translations : []);
+  pending.resolve(translations);
   return true;
 }
 
@@ -73,7 +77,7 @@ export function createTranslationWorker(deps: TranslationWorkerDeps) {
     translationWorkerIds.add(sessionId);
 
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    const submitted = new Promise<string[]>((resolve, reject) => {
+    const submitted = new Promise<unknown>((resolve, reject) => {
       timeoutId = setTimeout(() => reject(new Error(`[translation] hidden chat timed out after ${TRANSLATION_TIMEOUT_MS}ms`)), TRANSLATION_TIMEOUT_MS);
       pendingTranslations.set(sessionId, { resolve, reject });
     });
@@ -86,7 +90,7 @@ export function createTranslationWorker(deps: TranslationWorkerDeps) {
       // pending entry now so this internal worker never surfaces as a sidebar row (the
       // /api/sessions filter on translationWorkerIds covers its on-disk transcript).
       knownSessions.delete(sessionId);
-      const translations: unknown = await submitted;
+      const translations = await submitted;
       if (!isValidTranslationResult(translations, expected)) {
         const got = Array.isArray(translations) ? `${translations.length} strings` : "a non-array";
         throw new Error(`[translation] submitTranslation returned ${got} for ${expected} inputs`);

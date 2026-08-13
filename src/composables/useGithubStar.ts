@@ -1,5 +1,6 @@
 import { computed, ref } from "vue";
 import { parseStarState } from "../../common/githubRepo";
+import { fetchWithTimeout, SLOW_COMMAND_TIMEOUT_MS } from "../utils/fetchWithTimeout";
 
 // The header's "star this project on GitHub" button. It has to be able to go away for good — a
 // permanent ad in the user's own workspace is the failure mode this is designed around — and the
@@ -38,7 +39,7 @@ function toState(starred: boolean | null): StarState {
 
 async function readState(): Promise<void> {
   try {
-    const res = await fetch("/api/github/star");
+    const res = await fetchWithTimeout("/api/github/star", undefined, SLOW_COMMAND_TIMEOUT_MS);
     const starred = res.ok ? parseStarState(await res.json()) : null;
     state.value = toState(starred);
     if (starred === true) retire();
@@ -49,7 +50,7 @@ async function readState(): Promise<void> {
 
 async function postStar(): Promise<boolean> {
   try {
-    const res = await fetch("/api/github/star", { method: "POST" });
+    const res = await fetchWithTimeout("/api/github/star", { method: "POST" }, SLOW_COMMAND_TIMEOUT_MS);
     return res.ok && parseStarState(await res.json()) === true;
   } catch {
     return false;

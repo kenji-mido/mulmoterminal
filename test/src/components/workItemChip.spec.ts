@@ -44,6 +44,8 @@ describe("parseWorkItem", () => {
       issueUrl: "https://x/issues/966",
       prTitle: "the change",
       issueTitle: "the report",
+
+      blockedReason: null,
     });
     expect(parsed).toEqual({
       phase: "ready",
@@ -53,6 +55,8 @@ describe("parseWorkItem", () => {
       issueUrl: "https://x/issues/966",
       prTitle: "the change",
       issueTitle: "the report",
+
+      blockedReason: null,
     });
   });
 
@@ -114,7 +118,9 @@ describe("WorkItemChip", () => {
     expect(w.get('[data-testid="work-issue"]').text()).toBe("#966");
     expect(w.get('[data-testid="work-issue"]').attributes("href")).toBe("https://x/issues/966");
     expect(w.get('[data-testid="work-phase"]').text()).toBe("ready");
-    expect(w.get('[data-testid="work-chip"]').attributes("title")).toContain("PR #977");
+    // The detail moved to the shared hover tip (#1235) — see tipContent.spec.ts. The native
+    // attribute must be gone, or the browser's own slow tooltip appears on top of the new one.
+    expect(w.get('[data-testid="work-chip"]').attributes("title")).toBeUndefined();
   });
 
   it("renders the issue alone before a PR exists, with no arrow", () => {
@@ -153,6 +159,32 @@ describe("workCommentToPost", () => {
   it("announces the merge", () => {
     const before = item({ phase: "ready", pr: 983, issue: 979 });
     expect(workCommentToPost(before, item({ phase: "merged", pr: 983, issue: 979 }))).toBe("merged");
+  });
+
+  it("announces a PR that appeared while this cell watched the issue", () => {
+    const before = item({ phase: "none", issue: 979 });
+    expect(workCommentToPost(before, item({ phase: "ci-running", pr: 983, issue: 979 }))).toBe("pr");
+  });
+
+  // Unlike "start", the PR milestone is STAMPED with a time. A reload finding a month-old PR knows
+  // only when it noticed, so it says nothing rather than dating the work to the reload.
+  it("does not announce a PR it did not watch appear", () => {
+    expect(workCommentToPost({ ...EMPTY_WORK_ITEM }, item({ phase: "ready", pr: 983, issue: 979 }))).toBe("start");
+    const arrived = item({ phase: "ready", pr: 983, issue: 979 });
+    expect(workCommentToPost(arrived, arrived)).toBeNull();
+  });
+
+  // CI going red and green again is on the pull request already, and it flaps.
+  it("says nothing about the phases inside the review loop", () => {
+    const before = item({ phase: "ci-running", pr: 983, issue: 979 });
+    expect(workCommentToPost(before, item({ phase: "ci-failing", pr: 983, issue: 979 }))).toBeNull();
+  });
+
+  // The first PR was closed unmerged and another was opened for the same issue. That is a
+  // milestone of its own, and the server keys the line by number, so it is not a repeat.
+  it("announces the second PR after the first one was closed", () => {
+    const before = item({ phase: "closed", pr: 983, issue: 979 });
+    expect(workCommentToPost(before, item({ phase: "draft", pr: 990, issue: 979 }))).toBe("pr");
   });
 
   // The burst this rule exists to prevent: switching the setting on, or just reloading, with

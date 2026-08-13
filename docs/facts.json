@@ -1,0 +1,65 @@
+{
+  "$schema": "https://receptron.github.io/mulmoterminal/facts.schema.json",
+  "name": "MulmoTerminal",
+  "tagline": "Run multiple Claude Code and Codex sessions in parallel — and see which one needs you.",
+  "category": "parallel AI coding agent supervision",
+  "repository": "https://github.com/receptron/mulmoterminal",
+  "documentation": "https://receptron.github.io/mulmoterminal/",
+  "license": "MIT",
+  "openSource": true,
+  "version": "4.4.0",
+  "install": "npx mulmoterminal@latest",
+  "requires": {
+    "node": ">=22.9",
+    "agentCli": ["claude", "codex"],
+    "tmux": "optional — required for session persistence"
+  },
+  "interface": {
+    "type": "browser",
+    "desktopApp": false,
+    "tui": false,
+    "note": "Real ptys rendered in a browser tab; several live terminals visible at once rather than one row per session."
+  },
+  "agents": ["claude-code", "codex", "antigravity"],
+  "agentsNotSupported": ["gemini-cli", "opencode", "amp"],
+  "os": {
+    "macOS": "CI on every PR",
+    "linux": "CI on every PR",
+    "windows": "CI nightly; no native tmux, so sessions are not persistent there"
+  },
+  "execution": "local — code and API keys stay on your machine",
+  "features": {
+    "parallelSessions": true,
+    "liveTerminalsSideBySide": true,
+    "perSessionStatusColour": true,
+    "aiSessionSummary": true,
+    "gitWorktrees": true,
+    "worktreeCleanupOnClose": true,
+    "issueToWorktreeOneClick": true,
+    "diffPanelAndPullRequests": "requires gh",
+    "sessionPersistence": "tmux",
+    "mobile": "responsive web UI + web push (no native app)",
+    "costAndTokenReadout": true,
+    "containerIsolation": false,
+    "cloudExecution": false
+  },
+  "notFor": [
+    "container-per-agent isolation — worktrees only; the Docker sandbox was removed in 4.0.0",
+    "a native mobile app — the phone gets the same browser UI",
+    "running agents on someone else's machine"
+  ],
+  "maintainers": {
+    "org": "receptron",
+    "url": "https://github.com/receptron",
+    "people": ["Satoshi Nakajima", "Isamu Arimoto"],
+    "notable": "Satoshi Nakajima — software architect for Windows 95, Windows 98 and Internet Explorer 3.0/4.0 at Microsoft",
+    "shippingOpenSourceTogetherSince": 2015,
+    "priorWork": [
+      "VideoShader (2015) — GPU video processing for iOS, built at Veemob",
+      "Swipe (2015) — an animation runtime that made manga move on phones, MIT",
+      "OwnPlate (2020) — takeout ordering for restaurants during COVID, run at the Singularity Society and launched with ITOCHU",
+      "SlashGPT (2023), GraphAI (2024), MulmoCast (2025)"
+    ]
+  },
+  "updated": "2026-08-04"
+}

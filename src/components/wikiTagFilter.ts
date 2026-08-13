@@ -20,7 +20,8 @@ const rankMeaningfulTags = (counts: Map<string, number>): TagCount[] =>
 // slicing the row at an arbitrary boundary — so the bar can exceed the target on ties.
 const adaptiveCutoff = (ranked: TagCount[], target: number): TagCount[] => {
   if (ranked.length <= target) return ranked;
-  const cutoffCount = ranked[target - 1][1];
+  const cutoffCount = ranked[target - 1]?.[1];
+  if (cutoffCount === undefined) return ranked; // unreachable: length > target was checked above
   return ranked.filter(([, count]) => count >= cutoffCount);
 };
 

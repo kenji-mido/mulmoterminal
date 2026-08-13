@@ -1,8 +1,9 @@
 ---
-title: よくある質問（FAQ）
+title: FAQ — VS Code / Cursor / tmux / Claude Squad / Conductor との違い
+nav_title: FAQ
 layout: default
 parent: 日本語
-nav_order: 1
+nav_order: 3
 description: VS Code や Cursor との違い、既存の Claude Code セッション（resume）は引き継げるのか、Windows で動くのか、トークン代は増えるのか、tmux 分割と何が違うのか。MulmoTerminal を試す前に聞かれることをまとめました。
 ---
 
@@ -71,6 +72,8 @@ MulmoTerminal はエージェントを**サーバー側のプロセス**とし�
 MulmoTerminal がやるのは、その手前の「**いまどのエージェントが自分を待っているか**」です。並べて、状態を色で出して、待ちになったらスマホに通知します。
 
 ### tmux で分割するのと、何が違いますか？
+
+**tmux は、質問してこないターミナルのために作られています。** `make` は黙って終わり、`tail -f` は流れ続ける ── どちらもあなたを呼びません。エージェントは呼びます。止まって、許可を求めて、待つ。**「6 つのうちどれが自分を待っているか」は、tmux が答えるように作られていない問い**です。それは欠陥ではなく、**そういう問いが存在しなかった**からです。
 
 分割そのものは tmux で簡単にできます。違うのはその先です。
 
@@ -186,6 +189,24 @@ npx mulmoterminal@latest
 
 **使えます。** 空のセルで Shell を選んでディレクトリを指定するだけです。ランチャ登録もモデル指定も要りません。
 
+### エージェント専用のツールではないのですか？
+
+**違います。ターミナルです。** どのセルも本物の pty で、**エージェントはそこで走らせるものの1つ**にすぎません。
+
+- **Shell** は OS 標準の `$SHELL` です。インストールも設定も不要
+- **起動コマンド**は任意のものを永続端末として動かします — `yarn dev`、`htop`、`lazygit`、見ていたい `tail -f`
+- **1 worktree 1 セッション**の制限は**エージェントにだけ**かかります。Shell や `yarn dev` の launcher は対象外です。**エージェントが作業している worktree こそ、それらを動かしたい場所**なので
+
+結果として、グリッドには**作業中のもの全部**が載ります。エージェントだけではありません。そして**色と音とスマホ通知が付くのはエージェントのセルだけ**です ── 止まって尋ねてくるのが、それらだからです。
+
+### セルはどのディレクトリで起動すればいいですか？
+
+**そのプロジェクトの作業ならそのリポジトリ、3.x までの単一ビューと同じことをしたいならワークスペース**（サーバの既定の作業ディレクトリ。起動時に `Workspace: …` と表示されます。MulmoClaude と併用しているなら、その共有ワークスペース＝既定 `~/mulmoclaude`）**です。**
+
+Claude のセルは、**ワークスペースで起動したときだけ** GUI MCP をフルで持ちます — Canvas に描かせる・コレクションを触らせるといったツールが、何も登録せずに通る状態です。
+プロジェクトのディレクトリで起動したセルはそのディレクトリ自身の MCP 設定を読むので、GUI ツールが要るならランチャの MCP トグルで登録します。
+Codex / Antigravity にはワークスペースの特例が無く、どこで起動してもそのディレクトリに登録されているぶんだけです（→ [どのディレクトリで起動するか](basics.html#launch-dir)）。
+
 ---
 
 ## その他
@@ -195,6 +216,12 @@ npx mulmoterminal@latest
 **multimodal（マルチモーダル）の略**です。
 
 もっとも、[MulmoCast](https://mulmocast.com) のような兄弟プロジェクトと比べると、MulmoTerminal は**この一家で一番マルチモーダルでない**とも言えます。名前は一家の都合です。
+
+### 誰が作っているのですか？ 来年もありますか？
+
+**[receptron](https://github.com/receptron) — [中島聡](https://x.com/snakajima) と [有本勇](https://github.com/isamu) の二人**です。2015年から一緒にオープンソースを出してきました。iOS 向けの [GPU 動画処理エンジン](https://github.com/snakajima/videoshader)、[漫画をスマホで動かすランタイム](https://github.com/swipe-org/swipe)、コロナ禍に飲食店向けに作った[テイクアウト注文サービス](https://github.com/Nakajima-Foundation/ownplate)、そして [SlashGPT](https://github.com/receptron/SlashGPT)・[GraphAI](https://github.com/receptron/graphai)・[MulmoCast](https://github.com/receptron/mulmocast-cli)。
+
+来年を約束できる人はいません。確認できるのは記録のほうです。この二人は、いまの AI ツールの波より8年前から一緒にオープンソースを出していて、そのどれもがいまも公開されたままです。どちらにしても MIT なので、**私たちが止めても、あなたは続けられます。**
 
 ### 何か困ったときは？
 

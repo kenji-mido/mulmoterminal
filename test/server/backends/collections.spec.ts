@@ -1,11 +1,10 @@
 // @vitest-environment node
-import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, vi } from "vitest";
 import express from "express";
 import sharp from "sharp";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import type { Server } from "node:http";
+import { appRequest } from "../../helpers/appRequest.js";
 import { initCollectionsBackend, mountCollectionRoutes, visibilityGate } from "../../../server/backends/collections.js";
 import { actionVisible } from "@mulmoclaude/core/collection";
 import { listRegistry, importRegistry } from "@mulmoclaude/core/collection/registry/server";
@@ -26,6 +25,7 @@ vi.mock("@mulmoclaude/core/collection/registry/server", () => ({
 // must still be covered.
 import { buildWorkspaceOntology, deleteCollection, deleteCustomView, loadCollection } from "@mulmoclaude/core/collection/server";
 import { isRecord } from "../../../common/isRecord.js";
+import { makeTempDir } from "../../support/tempDir";
 vi.mock("@mulmoclaude/core/collection/server", async (importOriginal) => {
   const orig = await importOriginal<typeof import("@mulmoclaude/core/collection/server")>();
   return {
@@ -64,11 +64,10 @@ const SCHEMA = {
   collectionActions: [{ id: "audit", label: "Audit", kind: "chat", role: "general", template: "templates/audit.md" }],
 };
 
-let server: Server;
-let base: string;
+let request: ReturnType<typeof appRequest>;
 
 beforeAll(async () => {
-  const ws = mkdtempSync(path.join(tmpdir(), "mt-col-"));
+  const ws = makeTempDir("mt-col-");
   mkdirSync(path.join(ws, ".claude", "skills", "testcol"), { recursive: true });
   writeFileSync(path.join(ws, ".claude", "skills", "testcol", "schema.json"), JSON.stringify(SCHEMA));
   // Action templates live under the skill dir's templates/ (readSkillTemplate).
@@ -134,20 +133,12 @@ beforeAll(async () => {
   const app = express();
   app.use(express.json());
   mountCollectionRoutes(app);
-  await new Promise<void>((resolve) => {
-    server = app.listen(0, () => resolve());
-  });
-  const addr = server.address();
-  base = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`;
-});
-
-afterAll(() => {
-  server?.close();
+  request = appRequest(app);
 });
 
 describe("GET /api/collections/list", () => {
   it("lists the fixture collection", async () => {
-    const res = await fetch(`${base}/api/collections/list`);
+    const res = await request("/api/collections/list");
     expect(res.status).toBe(200);
     const body = (await res.json()) as { collections: Array<{ slug: string; title: string; source: string }> };
     const testcol = body.collections.find((c) => c.slug === "testcol");
@@ -157,7 +148,7 @@ describe("GET /api/collections/list", () => {
 
 describe("GET /api/collections/ontology", () => {
   it("returns one entry per discovered collection with counts + relations", async () => {
-    const res = await fetch(`${base}/api/collections/ontology`);
+    const res = await request("/api/collections/ontology");
     expect(res.status).toBe(200);
     const body = (await res.json()) as {
       entries: Array<{ slug: string; title: string; primaryKey: string; displayField: string; recordCount: number; relations: unknown[] }>;
@@ -168,7 +159,7 @@ describe("GET /api/collections/ontology", () => {
 
   it("maps an engine failure to 500 with the error message", async () => {
     vi.mocked(buildWorkspaceOntology).mockRejectedValueOnce(new Error("ontology boom"));
-    const res = await fetch(`${base}/api/collections/ontology`);
+    const res = await request("/api/collections/ontology");
     expect(res.status).toBe(500);
     expect(await res.json()).toEqual({ error: "ontology boom" });
   });
@@ -176,7 +167,7 @@ describe("GET /api/collections/ontology", () => {
 
 describe("GET /api/collections/:slug/detail", () => {
   it("returns the schema + records", async () => {
-    const res = await fetch(`${base}/api/collections/testcol/detail`);
+    const res = await request("/api/collections/testcol/detail");
     expect(res.status).toBe(200);
     const body = (await res.json()) as { collection: { slug: string }; items: Array<{ id: string; name: string }> };
     expect(body.collection.slug).toBe("testcol");
@@ -184,13 +175,13 @@ describe("GET /api/collections/:slug/detail", () => {
   });
 
   it("404s for a missing slug", async () => {
-    expect((await fetch(`${base}/api/collections/nope/detail`)).status).toBe(404);
+    expect((await request("/api/collections/nope/detail")).status).toBe(404);
   });
 });
 
 describe("custom view routes", () => {
   it("mints a read-only token (write clamped off)", async () => {
-    const res = await fetch(`${base}/api/collections/testcol/view-token`, {
+    const res = await request("/api/collections/testcol/view-token", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ viewId: "v1" }),
@@ -203,7 +194,7 @@ describe("custom view routes", () => {
   });
 
   it("400s when viewId is missing", async () => {
-    const res = await fetch(`${base}/api/collections/testcol/view-token`, {
+    const res = await request("/api/collections/testcol/view-token", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({}),
@@ -212,11 +203,11 @@ describe("custom view routes", () => {
   });
 
   it("404s view-file for an unknown view id", async () => {
-    expect((await fetch(`${base}/api/collections/testcol/view-file?id=nope`)).status).toBe(404);
+    expect((await request("/api/collections/testcol/view-file?id=nope")).status).toBe(404);
   });
 
   it("serves view-file HTML with sandbox + nosniff hardening", async () => {
-    const res = await fetch(`${base}/api/collections/testcol/view-file?id=v1`);
+    const res = await request("/api/collections/testcol/view-file?id=v1");
     expect(res.status).toBe(200);
     expect(res.headers.get("content-security-policy")).toBe("sandbox");
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");
@@ -224,24 +215,24 @@ describe("custom view routes", () => {
   });
 
   it("401s view-data without a token", async () => {
-    expect((await fetch(`${base}/api/collections/testcol/view-data`)).status).toBe(401);
+    expect((await request("/api/collections/testcol/view-data")).status).toBe(401);
   });
 
   it("serves view-data records with a valid token", async () => {
-    const mint = await fetch(`${base}/api/collections/testcol/view-token`, {
+    const mint = await request("/api/collections/testcol/view-token", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ viewId: "v1" }),
     });
     const { token } = (await mint.json()) as { token: string };
-    const res = await fetch(`${base}/api/collections/testcol/view-data`, { headers: { Authorization: `Bearer ${token}` } });
+    const res = await request("/api/collections/testcol/view-data", { headers: { Authorization: `Bearer ${token}` } });
     expect(res.status).toBe(200);
     const body = (await res.json()) as { items: Array<{ id: string }> };
     expect(body.items.map((i) => i.id)).toEqual(["item1"]);
   });
 
   it("grants a write token to a view that declares write", async () => {
-    const res = await fetch(`${base}/api/collections/testcol/view-token`, {
+    const res = await request("/api/collections/testcol/view-token", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ viewId: "v2" }),
@@ -252,19 +243,19 @@ describe("custom view routes", () => {
   });
 
   it("advertises PUT in the view-data CORS preflight", async () => {
-    const res = await fetch(`${base}/api/collections/testcol/view-data`, { method: "OPTIONS" });
+    const res = await request("/api/collections/testcol/view-data", { method: "OPTIONS" });
     expect(res.status).toBe(204);
     expect(res.headers.get("access-control-allow-methods")).toContain("PUT");
   });
 
   it("401s a PUT made with a read-only token", async () => {
-    const mint = await fetch(`${base}/api/collections/testcol/view-token`, {
+    const mint = await request("/api/collections/testcol/view-token", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ viewId: "v1" }),
     });
     const { token } = (await mint.json()) as { token: string };
-    const res = await fetch(`${base}/api/collections/testcol/view-data`, {
+    const res = await request("/api/collections/testcol/view-data", {
       method: "PUT",
       headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
       body: JSON.stringify({ items: [{ id: "item1", name: "Hacked" }], mode: "merge" }),
@@ -273,14 +264,14 @@ describe("custom view routes", () => {
   });
 
   it("merge-writes a partial record without clobbering untouched fields", async () => {
-    const mint = await fetch(`${base}/api/collections/testcol/view-token`, {
+    const mint = await request("/api/collections/testcol/view-token", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ viewId: "v2" }),
     });
     const { token } = (await mint.json()) as { token: string };
     // item1 starts as { id: "item1", name: "Foo" }. Merge a new field only.
-    const res = await fetch(`${base}/api/collections/testcol/view-data`, {
+    const res = await request("/api/collections/testcol/view-data", {
       method: "PUT",
       headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
       body: JSON.stringify({ items: [{ id: "item1", note: "graded" }], mode: "merge" }),
@@ -290,19 +281,19 @@ describe("custom view routes", () => {
     expect(body.rejected).toEqual([]);
     expect(body.written).toEqual(["item1"]);
     // name survived the partial write; note was added.
-    const detail = await fetch(`${base}/api/collections/testcol/detail`);
+    const detail = await request("/api/collections/testcol/detail");
     const item1 = ((await detail.json()) as { items: Array<{ id: string; name?: string; note?: string }> }).items.find((i) => i.id === "item1");
     expect(item1).toMatchObject({ id: "item1", name: "Foo", note: "graded" });
   });
 
   it("rejects an item missing its primary key", async () => {
-    const mint = await fetch(`${base}/api/collections/testcol/view-token`, {
+    const mint = await request("/api/collections/testcol/view-token", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ viewId: "v2" }),
     });
     const { token } = (await mint.json()) as { token: string };
-    const res = await fetch(`${base}/api/collections/testcol/view-data`, {
+    const res = await request("/api/collections/testcol/view-data", {
       method: "PUT",
       headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
       body: JSON.stringify({ items: [{ name: "no id" }], mode: "merge" }),
@@ -315,13 +306,13 @@ describe("custom view routes", () => {
   });
 
   it("rejects (does not upsert) a merge write to a missing id", async () => {
-    const mint = await fetch(`${base}/api/collections/testcol/view-token`, {
+    const mint = await request("/api/collections/testcol/view-token", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ viewId: "v2" }),
     });
     const { token } = (await mint.json()) as { token: string };
-    const res = await fetch(`${base}/api/collections/testcol/view-data`, {
+    const res = await request("/api/collections/testcol/view-data", {
       method: "PUT",
       headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
       body: JSON.stringify({ items: [{ id: "ghost", note: "should not exist" }], mode: "merge" }),
@@ -332,19 +323,19 @@ describe("custom view routes", () => {
     expect(body.rejected).toHaveLength(1);
     expect(body.rejected[0].problem).toContain("not found");
     // and no record file was created for the ghost id
-    const detail = await fetch(`${base}/api/collections/testcol/detail`);
+    const detail = await request("/api/collections/testcol/detail");
     const ids = ((await detail.json()) as { items: Array<{ id: string }> }).items.map((i) => i.id);
     expect(ids).not.toContain("ghost");
   });
 
   it("rejects a non-singleton id on a singleton collection", async () => {
-    const mint = await fetch(`${base}/api/collections/singletoncol/view-token`, {
+    const mint = await request("/api/collections/singletoncol/view-token", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ viewId: "sv" }),
     });
     const { token } = (await mint.json()) as { token: string };
-    const res = await fetch(`${base}/api/collections/singletoncol/view-data`, {
+    const res = await request("/api/collections/singletoncol/view-data", {
       method: "PUT",
       headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
       body: JSON.stringify({ items: [{ id: "intruder", name: "Evil" }], mode: "merge" }),
@@ -357,13 +348,13 @@ describe("custom view routes", () => {
   });
 
   it("allows the fixed id on a singleton collection", async () => {
-    const mint = await fetch(`${base}/api/collections/singletoncol/view-token`, {
+    const mint = await request("/api/collections/singletoncol/view-token", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ viewId: "sv" }),
     });
     const { token } = (await mint.json()) as { token: string };
-    const res = await fetch(`${base}/api/collections/singletoncol/view-data`, {
+    const res = await request("/api/collections/singletoncol/view-data", {
       method: "PUT",
       headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
       body: JSON.stringify({ items: [{ id: "me", note: "ok" }], mode: "merge" }),
@@ -375,13 +366,13 @@ describe("custom view routes", () => {
   });
 
   it('mode "create" rejects an id that already exists', async () => {
-    const mint = await fetch(`${base}/api/collections/testcol/view-token`, {
+    const mint = await request("/api/collections/testcol/view-token", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ viewId: "v2" }),
     });
     const { token } = (await mint.json()) as { token: string };
-    const res = await fetch(`${base}/api/collections/testcol/view-data`, {
+    const res = await request("/api/collections/testcol/view-data", {
       method: "PUT",
       headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
       body: JSON.stringify({ items: [{ id: "item1", name: "Dupe" }], mode: "create" }),
@@ -393,14 +384,14 @@ describe("custom view routes", () => {
   });
 
   it("defaults to upsert (full replace) when mode is omitted", async () => {
-    const mint = await fetch(`${base}/api/collections/testcol/view-token`, {
+    const mint = await request("/api/collections/testcol/view-token", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ viewId: "v2" }),
     });
     const { token } = (await mint.json()) as { token: string };
     // A complete record with no mode → written; it replaces whatever was there.
-    const res = await fetch(`${base}/api/collections/testcol/view-data`, {
+    const res = await request("/api/collections/testcol/view-data", {
       method: "PUT",
       headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
       body: JSON.stringify({ items: [{ id: "upserted", name: "Fresh" }] }),
@@ -412,13 +403,13 @@ describe("custom view routes", () => {
   });
 
   it("400s an unknown mode", async () => {
-    const mint = await fetch(`${base}/api/collections/testcol/view-token`, {
+    const mint = await request("/api/collections/testcol/view-token", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ viewId: "v2" }),
     });
     const { token } = (await mint.json()) as { token: string };
-    const res = await fetch(`${base}/api/collections/testcol/view-data`, {
+    const res = await request("/api/collections/testcol/view-data", {
       method: "PUT",
       headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
       body: JSON.stringify({ items: [{ id: "item1" }], mode: "replace" }),
@@ -427,13 +418,13 @@ describe("custom view routes", () => {
   });
 
   it("rejects a row that fails schema validation (bad enum value)", async () => {
-    const mint = await fetch(`${base}/api/collections/testcol/view-token`, {
+    const mint = await request("/api/collections/testcol/view-token", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ viewId: "v2" }),
     });
     const { token } = (await mint.json()) as { token: string };
-    const res = await fetch(`${base}/api/collections/testcol/view-data`, {
+    const res = await request("/api/collections/testcol/view-data", {
       method: "PUT",
       headers: { Authorization: `Bearer ${token}`, "content-type": "application/json" },
       body: JSON.stringify({ items: [{ id: "item1", status: "bogus" }], mode: "merge" }),
@@ -446,15 +437,12 @@ describe("custom view routes", () => {
 });
 
 describe("record CRUD", () => {
-  // Functions, not constants: `base` is only assigned in beforeAll (after the
-  // describe body runs), so the URLs must be built at call time.
-  const items = () => `${base}/api/collections/testcol/items`;
-  const itemUrl = (id: string) => `${base}/api/collections/testcol/items/${id}`;
-  const detailItems = async () =>
-    ((await (await fetch(`${base}/api/collections/testcol/detail`)).json()) as { items: Array<{ id: string; name?: string }> }).items;
+  const ITEMS = "/api/collections/testcol/items";
+  const itemUrl = (id: string) => `${ITEMS}/${id}`;
+  const detailItems = async () => ((await (await request("/api/collections/testcol/detail")).json()) as { items: Array<{ id: string; name?: string }> }).items;
 
   it("creates, updates, then deletes a record", async () => {
-    const create = await fetch(items(), {
+    const create = await request(ITEMS, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ id: "crud1", name: "New" }),
@@ -463,7 +451,7 @@ describe("record CRUD", () => {
     expect((await create.json()) as { itemId: string }).toMatchObject({ itemId: "crud1" });
     expect((await detailItems()).find((i) => i.id === "crud1")).toMatchObject({ name: "New" });
 
-    const upd = await fetch(itemUrl("crud1"), {
+    const upd = await request(itemUrl("crud1"), {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ id: "crud1", name: "Updated" }),
@@ -471,35 +459,35 @@ describe("record CRUD", () => {
     expect(upd.status).toBe(200);
     expect(((await upd.json()) as { item: { name: string } }).item).toMatchObject({ name: "Updated" });
 
-    const del = await fetch(itemUrl("crud1"), { method: "DELETE" });
+    const del = await request(itemUrl("crud1"), { method: "DELETE" });
     expect(del.status).toBe(200);
     expect(await del.json()).toEqual({ deleted: true, itemId: "crud1" });
     expect((await detailItems()).find((i) => i.id === "crud1")).toBeUndefined();
   });
 
   it("409s creating a record whose id already exists", async () => {
-    const dupe = await fetch(items(), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "item1", name: "dupe" }) });
+    const dupe = await request(ITEMS, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "item1", name: "dupe" }) });
     expect(dupe.status).toBe(409);
   });
 
   it("400s on a non-object create body", async () => {
-    const res = await fetch(items(), { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify([1, 2, 3]) });
+    const res = await request(ITEMS, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify([1, 2, 3]) });
     expect(res.status).toBe(400);
   });
 
   it("404s update/delete on a missing collection", async () => {
-    const put = await fetch(`${base}/api/collections/nope/items/x`, {
+    const put = await request("/api/collections/nope/items/x", {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ id: "x" }),
     });
     expect(put.status).toBe(404);
-    expect((await fetch(`${base}/api/collections/nope/items/x`, { method: "DELETE" })).status).toBe(404);
+    expect((await request("/api/collections/nope/items/x", { method: "DELETE" })).status).toBe(404);
   });
 });
 
 describe("action routes (seed prompts)", () => {
-  const post = (url: string) => fetch(`${base}${url}`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+  const post = (url: string) => request(`${url}`, { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
 
   // #210 regression: the seed prompt must embed the <collection_paths> block so the skill
   // can resolve skillDir/dataPath. Both routes silently dropped it before the fix.
@@ -548,7 +536,7 @@ describe("action routes (seed prompts)", () => {
 
 describe('record-level mutate actions (kind: "mutate")', () => {
   const post = (url: string, body: unknown = {}) =>
-    fetch(`${base}${url}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    request(`${url}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 
   it("404s on missing record", async () => {
     vi.mocked(loadCollection).mockResolvedValueOnce({
@@ -567,7 +555,7 @@ describe('record-level mutate actions (kind: "mutate")', () => {
 
 describe("collection-level mutate action defense", () => {
   const post = (url: string, body: unknown = {}) =>
-    fetch(`${base}${url}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    request(`${url}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
 
   it("400s a collection-level mutate action (record-level only)", async () => {
     // Can't exist on disk — the schema refine rejects mutate in
@@ -597,7 +585,7 @@ describe("collection registry routes (Discover tab)", () => {
       collections: [{ id: "a/b", author: "a", slug: "b", title: "B", registryName: "official" }],
     };
     vi.mocked(listRegistry).mockResolvedValue(payload as never);
-    const res = await fetch(`${base}/api/collections/registry/list`);
+    const res = await request("/api/collections/registry/list");
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual(payload);
   });
@@ -607,7 +595,7 @@ describe("collection registry routes (Discover tab)", () => {
       ok: true,
       response: { localSlug: "b", updated: false, seedWritten: 3, seedSkipped: false },
     } as never);
-    const res = await fetch(`${base}/api/collections/registry/import`, {
+    const res = await request("/api/collections/registry/import", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ author: "a", slug: "b", registry: "official" }),
@@ -619,7 +607,7 @@ describe("collection registry routes (Discover tab)", () => {
 
   it("POST /registry/import passes the engine's failure status straight through", async () => {
     vi.mocked(importRegistry).mockResolvedValue({ ok: false, status: 404, error: "not found" } as never);
-    const res = await fetch(`${base}/api/collections/registry/import`, {
+    const res = await request("/api/collections/registry/import", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ author: "a", slug: "missing" }),
@@ -629,7 +617,7 @@ describe("collection registry routes (Discover tab)", () => {
   });
 
   it("POST /registry/import 400s without author/slug and never calls the engine", async () => {
-    const res = await fetch(`${base}/api/collections/registry/import`, {
+    const res = await request("/api/collections/registry/import", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ slug: "b" }),
@@ -647,31 +635,31 @@ describe("collection / view delete routes", () => {
 
   it("DELETE /:slug archives + removes a deletable collection", async () => {
     vi.mocked(deleteCollection).mockResolvedValue({ kind: "ok", slug: "testcol", archivePath: "archive/2026-x" } as never);
-    const res = await fetch(`${base}/api/collections/testcol`, { method: "DELETE" });
+    const res = await request("/api/collections/testcol", { method: "DELETE" });
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ deleted: true, slug: "testcol" });
   });
 
   it("DELETE /:slug returns 403 with the refusal reason for a non-ok result", async () => {
     vi.mocked(deleteCollection).mockResolvedValue({ kind: "preset", slug: "testcol" } as never);
-    const res = await fetch(`${base}/api/collections/testcol`, { method: "DELETE" });
+    const res = await request("/api/collections/testcol", { method: "DELETE" });
     expect(res.status).toBe(403);
     expect(((await res.json()) as { error: string }).error).toBeTruthy();
   });
 
   it("DELETE /:slug 404s an unknown collection without calling the engine", async () => {
-    const res = await fetch(`${base}/api/collections/nope`, { method: "DELETE" });
+    const res = await request("/api/collections/nope", { method: "DELETE" });
     expect(res.status).toBe(404);
     expect(vi.mocked(deleteCollection)).not.toHaveBeenCalled();
   });
 
   it("DELETE /:slug/views/:viewId removes a view, refuses non-ok, 404s not-found", async () => {
     vi.mocked(deleteCustomView).mockResolvedValueOnce({ kind: "ok", viewId: "v1" } as never);
-    expect((await fetch(`${base}/api/collections/testcol/views/v1`, { method: "DELETE" })).status).toBe(200);
+    expect((await request("/api/collections/testcol/views/v1", { method: "DELETE" })).status).toBe(200);
     vi.mocked(deleteCustomView).mockResolvedValueOnce({ kind: "preset" } as never);
-    expect((await fetch(`${base}/api/collections/testcol/views/v1`, { method: "DELETE" })).status).toBe(403);
+    expect((await request("/api/collections/testcol/views/v1", { method: "DELETE" })).status).toBe(403);
     vi.mocked(deleteCustomView).mockResolvedValueOnce({ kind: "not-found", viewId: "v1" } as never);
-    expect((await fetch(`${base}/api/collections/testcol/views/v1`, { method: "DELETE" })).status).toBe(404);
+    expect((await request("/api/collections/testcol/views/v1", { method: "DELETE" })).status).toBe(404);
   });
 });
 
@@ -702,7 +690,7 @@ const isInlinedItemsBody = (value: unknown): value is InlinedItemsBody =>
 // host-side into its sandboxed srcdoc, plus its writable-view mutate channel.
 describe("mobile custom views (phone-frame preview)", () => {
   it("GET /:slug/remote-view builds a mobile view into a sandboxed srcdoc", async () => {
-    const res = await fetch(`${base}/api/collections/testcol/remote-view?id=phone&locale=en`);
+    const res = await request("/api/collections/testcol/remote-view?id=phone&locale=en");
     expect(res.status).toBe(200);
     const body = await readJson(res, isRecord);
     expect(body.view).toMatchObject({ id: "phone", target: "mobile" });
@@ -712,13 +700,13 @@ describe("mobile custom views (phone-frame preview)", () => {
   });
 
   it("GET /:slug/remote-view refuses a desktop view (400) and 404s an unknown view/collection", async () => {
-    expect((await fetch(`${base}/api/collections/testcol/remote-view?id=v1`)).status).toBe(400); // not target:mobile
-    expect((await fetch(`${base}/api/collections/testcol/remote-view?id=nope`)).status).toBe(404);
-    expect((await fetch(`${base}/api/collections/nope/remote-view?id=phone`)).status).toBe(404);
+    expect((await request("/api/collections/testcol/remote-view?id=v1")).status).toBe(400); // not target:mobile
+    expect((await request("/api/collections/testcol/remote-view?id=nope")).status).toBe(404);
+    expect((await request("/api/collections/nope/remote-view?id=phone")).status).toBe(404);
   });
 
   it("POST /:slug/remote-view/:viewId/mutate updates an editable field, forbids a non-editable one", async () => {
-    const ok = await fetch(`${base}/api/collections/testcol/remote-view/phone/mutate`, {
+    const ok = await request("/api/collections/testcol/remote-view/phone/mutate", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ op: "update", id: "item1", patch: { name: "Renamed" } }),
@@ -727,7 +715,7 @@ describe("mobile custom views (phone-frame preview)", () => {
     expect((await readJson(ok, isMutatedItemBody)).item.name).toBe("Renamed");
 
     // `status` is not in the view's editableFields → host-side policy refuses it.
-    const forbidden = await fetch(`${base}/api/collections/testcol/remote-view/phone/mutate`, {
+    const forbidden = await request("/api/collections/testcol/remote-view/phone/mutate", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ op: "update", id: "item1", patch: { status: "closed" } }),
@@ -736,7 +724,7 @@ describe("mobile custom views (phone-frame preview)", () => {
   });
 
   it("POST /:slug/remote-view/:viewId/mutate 400s a malformed request", async () => {
-    const res = await fetch(`${base}/api/collections/testcol/remote-view/phone/mutate`, {
+    const res = await request("/api/collections/testcol/remote-view/phone/mutate", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ nonsense: true }),
@@ -745,7 +733,7 @@ describe("mobile custom views (phone-frame preview)", () => {
   });
 
   it("GET /:slug/remote-view/:viewId/items inlines the view's image field as a data URL thumbnail", async () => {
-    const res = await fetch(`${base}/api/collections/photoscol/remote-view/gallery/items`);
+    const res = await request("/api/collections/photoscol/remote-view/gallery/items");
     expect(res.status).toBe(200);
     const body = await readJson(res, isInlinedItemsBody);
     expect(body.inlined).toBeGreaterThanOrEqual(1);
@@ -754,7 +742,7 @@ describe("mobile custom views (phone-frame preview)", () => {
   });
 
   it("GET /:slug/remote-view/:viewId/items 404s an unknown view", async () => {
-    expect((await fetch(`${base}/api/collections/photoscol/remote-view/nope/items`)).status).toBe(404);
+    expect((await request("/api/collections/photoscol/remote-view/nope/items")).status).toBe(404);
   });
 });
 

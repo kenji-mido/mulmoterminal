@@ -1,8 +1,9 @@
 ---
-title: Configuration
+title: Configuration — colours, sounds, launchers, per-project settings
+nav_title: Configuration
 layout: default
 parent: English
-nav_order: 5
+nav_order: 6
 description: Configuring MulmoTerminal — the settings modal, per-project colours and names, Enter behaviour, notification sounds, fonts, keyboard shortcuts and environment variables, findable by symptom.
 ---
 
@@ -19,6 +20,8 @@ description: Configuring MulmoTerminal — the settings modal, per-project colou
 | Move the enlargement **from the keyboard** | [Keyboard shortcuts](#keymap) |
 | Roster rows are **too long or too short** | [Roster rows](#cockpit-lines) |
 | Let a session **see another folder** | [Several folders](#add-dirs) |
+| A **worktree** looks like a different project | [Worktrees inherit this file](#worktree-inherit) |
+| **No Canvas** when you enlarge a cell / no GUI tools | [Which directory to launch in](basics.html#launch-dir) |
 | Run on **a model other than Claude** | [Providers](#providers) |
 | Add **your own button** to the header | [Customizing the header](#header) |
 | Recolour the whole app **your way** | [Make your own colour scheme](#custom-themes) |
@@ -87,7 +90,7 @@ setups see sixteen.
 | **Pull request repos** | The repos aggregated by the cross-repo PR/Issue view (`owner/repo`) |
 | **Launch commands** | Commands you can launch besides the agents in a grid cell (`{ label, command }`). A plain shell needs no entry — the launcher's **Shell** toggle opens `$SHELL` unconfigured |
 | **Phone quick commands** | Phrases offered as chips on the **phone's** terminal view. Tapping one fills the input box; it is sent when you press send (`quickCommands`) |
-| **MCP servers** | Your own HTTP MCP servers (`userMcpServers`), merged into the sessions that carry the full GUI MCP — a cell whose working directory is the **workspace**, and any session the server starts on its own (the phone, a scheduled task). A cell in a project directory loads its own MCP config instead |
+| **MCP servers** | Your own HTTP MCP servers (`userMcpServers`), merged into the sessions that carry the full GUI MCP — a cell whose working directory is the **workspace**, and any session the server starts on its own (the phone, a scheduled task). A cell in a project directory loads its own MCP config instead (→ [which directory to launch in](basics.html#launch-dir)) |
 | **Cost (estimated)** | Estimated cost readouts for Session / Today / Month |
 | **Keyboard shortcuts** | What is bound to what, read-only. **Everything starts as Not set** — "Set up shortcuts…" starts the `mulmoterminal-keys` skill to bind them in `keymap` (→ [Keyboard shortcuts](#keymap)) |
 | **Help & user guide** | Links into this guide |
@@ -235,19 +238,56 @@ sits in the same place on both screens. The chips otherwise come in the order yo
 changes under you; declaring ranks is how you pin them down. Directories that declare none stay behind the
 ranked ones, in that launch order.
 
+### Worktrees inherit this file {#worktree-inherit}
+
+`.mulmoterminal.json` is normally gitignored, so a [worktree](glossary.html#git-worktree) cut from the project used
+to start with nothing in it: no colours, no name, no model, no rank — one more grey cell at the end
+of the grid, looking like an unrelated project.
+
+Now a new worktree is given its own copy, derived from the project's:
+
+- **The identity is copied as written** — `name`, `theme`, `colors`, `fontSize`, `fontFamily`,
+  `provider`, `model`. Same project, same terminal, same model.
+- **The chrome colours are rotated a little around the colour wheel** — `badgeColor`,
+  `headerColor`, `headerTextColor`, `cellColor`, `cellBorderColor`, `dotColor`, `buttonColor`. Each
+  worktree of a project sits one 12-degree step further round than the one before it, so a row of
+  them reads as a gradient: recognisably this project, and recognisably not each other.
+  Saturation and lightness are untouched, which is why a `headerTextColor` of `#ffffff` stays
+  white — a grey has no hue to move.
+- **`orderPriority` becomes the project's rank plus one**, so the worktree sits directly after the
+  project it was cut from instead of falling to the end. Only when the project declares a rank;
+  one that sets none has worktrees that set none either.
+- **`sound`, `sounds` and `addDirs` are NOT carried.** Those name paths inside the project
+  directory, which the worktree has no copy of, and `addDirs` would resolve against the worktree
+  and quietly grant a different set of folders.
+
+Two cases where nothing is written, both deliberate:
+
+- **The project's config isn't gitignored.** The file would show up as an untracked change in the
+  worktree's `git status` — which is not just untidy: MulmoTerminal refuses to remove a worktree
+  that has uncommitted changes, so it could no longer be cleaned up. Add `.mulmoterminal.json` to
+  the repo's `.gitignore` and the next worktree gets its colours.
+- **The worktree already has one** (it is committed to the repo, or you wrote it yourself). That
+  file is the answer; MulmoTerminal never overwrites it.
+
+The copy is taken at creation and then belongs to the worktree. Recolour the project afterwards and
+existing worktrees keep the shade they were given — edit or delete their own file to change it.
+
 ### Customizing the header (buttons / chips) {#header}
 
 This is where MulmoTerminal's **Extend** pillar lives. Shape the header of a running terminal to fit your workflow with **a small DSL**.
 Any developer can turn their frequent actions into a single click and surface only the information they want to see — that's what this is for.
 
 **Buttons** (`buttons`) — action buttons that act on a running session. Display is an `icon` (a Material Symbol name) plus a `label`; `order` controls the sort.
-With none set, you get a **built-in starter set**: **Insert a file path** · **Reveal in the file manager** · **Browse files in the app** · **New terminal here** · **Open this branch's PR** (git repos, only when a PR exists) · **Open on GitHub** (git repos). Setting `buttons` at any level **replaces the whole default set** (it is _not_ merged on top) — so listing your own, even a **shorter** list, is how you trim, reorder, or swap them.
+With none set, you get a **built-in starter set**: **Insert a file path** · **Open this branch's PR** (git repos, only when a PR exists). Setting `buttons` at any level **replaces the whole default set** (it is _not_ merged on top) — so listing your own, even a **shorter** list, is how you trim, reorder, or swap them.
+
+*Reveal in the file manager*, *Browse files in the app*, *New terminal here* and *Open on GitHub* used to be defaults too. They are **items in the path menu** now — click the directory path on the terminal's header row. They all answered "do something with this directory", which is what the path itself is; keeping four permanent icons for them cost more room than it was worth in a tiled cell. Nothing changed about them as config: list any of them yourself and it works exactly as before, as a button — you will then have it both places, since the menu is fixed.
 
 ```json
 {
   "buttons": [
     { "id": "compact", "icon": "compress", "label": "Compact", "run": "input", "text": "/compact", "when": "agent == claude" },
-    { "id": "gh",      "icon": "public",   "label": "Open on GitHub", "run": "open", "open": { "url": "https://github.com/${repo}" }, "when": "isGitRepo" },
+    { "id": "gh",      "icon": "public",   "label": "Open on GitHub", "run": "open", "open": { "url": "https://github.com/${repo}" }, "when": "repo != " },
     { "id": "reveal",  "icon": "folder",   "label": "Reveal folder", "run": "open", "open": { "reveal": "${dir}" } },
     { "id": "build",   "icon": "build",    "label": "Build", "run": "shell", "cmd": "yarn build" }
   ]
@@ -1136,24 +1176,59 @@ person who filed it, and anyone else with a checkout, can see it is being worked
 { "issueWorkComments": true }
 ```
 
-With it on, a cell leaves at most two comments per issue:
+With it on, a cell leaves **one comment per issue** and keeps it up to date. Starting the work
+posts it:
 
 ```
-Working on this in `mulmoterminal5`.
+Working on this in `1234-fix-login`.
+
+- started — 2026-08-04 14:20 UTC
+
+posted by MulmoTerminal
 ```
 
+Opening the PR and merging it **edit that same comment** rather than adding new ones:
+
 ```
-Merged in #983. Work done in `mulmoterminal5`.
+Merged in #1240. Work done in `1234-fix-login`.
+
+- started — 2026-08-04 14:20 UTC
+- PR #1240 — 2026-08-04 15:05 UTC
+- merged in #1240 — 2026-08-04 16:40 UTC
+
+posted by MulmoTerminal
 ```
 
+- **Three milestones, and no more.** Starting, the pull request, the merge. CI going red and green
+  again is on the PR already, and it flaps — an issue that reported every turn would stop being
+  readable.
 - The directory is the **folder name only** — never the path above it. It answers "which of my
-  clones", and these land on public issues.
+  clones", and these land on public issues. With one worktree per issue it is also what tells two
+  terminals — or two people — that the work is already taken.
+- The **times are UTC**, and they are the point of the list: a claim posted three weeks ago and
+  never updated reads differently from one that moved this morning.
+- The comment **says it came from MulmoTerminal**. These land on issues other people filed, and a
+  reader should not have to guess what is claiming theirs.
 - On merge it also **closes the issue if it is still open**. A PR whose body says `Fixes #966`
   has already been closed by GitHub, so usually there is nothing to do.
 - **Once each.** Every open tab re-asks on every poll, and a reload asks again; the comment
-  carries an invisible marker that MulmoTerminal reads back, so the second ask writes nothing.
-  Work the same issue from a second clone and you get a second line, which is the honest answer.
-- Needs `gh` installed and logged in. Without it, nothing is written and nothing breaks.
+  carries an invisible marker that MulmoTerminal reads back, and the milestones are read out of the
+  comment itself, so the second ask writes nothing. Work the same issue from a second clone and you
+  get a second comment, which is the honest answer.
+- Only the milestones this cell **watched happen** are listed. Reloading onto a branch whose PR
+  opened last month adds no line for it — this side would only know when it noticed, not when it
+  happened.
+- Editing a comment sends **no notification**, on purpose: the first line is news, the rest is
+  status.
+- **It needs write access**, not just a login. Commenting on an issue is a write, so a `gh` set up
+  for reading only cannot do it — and neither can an account without write access to that
+  repository.
+- When it cannot write, **the cell says why**: a small `issue not updated` notice appears next to
+  the work chip, naming the fix (install `gh`, `gh auth login`, or write access). Dismiss it and no
+  cell reports that same cause again until you reload. The work itself is never affected — the
+  comment is simply skipped, and the next milestone tries again.
+- Needs `gh` installed and logged in (`glab` for GitLab). Without it, nothing is written and
+  nothing breaks.
 
 **Off by default**, because it writes to GitHub on your behalf — often on an issue somebody else
 filed. Turn it on per machine, not per project: it lives in the global config.
@@ -1231,6 +1306,7 @@ What you write here appears in an empty cell's launcher under **OR RUN A SCRIPT*
 | `launchers` | The launch commands that appear under "OR LAUNCH" in a grid cell. Only what you add — a plain shell is already the launcher's **Shell** toggle |
 | `quickCommands` | Phrases the **phone** offers as chips on a session (`{ label, text, agents? }`). Tapping one fills the input box — it is not sent until you press send. `agents` scopes a chip to `"claude"` / `"codex"` / `"shell"`; omit it to offer the chip everywhere. Editable in Settings → **Phone quick commands** |
 | `prRepos` | The repos targeted by the cross-repo PR/Issue view |
+| `gitlabHosts` | Hosts running a **self-hosted GitLab**, e.g. `["gitlab.example.com"]`. A URL does not say which forge a host runs, so declaring it is what lets `prRepos` entries on that host be read with `glab`. Needs `glab auth login --hostname <host>`. config.json only (no Settings control), so a hand edit takes effect on the next start (→ [A GitLab of your own](github.html#a-gitlab-of-your-own-self-hosted)) |
 | `repoDirs` | Which local clone work on a repo starts in, when you keep several side by side: `{ "acme/web": "/Users/you/src/web" }`. Only the choice is stored — which clones exist is re-derived from `cwdPresets`, so adding one needs no second edit, and an entry that no longer names a clone of that repo is ignored |
 | `buttons` / `chips` | Header buttons / chips (merged with project settings → [Customizing the header](#header)) |
 | `providers` | Anthropic-compatible backends (→ [Using another model via OpenRouter](providers.html)) |
@@ -1261,11 +1337,11 @@ A typo survives the same way — `copyOnSlect` stays in the file rather than bei
 That is the intended trade: a setting that "doesn't work" is easier to spot when the line is still
 there to look at.
 
-## Environment variables — port, bind address, binaries
+## Environment variables — port, bind address, binaries {#env}
 
 | Variable | Default | Role |
 |---|---|---|
-| `CLAUDE_CWD` / `--cwd` | The directory you run `npx mulmoterminal@latest` in (only `~/mulmoclaude` when the server is started directly) | The default working directory (the PTY's cwd); also set via `--cwd` |
+| `CLAUDE_CWD` / `--cwd` | The directory you run `npx mulmoterminal@latest` in (only `~/mulmoclaude` when the server is started directly) | The default working directory (the PTY's cwd), settled in the order `--cwd`, the `CLAUDE_CWD` environment variable, then the directory you ran the launcher in. **Only a Claude cell launched in this same directory carries the whole GUI MCP** (→ [which directory to launch in](basics.html#launch-dir)) |
 | `PORT` | `34567` | The server port |
 | `MULMOTERMINAL_HOST` | `127.0.0.1` | The interface the server binds to (→ [below](#bind-host)) |
 | `MULMOTERMINAL_ALLOWED_ORIGINS` | *(none)* | Extra browser origins allowed to attach a terminal, comma-separated. Only needed alongside a wider `MULMOTERMINAL_HOST` (→ [below](#bind-host)) |

@@ -25,7 +25,7 @@ describe("GET /api/pr-phase", () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual(EMPTY_WORK_ITEM);
       // Named individually so a future shape change has to face each field, not just a deep-equal.
-      expect(Object.keys(res.body).sort()).toEqual(["issue", "issueTitle", "issueUrl", "phase", "pr", "prTitle", "prUrl"]);
+      expect(Object.keys(res.body).sort()).toEqual(["blockedReason", "issue", "issueTitle", "issueUrl", "phase", "pr", "prTitle", "prUrl"]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -70,10 +70,21 @@ describe("POST /api/work-comment", () => {
     ["issue zero", { issue: 0, kind: "start" }],
     ["a fractional issue", { issue: 1.5, kind: "start" }],
     ["an issue that is not a number", { issue: "979", kind: "start" }],
+    // The whole content of the PR milestone is the number, so a request without one says nothing.
+    ["the pr kind with no PR number", { issue: 979, kind: "pr" }],
+    ["the pr kind with PR zero", { issue: 979, pr: 0, kind: "pr" }],
   ])("rejects %s with 400", async (_label, body) => {
     const res = await request(app).post("/api/work-comment").send(body);
     expect(res.status).toBe(400);
     expect(ensureCalls).toHaveLength(0);
+  });
+
+  it("passes the PR milestone through with its number, and does not close the issue", async () => {
+    enabled = true;
+    await request(app).post("/api/work-comment").send({ cwd: process.cwd(), issue: 979, pr: 987, kind: "pr" });
+    expect(ensureCalls[0][2]).toBe("pr");
+    expect(ensureCalls[0][4]).toBe(987);
+    expect(ensureCalls[0][5]).toEqual({ closeIssue: false });
   });
 
   it("asks for the merged comment to close the issue, and the start comment not to", async () => {

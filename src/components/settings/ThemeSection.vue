@@ -29,7 +29,9 @@ function onThemeKey(e: KeyboardEvent, index: number) {
   if (!forward && !backward) return;
   e.preventDefault();
   const next = (index + (forward ? 1 : themes.value.length - 1)) % themes.value.length;
-  setTheme(themes.value[next].id);
+  const target = themes.value[next];
+  if (!target) return;
+  setTheme(target.id);
   themesEl.value?.querySelectorAll<HTMLElement>('[role="radio"]')[next]?.focus();
 }
 </script>

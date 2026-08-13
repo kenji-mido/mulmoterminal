@@ -10,6 +10,8 @@ import { ref, computed } from "vue";
 import { usePubSub } from "./usePubSub";
 import { applyLiveChanges, type LiveChange } from "./liveMerge";
 import { browseNavigateToRecord } from "./useCollectionBrowse";
+import { isRecord } from "../../common/isRecord";
+import { fetchWithTimeout } from "../utils/fetchWithTimeout";
 
 // Must match server/backends/notifier.ts NOTIFIER_CHANNEL.
 const NOTIFIER_CHANNEL = "notifications";
@@ -32,6 +34,30 @@ export interface NotifierEntry {
 // Discriminated union mirroring the server's NotifierEvent.
 type NotifierEvent =
   { type: "published"; entry: NotifierEntry } | { type: "updated"; entry: NotifierEntry } | { type: "cleared"; id: string } | { type: "cancelled"; id: string };
+
+const SEVERITIES: readonly NotifierSeverity[] = ["info", "nudge", "urgent"];
+const LIFECYCLES: readonly NotifierLifecycle[] = ["fyi", "action"];
+
+/** One notification as it arrives from `/api/notifications` or the pub/sub channel. Both carry
+ *  the same shape from the same server, so one guard answers for both. */
+export function isNotifierEntry(value: unknown): value is NotifierEntry {
+  if (!isRecord(value)) return false;
+  const { id, pluginPkg, severity, lifecycle, title, body, navigateTarget, createdAt } = value;
+  if (typeof id !== "string" || typeof pluginPkg !== "string" || typeof title !== "string") return false;
+  // Required, and not merely cosmetic: the list sorts on `createdAt.localeCompare`, which throws
+  // when it is absent (Codex review on #1282).
+  if (typeof createdAt !== "string") return false;
+  if (!SEVERITIES.some((known) => known === severity)) return false;
+  if (lifecycle !== undefined && !LIFECYCLES.some((known) => known === lifecycle)) return false;
+  if (navigateTarget !== undefined && typeof navigateTarget !== "string") return false;
+  return body === undefined || typeof body === "string";
+}
+
+const isNotifierEvent = (value: unknown): value is NotifierEvent => {
+  if (!isRecord(value)) return false;
+  if (value.type === "published" || value.type === "updated") return isNotifierEntry(value.entry);
+  return (value.type === "cleared" || value.type === "cancelled") && typeof value.id === "string";
+};
 
 const SEVERITY_RANK: Record<NotifierSeverity, number> = { info: 0, nudge: 1, urgent: 2 };
 
@@ -105,16 +131,17 @@ async function fetchActive(): Promise<void> {
   const changes: LiveChange<NotifierEntry>[] = [];
   changesDuringFetch = changes;
   try {
-    const res = await fetch("/api/notifications");
+    const res = await fetchWithTimeout("/api/notifications");
     // Overtaken while we waited: leave the list to the fetch that overtook us.
     if (fetchId !== latestFetch) return;
     if (!res.ok) {
       console.error(`[notifications] list failed: HTTP ${res.status}`);
       return;
     }
-    const data = (await res.json()) as { active?: NotifierEntry[] };
+    const data: unknown = await res.json();
     if (fetchId !== latestFetch) return;
-    const snapshot = Array.isArray(data.active) ? data.active : [];
+    const rows = isRecord(data) && Array.isArray(data.active) ? data.active : [];
+    const snapshot = rows.filter(isNotifierEntry);
     active.value = applyLiveChanges(snapshot, changes, (entry) => entry.id);
   } catch (err) {
     console.error("[notifications] list failed", err);
@@ -128,7 +155,11 @@ function ensureInit(): void {
   if (initialized) return;
   initialized = true;
   const pubsub = usePubSub();
-  pubsub.subscribe(NOTIFIER_CHANNEL, (data) => applyEvent(data as NotifierEvent));
+  // A malformed push is dropped rather than switched on: `applyEvent` reads `event.entry`
+  // straight into the list, so an unrecognised shape used to land in the bell as a blank row.
+  pubsub.subscribe(NOTIFIER_CHANNEL, (data) => {
+    if (isNotifierEvent(data)) applyEvent(data);
+  });
   // pubsub only replays room membership on reconnect, not the events missed while
   // disconnected — re-fetch the authoritative list so the bell can't go stale.
   pubsub.onReconnect(() => void fetchActive());
@@ -162,7 +193,7 @@ export function useNotifications() {
   async function dismiss(id: string): Promise<void> {
     remove(id);
     try {
-      const res = await fetch(`/api/notifications/${encodeURIComponent(id)}/clear`, { method: "POST" });
+      const res = await fetchWithTimeout(`/api/notifications/${encodeURIComponent(id)}/clear`, { method: "POST" });
       if (!res.ok) {
         console.error(`[notifications] clear failed: HTTP ${res.status}`);
         await fetchActive();

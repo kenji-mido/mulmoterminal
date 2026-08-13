@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // What every read-side feature ASKS `gh` for, pinned exactly — the command, the flags, the JSON

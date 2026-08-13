@@ -10,6 +10,7 @@ import { requestOriginAllowed } from "../routes/same-origin-guard.js";
 import { isIssueNumber } from "../../common/prPhase.js";
 import { dirSession } from "../session/dir-session.js";
 import { tmuxAttachedCounts } from "../infra/tmux.js";
+import { requestBody } from "../routes/requestBody.js";
 
 interface WorktreeRouteOptions {
   isAllowedOrigin: (origin: string | undefined, remoteAddress: string | undefined) => boolean;
@@ -53,7 +54,7 @@ export function mountWorktreeRoutes(app: Express, { isAllowedOrigin }: WorktreeR
 
   app.post("/api/worktrees/create", async (req, res) => {
     if (!requestOriginAllowed(req, isAllowedOrigin)) return res.status(403).end();
-    const { repoDir, task, issue } = req.body ?? {};
+    const { repoDir, task, issue } = requestBody(req.body);
     if (typeof repoDir !== "string" || typeof task !== "string" || !task.trim()) {
       return res.status(400).json({ error: "repoDir and a non-empty task are required" });
     }
@@ -63,9 +64,7 @@ export function mountWorktreeRoutes(app: Express, { isAllowedOrigin }: WorktreeR
     if (issue !== undefined && !isIssueNumber(issue)) {
       return res.status(400).json({ error: "issue must be a positive integer" });
     }
-    // Re-checked rather than reusing the guard above: `req.body` is `any`, and narrowing it there
-    // does not survive to here — the call would take `any` and typecheck would not notice.
-    const wt = await createWorktree(repoDir, task, isIssueNumber(issue) ? issue : undefined);
+    const wt = await createWorktree(repoDir, task, issue);
     if (!wt) return res.status(500).json({ error: "could not create the worktree (is this a git repo?)" });
     res.json(wt);
   });
@@ -75,7 +74,7 @@ export function mountWorktreeRoutes(app: Express, { isAllowedOrigin }: WorktreeR
   // failure the client can't fix by retrying.
   app.post("/api/worktrees/remove", async (req, res) => {
     if (!requestOriginAllowed(req, isAllowedOrigin)) return res.status(403).end();
-    const { repoDir, path: worktreePath, deleteBranch, force } = req.body ?? {};
+    const { repoDir, path: worktreePath, deleteBranch, force } = requestBody(req.body);
     if (typeof repoDir !== "string" || typeof worktreePath !== "string") {
       return res.status(400).json({ error: "repoDir and path are required" });
     }
@@ -90,7 +89,7 @@ export function mountWorktreeRoutes(app: Express, { isAllowedOrigin }: WorktreeR
   // Push the worktree's branch to origin (the first half of "取り込み").
   app.post("/api/worktrees/push", async (req, res) => {
     if (!requestOriginAllowed(req, isAllowedOrigin)) return res.status(403).end();
-    const { cwd } = req.body ?? {};
+    const { cwd } = requestBody(req.body);
     if (typeof cwd !== "string") return res.status(400).json({ error: "cwd is required" });
     const result = await pushWorktree(cwd);
     res.status(statusFor(result)).json(result);
@@ -100,7 +99,7 @@ export function mountWorktreeRoutes(app: Express, { isAllowedOrigin }: WorktreeR
   // returns the URL for the client to open and which path produced it (`via`).
   app.post("/api/worktrees/pr", async (req, res) => {
     if (!requestOriginAllowed(req, isAllowedOrigin)) return res.status(403).end();
-    const { cwd } = req.body ?? {};
+    const { cwd } = requestBody(req.body);
     if (typeof cwd !== "string") return res.status(400).json({ error: "cwd is required" });
     const result = await createOrOpenPR(cwd);
     res.status(statusFor(result)).json(result);

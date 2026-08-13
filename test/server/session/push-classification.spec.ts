@@ -8,6 +8,8 @@
 // (Codex, PR #1196).
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+import { mockedFileName } from "../../support/mockFsPath.js";
+
 const ID = "11111111-1111-1111-1111-111111111111";
 
 // Hydration reads through this. The user-scheduled log is answered LATE on purpose: that is the
@@ -16,7 +18,7 @@ let slowLog = "";
 vi.mock("node:fs", () => {
   const promises = {
     readFile: vi.fn(async (file: unknown) => {
-      const name = String(file).split("/").pop() ?? "";
+      const name = mockedFileName(file);
       if (name === "background-sessions.json") return ID;
       if (name === "user-scheduled-sessions.json") {
         await new Promise((resolve) => setTimeout(resolve, 10));

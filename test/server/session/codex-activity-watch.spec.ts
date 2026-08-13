@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import { watchCodexActivity, type CodexActivityDeps } from "../../../server/session/codex-activity-watch.js";
 import type { CodexTurnBoundary } from "../../../server/agents/codex-activity.js";

@@ -1,8 +1,10 @@
+// @vitest-environment node
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { capToolOutput, createSessionStore, createToolStores, toolCallsChannel } from "../../../server/session/tool-store.js";
+import { isRecord } from "../../../common/isRecord.js";
 
 const SESSION = "11111111-2222-4333-8444-555555555555";
 const OTHER = "99999999-2222-4333-8444-555555555555";
@@ -40,6 +42,9 @@ describe("toolCallsChannel", () => {
   });
 });
 
+// The store now validates what it reads back, so the spec's element type needs a guard too.
+const isThing = (value: unknown): value is { n: number } => isRecord(value) && typeof value.n === "number";
+
 describe("createSessionStore", () => {
   let root = "";
 
@@ -52,7 +57,7 @@ describe("createSessionStore", () => {
   });
 
   it("starts empty and persists what it is given", async () => {
-    const store = createSessionStore<{ n: number }>("things", root);
+    const store = createSessionStore("things", isThing, root);
     const list = await store.get(SESSION);
     expect(list).toEqual([]);
     list.push({ n: 1 });
@@ -63,24 +68,24 @@ describe("createSessionStore", () => {
   it("reloads a session's list from disk in a fresh store", async () => {
     await fs.mkdir(path.join(root, "things"), { recursive: true });
     await fs.writeFile(path.join(root, "things", `${SESSION}.json`), JSON.stringify([{ n: 7 }]));
-    expect(await createSessionStore<{ n: number }>("things", root).get(SESSION)).toEqual([{ n: 7 }]);
+    expect(await createSessionStore("things", isThing, root).get(SESSION)).toEqual([{ n: 7 }]);
   });
 
   it("hands back the SAME array each time, since callers mutate in place", async () => {
-    const store = createSessionStore<{ n: number }>("things", root);
+    const store = createSessionStore("things", isThing, root);
     const first = await store.get(SESSION);
     first.push({ n: 1 });
     expect(await store.get(SESSION)).toBe(first);
   });
 
   it("dedupes concurrent first loads into one list", async () => {
-    const store = createSessionStore<{ n: number }>("things", root);
+    const store = createSessionStore("things", isThing, root);
     const [a, b] = await Promise.all([store.get(SESSION), store.get(SESSION)]);
     expect(a).toBe(b);
   });
 
   it("keeps sessions apart", async () => {
-    const store = createSessionStore<{ n: number }>("things", root);
+    const store = createSessionStore("things", isThing, root);
     (await store.get(SESSION)).push({ n: 1 });
     expect(await store.get(OTHER)).toEqual([]);
   });
@@ -88,14 +93,14 @@ describe("createSessionStore", () => {
   it("starts empty when the file is corrupt or not an array", async () => {
     await fs.mkdir(path.join(root, "things"), { recursive: true });
     await fs.writeFile(path.join(root, "things", `${SESSION}.json`), "{not json");
-    expect(await createSessionStore("things", root).get(SESSION)).toEqual([]);
+    expect(await createSessionStore("things", isThing, root).get(SESSION)).toEqual([]);
     await fs.writeFile(path.join(root, "things", `${OTHER}.json`), '{"a":1}');
-    expect(await createSessionStore("things", root).get(OTHER)).toEqual([]);
+    expect(await createSessionStore("things", isThing, root).get(OTHER)).toEqual([]);
   });
 
   // The id becomes a filename, so a bad one must never reach the disk.
   it("refuses to read or write an id that is not a session uuid", async () => {
-    const store = createSessionStore<{ n: number }>("things", root);
+    const store = createSessionStore("things", isThing, root);
     const list = await store.get("../escape");
     expect(list).toEqual([]);
     list.push({ n: 1 });
@@ -112,7 +117,7 @@ describe("createSessionStore", () => {
     const file = path.join(root, "things", `${SESSION}.json`);
     await fs.writeFile(file, JSON.stringify([{ n: 1 }]));
     let mtime = 100;
-    const store = createSessionStore<{ n: number }>("things", root, async () => mtime);
+    const store = createSessionStore("things", isThing, root, async () => mtime);
     expect(await store.get(SESSION)).toEqual([{ n: 1 }]); // cached at mtime 100
 
     await fs.writeFile(file, JSON.stringify([{ n: 1 }, { n: 2 }])); // the owning instance appended
@@ -126,7 +131,7 @@ describe("createSessionStore", () => {
   // returns the same working array it mutates in place, never re-reading its own write.
   it("does not re-read the store's own write (keeps the working array)", async () => {
     let mtime = 0;
-    const store = createSessionStore<{ n: number }>("things", root, async () => mtime);
+    const store = createSessionStore("things", isThing, root, async () => mtime);
     const list = await store.get(SESSION);
     list.push({ n: 1 });
     mtime = 500; // the write below lands at this mtime

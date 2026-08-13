@@ -1,56 +1,10 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import type { Express } from "express";
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { parseGithubWebUrl, resolveGithubUrl, mountGitRemoteRoute } from "../../../server/git/gitRemote.js";
-
-const REPO = "https://github.com/owner/repo";
-
-describe("parseGithubWebUrl", () => {
-  it("maps scp-like SSH remotes", () => {
-    expect(parseGithubWebUrl("git@github.com:owner/repo.git")).toBe(REPO);
-    expect(parseGithubWebUrl("git@github.com:owner/repo")).toBe(REPO);
-  });
-
-  it("maps SSH URL remotes, including a port", () => {
-    expect(parseGithubWebUrl("ssh://git@github.com/owner/repo.git")).toBe(REPO);
-    expect(parseGithubWebUrl("ssh://git@github.com:22/owner/repo.git")).toBe(REPO);
-  });
-
-  it("maps HTTPS remotes, with or without .git and credentials", () => {
-    expect(parseGithubWebUrl("https://github.com/owner/repo.git")).toBe(REPO);
-    expect(parseGithubWebUrl("https://github.com/owner/repo")).toBe(REPO);
-    expect(parseGithubWebUrl("https://user:token@github.com/owner/repo.git")).toBe(REPO);
-  });
-
-  it("maps the git:// protocol", () => {
-    expect(parseGithubWebUrl("git://github.com/owner/repo.git")).toBe(REPO);
-  });
-
-  it("trims surrounding whitespace / trailing newline (git output)", () => {
-    expect(parseGithubWebUrl("  git@github.com:owner/repo.git\n")).toBe(REPO);
-  });
-
-  it("is case-insensitive on the host and strips only a trailing .git", () => {
-    expect(parseGithubWebUrl("git@GitHub.com:owner/repo.GIT")).toBe(REPO);
-    expect(parseGithubWebUrl("https://github.com/owner/repo.github.git")).toBe("https://github.com/owner/repo.github");
-  });
-
-  it("returns null for non-GitHub hosts", () => {
-    expect(parseGithubWebUrl("git@gitlab.com:owner/repo.git")).toBeNull();
-    expect(parseGithubWebUrl("https://bitbucket.org/owner/repo.git")).toBeNull();
-    expect(parseGithubWebUrl("git@github.example.com:owner/repo.git")).toBeNull(); // not github.com
-  });
-
-  it("returns null for empty, malformed, or under-specified remotes", () => {
-    expect(parseGithubWebUrl("")).toBeNull();
-    expect(parseGithubWebUrl("   ")).toBeNull();
-    expect(parseGithubWebUrl("not a url")).toBeNull();
-    expect(parseGithubWebUrl("https://github.com/owner")).toBeNull(); // no repo segment
-    expect(parseGithubWebUrl("https://github.com/")).toBeNull();
-  });
-});
+import { resolveGithubUrl, mountGitRemoteRoute } from "../../../server/git/gitRemote.js";
 
 describe("resolveGithubUrl", () => {
   it("maps this repo's origin to its github.com URL", async () => {
@@ -154,6 +108,25 @@ describe("mountGitRemoteRoute (POST /api/git-remote)", () => {
       await captureHandler(allow)({ headers: {}, body: { path: dir } }, res);
       expect(res.statusCode).toBe(200);
       expect(githubUrlOf(res.payload)).toBeNull();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The pair `githubUrl` cannot express (#981 step 1): a repo on a forge we do not support and a
+  // directory with no remote both answer null there, and only `forge` tells them apart.
+  it("reports the forge alongside the GitHub URL", async () => {
+    const res = makeRes();
+    await captureHandler(allow)({ headers: {}, body: { path: process.cwd() } }, res);
+    expect(res.payload).toMatchObject({ forge: { host: "github.com", kind: "github" } });
+  });
+
+  it("reports forge: null for a directory with no remote", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "gitremote-"));
+    try {
+      const res = makeRes();
+      await captureHandler(allow)({ headers: {}, body: { path: dir } }, res);
+      expect(res.payload).toMatchObject({ githubUrl: null, forge: null });
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

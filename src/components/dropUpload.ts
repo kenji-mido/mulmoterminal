@@ -6,6 +6,7 @@
 // spawn time, so it inserts and reads exactly like a path the drag had carried itself.
 import { DROP_FILENAME_HEADER, MAX_DROP_BYTES, type DropUploadResponse } from "../../common/dropUpload";
 import { isRecord } from "../../common/isRecord";
+import { fetchWithTimeout } from "../utils/fetchWithTimeout";
 
 // Generous: this is a real upload of up to MAX_DROP_BYTES, possibly over a phone's connection.
 // Matched to the server's own ceiling for network mutations rather than a UI-scale timeout.
@@ -74,21 +75,20 @@ export async function uploadDropBatch(
 
 export async function uploadDroppedFile(sessionId: string, file: File): Promise<DropUploadResult> {
   if (isTooLargeToDrop(file.size)) return { ok: false, status: 413 };
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), UPLOAD_TIMEOUT_MS);
   try {
-    const res = await fetch(dropUploadUrl(sessionId), {
-      method: "POST",
-      headers: { "content-type": file.type || FALLBACK_MIME, [DROP_FILENAME_HEADER]: encodeURIComponent(file.name) },
-      body: file,
-      signal: controller.signal,
-    });
+    const res = await fetchWithTimeout(
+      dropUploadUrl(sessionId),
+      {
+        method: "POST",
+        headers: { "content-type": file.type || FALLBACK_MIME, [DROP_FILENAME_HEADER]: encodeURIComponent(file.name) },
+        body: file,
+      },
+      UPLOAD_TIMEOUT_MS,
+    );
     if (!res.ok) return { ok: false, status: res.status };
     const data: unknown = await res.json();
     return isDropUploadResponse(data) ? { ok: true, path: data.path } : { ok: false, status: null };
   } catch {
     return { ok: false, status: null }; // aborted, offline, or the host went away mid-upload
-  } finally {
-    clearTimeout(timer);
   }
 }

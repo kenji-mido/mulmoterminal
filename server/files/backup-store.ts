@@ -7,6 +7,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { byCodeUnit } from "../../common/byCodeUnit.js";
 
 /** Newest-first; older ones are dropped. Three is enough to reach past "opened it again",
  *  which is what rotates the oldest out. */
@@ -25,7 +26,7 @@ export function backupDirFor(absFile: string, root: string): string {
 export function expiredBackups(names: string[], keep = BACKUP_GENERATIONS): string[] {
   return names
     .filter((n) => n.endsWith(BACKUP_SUFFIX))
-    .sort()
+    .sort(byCodeUnit)
     .reverse()
     .slice(keep);
 }
@@ -59,8 +60,9 @@ function newestBackup(dir: string): string | null {
     const names = fs
       .readdirSync(dir)
       .filter((n) => n.endsWith(BACKUP_SUFFIX))
-      .sort();
-    return names.length ? path.join(dir, names[names.length - 1]) : null;
+      .sort(byCodeUnit);
+    const newest = names[names.length - 1];
+    return newest === undefined ? null : path.join(dir, newest);
   } catch {
     return null;
   }

@@ -86,7 +86,13 @@ so a seeded prompt was typed and never sent on an `esc-cr` host), scoped
 to Claude sessions only (shell/codex keep plain CR). See the [config guide](guide/en/config.html#terminal-submit).
 Anything auto-submitted also ends its line with a space (`submittableLine`, #1142), or an open
 `/command` / `@path` completion menu eats the submit — on **either** mapping.
-The `esc-cr` bare-Enter interception is guarded on `isComposing` so IME confirm isn't eaten.
+The `esc-cr` bare-Enter interception is guarded so IME confirm isn't eaten — in **two** places, and
+both are needed. `enterKeyOverride` refuses `e.isComposing`, which is the Chrome / Firefox shape; the
+custom key handler additionally refuses `isImeConfirming(e)` (`src/composables/imeComposition.ts`),
+because **Safari fires `compositionend` BEFORE the confirming keydown** and the flag is already false
+by then — so on Safari the pure guard alone submitted the half-converted line (#1353). The same
+handler covers the keymap and clipboard paths, and the grid's window-level shortcut listener asks the
+same question.
 
 ### Links — three independent mechanisms
 
@@ -155,8 +161,13 @@ all confirmed against `@xterm/headless@6.0.0` by reproducing the upstream flight
 
 - **The throw is out of reach.** It happens inside the WriteBuffer's own `setTimeout`, not under
   our `term.write()` call, so no try/catch of ours can see it. The state has to be found by
-  looking, not by catching — hence the probe in `terminalBufferHealth.ts`, run on `fit()` and on
-  each output message.
+  looking, not by catching — hence the probe in `terminalBufferHealth.ts`, run on `fit()`, on
+  each output message, **and on a typed keystroke**. The third one exists because the first two
+  can both stop happening: an idle cell is not being written to and is not being resized, so a
+  terminal that died there stayed dead until a reload — while the person in front of it typed and
+  read the frozen screen as "input is broken". The keystroke is the only signal such a cell gets,
+  so it is the one that has to trigger the repair. Pointer reports are excluded (`isTypedInput`),
+  like everywhere else input means "a person did this".
 - **The write queue stays stuck forever.** `WriteBuffer.write()` only starts the drain when the
   queue *was* empty, so the entries a throw left behind are never parsed. This is why the cell
   freezes until a page reload.
@@ -168,6 +179,36 @@ all confirmed against `@xterm/headless@6.0.0` by reproducing the upstream flight
 
 Rendering itself survives: `RenderDebouncer._innerRefresh` clears its animation frame *before*
 calling the render callback, so a renderer that throws still repaints on the next refresh.
+
+### The other silence: input the socket never took
+
+A slot only writes to the socket when it is `OPEN` — during the reconnect backoff, or after a
+`superseded` message, input is dropped and **nothing changes on screen**, which is indistinguishable
+from a terminal that received it and printed nothing. The status pill says `disconnected`, but it
+lives in a header the filmstrip hides and nobody watches a pill while typing.
+
+So the manager tells the view (`ConnHandlers.onInputDropped`) and `Terminal.vue` shows the same
+transient banner the drop/paste hints use. There is a `console.warn` on the same path, which is
+what makes "I did something and nothing happened" diagnosable after the fact: it distinguishes a
+socket that was down from a terminal that had stopped drawing (the #846 case above, which logs its
+own line when it rebuilds).
+
+Three details, each of which was wrong once:
+
+- **Every path into the PTY reports, not just the keyboard.** `submitText` / `pasteText` /
+  `pasteAndSubmit` used to answer a closed socket with `false` and nothing else, and only one
+  caller ever read it — so a header button or a picked skill did nothing and explained nothing
+  (#1315). `insertText` is the quietest of them: a dictated sentence, a dropped path, a pasted
+  screenshot's path, all of which the user waits to see appear in the input box. A GUI press is
+  the worse case in general: whoever made it never typed, so the natural reading is "this button
+  is broken". Empty text is not a drop and stays silent.
+- **The banner is on a cooldown, not once per stretch.** A stretch has no upper bound (the backoff
+  retries forever at a 5s cap) while the banner lives six seconds, so "once per stretch" meant the
+  person who came back and typed again got the silence back (#1316). The **log** line stays one per
+  stretch — a post-mortem needs one, not fifty. Both reset in `sock.onopen`.
+- **`willReconnect` decides the wording.** `connectionWillReturn` in `reconnectPolicy.ts`, not
+  `shouldReconnect`: that one is blind to an armed retry (it answers "schedule another?"), so it
+  would deny a reconnect mid-backoff and promise one after an exit.
 
 ### Renderer (canvas vs DOM)
 
@@ -312,7 +353,7 @@ looking) — flag them for QA on the release.
 | OSC 8 links | tmux `terminal-features '*:hyperlinks'` present; xterm `linkHandler` set | click Claude statusline `PR #NNNN` → opens the PR (no confirm dialog) |
 | OSC 52 clipboard | tmux `Ms` override + `set-clipboard on` present (`planMsOverride`) | Claude auto-copy reaches the browser clipboard |
 | File-path links | `registerFilePathLinks` order vs WebLinks; `/api/files/raw` cwd containment | click a generated file path → previews the file |
-| Enter / newline | `terminalSubmit` mapping + `isComposing` guard; `macOptionIsMeta` | Enter submits, Shift+Enter newlines; IME confirm not eaten; both `cr` and `esc-cr` |
+| Enter / newline | `terminalSubmit` mapping + `isComposing` guard + `isImeConfirming` (Safari's compositionend-first ordering); `macOptionIsMeta` | Enter submits, Shift+Enter newlines; IME confirm not eaten on any browser; both `cr` and `esc-cr` |
 | Mouse / wheel | `guardMouseTracking` swallow set (1000/1002/1003/1006); wheel→SGR in alt buffer; `wheelNotches` accumulation vs xterm's own `consumeWheelEvent` | wheel scrolls transcript (not prompt history); drag selects, doesn't emit mouse reports; a trackpad swipe moves a TUI about as far as it moves the scrollback |
 | Reattach | `stripTerminalQueries` patterns; replay buffer size; `tmuxTerminalModes` still reports `alternate_on` / `mouse_*_flag`, and `refresh-client` still forces a FULL repaint, on the installed tmux | reattaching a session doesn't leak `0;276;0c`-style junk; scrollback survives; after a reload the wheel still scrolls a Claude cell's transcript, and the screen matches `capture-pane` rather than showing spliced-together fragments (#1073) |
 

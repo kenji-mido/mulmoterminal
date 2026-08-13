@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import {
   sanitizeButtons,
@@ -141,16 +142,19 @@ describe("mergeHeaderConfig", () => {
 });
 
 describe("DEFAULT_BUTTONS", () => {
-  it("is the starter set (picker, reveal, in-app files, new terminal, PR, GitHub) as config buttons", () => {
-    expect(DEFAULT_BUTTONS.map((b) => b.id)).toEqual(["pick-file", "reveal", "files", "terminal", "pr", "gh"]);
+  it("is the starter set (file picker, PR) as config buttons", () => {
+    expect(DEFAULT_BUTTONS.map((b) => b.id)).toEqual(["pick-file", "pr"]);
     expect(DEFAULT_BUTTONS.find((b) => b.id === "pick-file")?.open).toEqual({ pickFile: true });
-    expect(DEFAULT_BUTTONS.find((b) => b.id === "reveal")?.open).toEqual({ reveal: "${dir}" });
-    expect(DEFAULT_BUTTONS.find((b) => b.id === "files")?.open).toEqual({ files: "${dir}" });
-    expect(DEFAULT_BUTTONS.find((b) => b.id === "terminal")?.open).toEqual({ terminal: "${dir}" });
-    // pr self-hides outside a repo (isGitRepo) and without an open PR (resolver); gh gates on a
-    // resolvable GitHub owner/repo so it never renders a broken https://github.com/ link.
+    // pr self-hides outside a repo (isGitRepo) and without an open PR (resolver), so it is never
+    // noise — which is why it stayed a button while the directory ones became menu items.
     expect(DEFAULT_BUTTONS.find((b) => b.id === "pr")?.when).toBe("isGitRepo");
-    expect(DEFAULT_BUTTONS.find((b) => b.id === "gh")?.when).toBe("repo != ");
+  });
+
+  // reveal / files / terminal / gh are items in a session cell's PATH MENU now. As buttons they
+  // were four permanent icons for four occasional navigations, and `reveal` duplicated the path's
+  // own click outright. Pinned here so a well-meaning restore has to argue with this comment.
+  it("no longer ships the directory / GitHub buttons the path menu took over", () => {
+    for (const id of ["reveal", "files", "terminal", "gh"]) expect(DEFAULT_BUTTONS.some((b) => b.id === id)).toBe(false);
   });
 });
 

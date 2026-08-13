@@ -18,6 +18,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { spawnCaptureAsync } from "./spawnCapture.js";
 import { toolGroupServerId, type ToolGroup } from "../../common/toolGroups.js";
+import { isRecord } from "../../common/isRecord.js";
 
 export const guiMcpUrlTemplate = (group: ToolGroup): string => `http://127.0.0.1:\${MULMOTERMINAL_PORT}/api/mcp/${group}/\${MULMOTERMINAL_SESSION_ID}`;
 
@@ -57,7 +58,7 @@ const claudeConfigFile = (): string => path.join(process.env.CLAUDE_CONFIG_DIR?.
 async function readJsonObject(file: string): Promise<Record<string, unknown> | null> {
   try {
     const parsed: unknown = JSON.parse(await readFile(file, "utf8"));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+    return isRecord(parsed) ? parsed : null;
   } catch {
     // Absent, unreadable or half-written (Claude Code rewrites this file live). Nothing
     // registered is the honest answer, and it is also the safe one: the switch renders OFF, and
@@ -69,10 +70,9 @@ async function readJsonObject(file: string): Promise<Record<string, unknown> | n
 // `mcpServers` is a JSON object keyed by server id. Read with Object.keys on an own-property
 // check rather than indexed lookups, so a key like `constructor` in the user's file cannot
 // resolve through Object.prototype (same reason common/toolGroups.ts uses a Map).
-const serverIdsIn = (value: unknown): string[] => (value && typeof value === "object" && !Array.isArray(value) ? Object.keys(value as object) : []);
+const serverIdsIn = (value: unknown): string[] => (isRecord(value) ? Object.keys(value) : []);
 
-const ownProp = (obj: unknown, key: string): unknown =>
-  obj && typeof obj === "object" && Object.prototype.hasOwnProperty.call(obj, key) ? (obj as Record<string, unknown>)[key] : undefined;
+const ownProp = (obj: unknown, key: string): unknown => (isRecord(obj) && Object.prototype.hasOwnProperty.call(obj, key) ? obj[key] : undefined);
 
 // The servers a scope holds. Every scope spells them the same way — `{ mcpServers: { <id>: … } }`
 // — a per-directory entry under `projects` included.

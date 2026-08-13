@@ -59,8 +59,12 @@ export function fencedBlocks(markdown: string): FencedBlock[] {
   const lines = markdown.split("\n");
   const blocks: FencedBlock[] = [];
   let i = 0;
+  // Each line is read into a const before use: with noUncheckedIndexedAccess, `lines[i]` is
+  // `string | undefined` even inside `i < lines.length`, and the loop condition is what actually
+  // rules the undefined out.
   while (i < lines.length) {
-    const open = fenceOf(lines[i]);
+    const line = lines[i];
+    const open = line === undefined ? null : fenceOf(line);
     if (!open) {
       i++;
       continue;
@@ -69,12 +73,12 @@ export function fencedBlocks(markdown: string): FencedBlock[] {
     const info = open.info.trim();
     const body: string[] = [];
     i++;
-    while (i < lines.length && !closes(lines[i], fence)) {
-      body.push(lines[i]);
+    for (let next = lines[i]; next !== undefined && !closes(next, fence); next = lines[i]) {
+      body.push(next);
       i++;
     }
     i++; // step over the closing fence (or past the end, for an unclosed block)
-    blocks.push({ lang: info ? (info.split(/\s+/)[0].toLowerCase() ?? null) : null, body: body.join("\n") });
+    blocks.push({ lang: info ? (info.split(/\s+/)[0]?.toLowerCase() ?? null) : null, body: body.join("\n") });
   }
   return blocks;
 }
@@ -84,5 +88,5 @@ export function fencedBlocks(markdown: string): FencedBlock[] {
  *  exactly like a copy that silently failed. */
 export function lastFencedBlock(markdown: string): FencedBlock | null {
   const withBody = fencedBlocks(markdown).filter((b) => b.body.trim() !== "");
-  return withBody.length ? withBody[withBody.length - 1] : null;
+  return withBody[withBody.length - 1] ?? null;
 }

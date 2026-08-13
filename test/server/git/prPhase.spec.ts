@@ -117,14 +117,23 @@ describe("phaseForRepoBranch", () => {
   it("derives phase and url from the open PR (one query, no fallback)", async () => {
     const gh = ghByState({ open: openPr });
     const result = await phaseForRepoBranch("o/r", "feat/x", { runGh: gh.fn });
-    expect(result).toEqual({ phase: "ready", pr: 2, prUrl: "https://github.com/o/r/pull/2", issue: null, issueUrl: null, prTitle: null, issueTitle: null });
+    expect(result).toEqual({
+      phase: "ready",
+      pr: 2,
+      prUrl: "https://github.com/o/r/pull/2",
+      issue: null,
+      issueUrl: null,
+      prTitle: null,
+      issueTitle: null,
+      blockedReason: null,
+    });
     expect(gh.states()).toEqual(["open"]); // never fell through to --state all
   });
 
   it("falls back to --state all for a merged branch (no open PR)", async () => {
     const gh = ghByState({ open: "[]", all: JSON.stringify([{ state: "MERGED", url: "u", number: 9 }]) });
     const result = await phaseForRepoBranch("o/r", "feat/x", { runGh: gh.fn });
-    expect(result).toEqual({ phase: "merged", pr: 9, prUrl: "u", issue: null, issueUrl: null, prTitle: null, issueTitle: null });
+    expect(result).toEqual({ phase: "merged", pr: 9, prUrl: "u", issue: null, issueUrl: null, prTitle: null, issueTitle: null, blockedReason: null });
     expect(gh.states()).toEqual(["open", "all"]);
   });
 
@@ -139,12 +148,12 @@ describe("phaseForRepoBranch", () => {
 
   it("resolves to none when gh fails", async () => {
     const result = await phaseForRepoBranch("o/r", "feat/x", { runGh: ghByState({}, false).fn });
-    expect(result).toEqual({ phase: "none", pr: null, prUrl: null, issue: null, issueUrl: null, prTitle: null, issueTitle: null });
+    expect(result).toEqual({ phase: "none", pr: null, prUrl: null, issue: null, issueUrl: null, prTitle: null, issueTitle: null, blockedReason: null });
   });
 
   it("resolves to none when there is no PR at all", async () => {
     const result = await phaseForRepoBranch("o/r", "feat/x", { runGh: ghByState({ open: "[]", all: "[]" }).fn });
-    expect(result).toEqual({ phase: "none", pr: null, prUrl: null, issue: null, issueUrl: null, prTitle: null, issueTitle: null });
+    expect(result).toEqual({ phase: "none", pr: null, prUrl: null, issue: null, issueUrl: null, prTitle: null, issueTitle: null, blockedReason: null });
   });
 
   // Codex iter-3: a FAILED open query must not fall through to --state all (which could report
@@ -158,7 +167,7 @@ describe("phaseForRepoBranch", () => {
       return { ok: true, stdout: JSON.stringify([{ state: "MERGED", url: "stale" }]), stderr: "" };
     };
     const result = await phaseForRepoBranch("o/r", "feat/x", { runGh });
-    expect(result).toEqual({ phase: "none", pr: null, prUrl: null, issue: null, issueUrl: null, prTitle: null, issueTitle: null });
+    expect(result).toEqual({ phase: "none", pr: null, prUrl: null, issue: null, issueUrl: null, prTitle: null, issueTitle: null, blockedReason: null });
     expect(states).toEqual(["open"]);
   });
 
@@ -236,6 +245,8 @@ describe("phaseForRepoBranch", () => {
         issueUrl: "https://github.com/o/r/issues/979",
         prTitle: null,
         issueTitle: null,
+
+        blockedReason: null,
       });
     });
   });

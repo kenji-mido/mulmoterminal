@@ -519,3 +519,61 @@ describe("opening a file while the tree is still loading", () => {
     w.unmount();
   });
 });
+
+// The Canvas button (#1374). What it is gated on matters twice over: it decides whether the
+// button is offered at all, and it has to agree with the card TerminalGrid builds from the same
+// row — a button that appears and does nothing is worse than no button.
+describe("the Canvas button", () => {
+  const withEntry = (name: string) => {
+    globalThis.fetch = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/list")) return { ok: true, json: async () => ({ entries: [{ name, dir: false, size: 10 }] }) };
+      return { ok: true, json: async () => ({ text: "x", version: "v1" }) };
+    }) as unknown as typeof fetch;
+  };
+
+  const openRow = async (name: string, cwd: string | null, canvasTarget = true, workspace: string | null = null) => {
+    withEntry(name);
+    const w = mount(FilesPane, { props: { cwd, canvasTarget, workspace } });
+    await flushPromises();
+    await w.findAll('[data-testid="files-row"]')[0].trigger("click");
+    await flushPromises();
+    return w;
+  };
+
+  const btn = (w: Awaited<ReturnType<typeof openRow>>) => w.find('[data-testid="files-canvas-btn"]');
+
+  it("is offered for a file the Canvas can render, and hands back the row's own path", async () => {
+    const w = await openRow("design.md", "/work/proj");
+    expect(btn(w).exists()).toBe(true);
+    await btn(w).trigger("click");
+    // Relative: the grid joins it under the same cwd this pane resolves against.
+    expect(w.emitted("open-in-canvas")).toEqual([["design.md"]]);
+  });
+
+  it("is not offered for a file no plugin renders", async () => {
+    expect(btn(await openRow("notes.txt", "/work/proj")).exists()).toBe(false);
+  });
+
+  // FilesOverlay mounts this pane full-screen, where there is no enlarged cell to put a Canvas
+  // beside — so the button must not appear even for a file that would render.
+  it("is not offered without a cell to open it beside", async () => {
+    expect(btn(await openRow("design.md", "/work/proj", false)).exists()).toBe(false);
+  });
+
+  // A story is the one file judged by WHERE it is rather than what it is called: the plugin only
+  // takes a workspace-relative `stories/…`, so a project cell's own artifacts/stories holds files
+  // it would not open. Same name, same shape, two different answers.
+  it("is offered for a story in the workspace and withheld for one outside it", async () => {
+    expect(btn(await openRow("tale.json", "/work/ws/artifacts/stories", true, "/work/ws")).exists()).toBe(true);
+    expect(btn(await openRow("tale.json", "/work/other/artifacts/stories", true, "/work/ws")).exists()).toBe(false);
+  });
+
+  // The gate runs on the JOINED path, not the row's. `p.html` passes on its own and fails under a
+  // directory with a dot segment, which the plugin's iframe mount refuses — so offering it there
+  // would be offering a click that silently does nothing.
+  it("is withheld when the cell's own directory is what the plugin refuses", async () => {
+    expect(btn(await openRow("p.html", "/home/me/proj")).exists()).toBe(true);
+    expect(btn(await openRow("p.html", "/home/me/.config/proj")).exists()).toBe(false);
+  });
+});

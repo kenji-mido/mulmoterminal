@@ -10,12 +10,14 @@
 // worker (tool-group-reset.spec's pattern).
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+import { mockedFileName } from "../../support/mockFsPath.js";
+
 const appended: { file: string; data: string }[] = [];
 let readBack: Record<string, string> = {};
 
 vi.mock("node:fs", () => {
   const promises = {
-    readFile: vi.fn(async (file: unknown) => readBack[String(file).split("/").pop() ?? ""] ?? ""),
+    readFile: vi.fn(async (file: unknown) => readBack[mockedFileName(file)] ?? ""),
     appendFile: vi.fn(async (file: string, data: string) => {
       appended.push({ file: String(file), data });
     }),
@@ -39,7 +41,7 @@ async function freshRegistry() {
 // placed log silently counts the unplaced one too.
 const loggedTo = (name: string) =>
   appended
-    .filter((a) => a.file.split("/").pop() === name)
+    .filter((a) => mockedFileName(a.file) === name)
     .map((a) => a.data)
     .join("");
 
@@ -129,6 +131,33 @@ describe("unplaced sessions", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(loggedTo("placed-sessions.json").split(A).length - 1).toBe(1);
     expect(registry.unplacedSessionRows()).toEqual([]);
+  });
+
+  // What the phone may list (#1184). A session it started itself is in neither set the desktop
+  // reads until a browser attaches, so without the unplaced half the phone could not find the work
+  // it had just begun. The two halves must also never both hold one id, or one session would be
+  // two rows.
+  it("lets the phone list a session it started, until and after a cell takes it", async () => {
+    const registry = await freshRegistry();
+    await Promise.all([registry.unplacedSessionsHydrated, registry.placedSessionsHydrated]);
+    expect(registry.isPhoneListableSession(A)).toBe(false);
+
+    registry.markUnplacedSession(A);
+    expect(registry.isPhoneListableSession(A)).toBe(true);
+    expect(registry.unplacedSessionRows().map((r) => r.id)).toEqual([A]);
+
+    // The attach clears the unplaced mark AND records the cell, so the answer stays true across
+    // the handover rather than blinking off between the two writes.
+    registry.markSessionPlaced(A);
+    registry.markDevTerminalSession(A);
+    expect(registry.isPhoneListableSession(A)).toBe(true);
+    expect(registry.unplacedSessionRows()).toEqual([]);
+  });
+
+  it("does not list a tmux shell that was never a cell and nobody spawned for one", async () => {
+    const registry = await freshRegistry();
+    await Promise.all([registry.unplacedSessionsHydrated, registry.placedSessionsHydrated]);
+    expect(registry.isPhoneListableSession(B)).toBe(false);
   });
 
   it("ignores an id that is not a session id", async () => {

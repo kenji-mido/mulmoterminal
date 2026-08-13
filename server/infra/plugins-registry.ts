@@ -25,7 +25,7 @@ import path from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 import type { Express } from "express";
 import { isPluginFactory } from "gui-chat-protocol";
-import type { PluginRuntime, PluginFactoryResult } from "gui-chat-protocol";
+import type { PluginRuntime, PluginFactoryResult, ToolDefinition } from "gui-chat-protocol";
 import { generateImage } from "../backends/image-gen.js";
 import { markdownHostApp } from "../backends/markdown.js";
 import { artifactsFileOps } from "../backends/artifacts.js";
@@ -33,14 +33,13 @@ import { htmlByPath } from "../backends/openPath.js";
 import { createPluginRuntime } from "./pluginRuntime.js";
 import { resolvePluginTools } from "./tool-precedence.js";
 import { HOST_TOOL_DEFINITIONS } from "./host-tools.js";
-import { groupOfTool, toolGroupServerId, AUTO_ALLOWED_TOOLS, type ToolGroup } from "../../common/toolGroups.js";
-import { missingRequiredEnv, soleExecutor } from "./server-tool-load.js";
+import { groupOfTool, toolGroupServerId, GUI_SERVER_ID, AUTO_ALLOWED_TOOLS, type ToolGroup } from "../../common/toolGroups.js";
+import { missingRequiredEnv, soleExecutor, isExecutor } from "./server-tool-load.js";
+import { isRecord } from "../../common/isRecord.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // ../.. climbs server/infra/ → server/ → package root, where plugins/ lives.
 const PLUGINS_DIR = path.join(__dirname, "..", "..", "plugins");
-
-const MCP_SERVER_NAME = "mulmoterminal-gui";
 
 // The gui-chat-protocol ToolContext.app — host-provided backends a plugin's
 // execute() may call (e.g. @mulmochat-plugin/generate-image calls
@@ -66,13 +65,39 @@ const APP_CONTEXT = { generateImage, ...markdownHostApp };
 // assembles the context per route.
 const FILES_CONTEXT = { artifacts: artifactsFileOps, byPath: htmlByPath };
 
+// The normalized shape every loader below answers with, and the only one the broker and the
+// dispatch route consume. Stated once because four loaders have to agree on it.
+interface LoadedPlugin {
+  toolName: string;
+  definition: ToolDefinition;
+  execute: (args?: unknown) => unknown;
+}
+
+// The three required fields of a gui-chat-protocol ToolDefinition. A guard rather than a cast:
+// a definition arrives from an imported module, so nothing here has checked it before now.
+const isToolDefinition = (value: unknown): value is ToolDefinition =>
+  isRecord(value) && value.type === "function" && typeof value.name === "string" && typeof value.description === "string";
+
+// plugins.json entries are module specifiers, so a non-string is a config error rather than a
+// plugin. Dropped, but never in silence: it would otherwise vanish between the file and the tool
+// list with nothing anywhere to read.
+function moduleNames(value: unknown, field: string): string[] {
+  if (!Array.isArray(value)) return [];
+  const names = value.filter((entry): entry is string => typeof entry === "string");
+  if (names.length !== value.length) {
+    console.warn(`[plugins] plugins.json "${field}": ignored ${value.length - names.length} non-string entries`);
+  }
+  return names;
+}
+
 function loadConfig() {
   const raw = fs.readFileSync(path.join(PLUGINS_DIR, "plugins.json"), "utf8");
-  const parsed = JSON.parse(raw);
+  const parsed: unknown = JSON.parse(raw);
+  const fields = isRecord(parsed) ? parsed : {};
   return {
-    packages: Array.isArray(parsed.packages) ? parsed.packages : [],
-    servers: Array.isArray(parsed.servers) ? parsed.servers : [],
-    local: Array.isArray(parsed.local) ? parsed.local : [],
+    packages: moduleNames(fields.packages, "packages"),
+    servers: moduleNames(fields.servers, "servers"),
+    local: moduleNames(fields.local, "local"),
   };
 }
 
@@ -82,11 +107,11 @@ function loadConfig() {
 // named after the tool, so there's no bare `execute` for loadPackage to find. Build the
 // package's scoped runtime, call the factory once at load, and adapt the result.
 // `isPluginFactory` is the protocol's own detector, so this tracks the spec.
-function loadFactoryPackage(name: string, factory: (runtime: PluginRuntime) => PluginFactoryResult) {
+function loadFactoryPackage(name: string, factory: (runtime: PluginRuntime) => PluginFactoryResult): LoadedPlugin {
   const plugin = factory(createPluginRuntime(name));
   const definition = plugin.TOOL_DEFINITION;
   const execute = plugin[definition.name];
-  if (typeof execute !== "function") {
+  if (!isExecutor(execute)) {
     throw new Error(`Plugin factory "${name}" exports no "${definition.name}" executor matching its TOOL_DEFINITION.`);
   }
   // A factory's executor takes only args — its host capabilities came from the runtime.
@@ -98,17 +123,19 @@ function loadFactoryPackage(name: string, factory: (runtime: PluginRuntime) => P
 // result envelope. We invoke it in-process when the broker dispatches, passing the
 // host backends as context.app (image generation, etc.). Factory-style packages are
 // a different shape entirely, so they branch off to loadFactoryPackage first.
-async function loadPackage(name: string) {
-  const mod = await import(name);
+async function loadPackage(name: string): Promise<LoadedPlugin> {
+  const mod: unknown = await import(name);
+  if (!isRecord(mod)) throw new Error(`Package "${name}" did not resolve to a module namespace object.`);
   if (isPluginFactory(mod.default)) return loadFactoryPackage(name, mod.default);
-  const definition = mod.TOOL_DEFINITION ?? mod.pluginCore?.toolDefinition;
+  const core = isRecord(mod.pluginCore) ? mod.pluginCore : undefined;
+  const definition = mod.TOOL_DEFINITION ?? core?.toolDefinition;
   // Some packages (e.g. @mulmoclaude/core/collection) export their executor under
   // a descriptive name like `executePresentCollection` rather than a bare `execute`,
   // and ship no `pluginCore` on the core entry (their origin host registers the tool
   // as a built-in). Fall back to a sole `execute*` function export so such packages
   // still load without hardcoding their name.
-  const execute = mod.pluginCore?.execute ?? mod.execute ?? soleExecutor(mod);
-  if (!definition || typeof execute !== "function") {
+  const execute = core?.execute ?? mod.execute ?? soleExecutor(mod);
+  if (!isToolDefinition(definition) || !isExecutor(execute)) {
     throw new Error(`Package "${name}" is not a gui-chat-protocol plugin (missing TOOL_DEFINITION/execute).`);
   }
   return { toolName: definition.name, definition, execute: (args?: unknown) => execute({ app: APP_CONTEXT, files: FILES_CONTEXT }, args ?? {}) };
@@ -118,16 +145,34 @@ async function loadPackage(name: string) {
 // definition + an async handler returning a plain string for claude, with no GUI
 // data. `requiredEnv` lists env vars (e.g. X_BEARER_TOKEN) the handler needs.
 interface ServerTool {
-  definition: { name: string; description: string; inputSchema: object };
+  definition: { name: string; description: string; inputSchema: ToolDefinition["parameters"] };
   requiredEnv?: string[];
   prompt?: string;
   handler: (args: Record<string, unknown>) => Promise<string>;
 }
 
+// An XTool's inputSchema IS the JSON-schema object a ToolDefinition carries as `parameters`, and
+// it is adapted into one below — so its shape is checked here rather than assumed there. Only the
+// container is: every JsonSchemaProperty field is optional, and the property values are forwarded
+// to the broker without this file ever reading inside them.
+const isInputSchema = (value: unknown): value is ToolDefinition["parameters"] =>
+  isRecord(value) &&
+  value.type === "object" &&
+  isRecord(value.properties) &&
+  Object.values(value.properties).every(isRecord) &&
+  Array.isArray(value.required) &&
+  value.required.every((key) => typeof key === "string");
+
 function isServerTool(value: unknown): value is ServerTool {
-  if (typeof value !== "object" || value === null) return false;
-  const tool = value as Partial<ServerTool>;
-  return typeof tool.definition?.name === "string" && typeof tool.handler === "function";
+  if (!isRecord(value)) return false;
+  const definition = value.definition;
+  return (
+    isRecord(definition) &&
+    typeof definition.name === "string" &&
+    typeof definition.description === "string" &&
+    isInputSchema(definition.inputSchema) &&
+    typeof value.handler === "function"
+  );
 }
 
 // A server-only tool package. Import it, pick every XTool-shaped export, and adapt
@@ -135,9 +180,9 @@ function isServerTool(value: unknown): value is ServerTool {
 // requiredEnv is not fully satisfied are dropped (and logged) so they never reach
 // the broker's tool list. The handler's string result becomes the envelope
 // `message`; with no `data`, the broker publishes nothing to the GUI.
-async function loadServerToolPackage(name: string) {
-  const mod = await import(name);
-  const tools = Object.values(mod).filter(isServerTool);
+async function loadServerToolPackage(name: string): Promise<LoadedPlugin[]> {
+  const mod: unknown = await import(name);
+  const tools = Object.values(isRecord(mod) ? mod : {}).filter(isServerTool);
   if (tools.length === 0) {
     throw new Error(`Server-tool package "${name}" exports no XTool-shaped tools ({ definition, handler }).`);
   }
@@ -154,27 +199,35 @@ async function loadServerToolPackage(name: string) {
       toolName: tool.definition.name,
       // Adapt the XTool definition into a gui-chat-protocol ToolDefinition the
       // broker lists: inputSchema -> parameters; prompt folds into the description.
+      // Spread rather than assigned: both are optional on ToolDefinition, and under
+      // exactOptionalPropertyTypes writing `prompt: undefined` is a present key holding
+      // undefined — a different thing from an absent one, and not what the broker is given.
       definition: {
         type: "function" as const,
         name: tool.definition.name,
         description: tool.definition.description,
-        prompt: tool.prompt,
-        parameters: tool.definition.inputSchema,
+        ...(tool.prompt === undefined ? {} : { prompt: tool.prompt }),
+        ...(tool.definition.inputSchema === undefined ? {} : { parameters: tool.definition.inputSchema }),
       },
-      execute: async (args?: unknown) => ({ message: await tool.handler((args as Record<string, unknown>) ?? {}) }),
+      execute: async (args?: unknown) => ({ message: await tool.handler(isRecord(args) ? args : {}) }),
     }));
 }
 
 // A local plugin: definition.js exports TOOL_DEFINITION (a gui-chat-protocol
 // ToolDefinition), server.js exports execute(args).
-async function loadLocal(name: string) {
+async function loadLocal(name: string): Promise<LoadedPlugin> {
   const dir = path.join(PLUGINS_DIR, name);
-  const importJs = (file: string) => import(pathToFileURL(path.join(dir, file)).href);
-  const [{ TOOL_DEFINITION }, { execute }] = await Promise.all([importJs("definition.js"), importJs("server.js")]);
-  if (!TOOL_DEFINITION || typeof execute !== "function") {
+  const importJs = async (file: string): Promise<Record<string, unknown>> => {
+    const mod: unknown = await import(pathToFileURL(path.join(dir, file)).href);
+    return isRecord(mod) ? mod : {};
+  };
+  const [definitionModule, serverModule] = await Promise.all([importJs("definition.js"), importJs("server.js")]);
+  const definition = definitionModule.TOOL_DEFINITION;
+  const execute = serverModule.execute;
+  if (!isToolDefinition(definition) || !isExecutor(execute)) {
     throw new Error(`Local plugin "${name}" must export TOOL_DEFINITION and execute().`);
   }
-  return { toolName: TOOL_DEFINITION.name, definition: TOOL_DEFINITION, execute: (args?: unknown) => execute(args ?? {}) };
+  return { toolName: definition.name, definition, execute: (args?: unknown) => execute(args ?? {}) };
 }
 
 const config = loadConfig();
@@ -241,7 +294,7 @@ export function mountAllRoutes(app: Express) {
 // even have registered is harmless — an allowlist entry for a server that isn't there matches
 // nothing, which is exactly what lets the grid pass `render` unconditionally.
 export function allowedToolNames(group: ToolGroup | null = null) {
-  const serverId = group === null ? MCP_SERVER_NAME : toolGroupServerId(group);
+  const serverId = group === null ? GUI_SERVER_ID : toolGroupServerId(group);
   const defs = group === null ? toolDefinitions : toolDefinitions.filter((d) => groupOfTool(d.name) === group);
   return defs.map((d) => `mcp__${serverId}__${d.name}`);
 }

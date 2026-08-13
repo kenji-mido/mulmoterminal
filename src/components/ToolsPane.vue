@@ -2,6 +2,10 @@
 import { ref, watch, onUnmounted } from "vue";
 import { useSessionFeed } from "../composables/useSessionFeed";
 import { onToolGroupsAnnounced } from "../composables/useToolGroupsAnnounce";
+import { isRecord, optionalString } from "../../common/isRecord";
+import { isUnknownArray } from "../../common/isUnknownArray";
+import { jsonBody } from "../jsonBody";
+import { fetchWithTimeout } from "../utils/fetchWithTimeout";
 
 // The tools pane mirrors MulmoClaude's right sidebar: an "Available Tools" list
 // (the GUI plugin tools, with collapsible descriptions) and a "Tool Call History"
@@ -15,6 +19,12 @@ interface AvailableTool {
   title?: string;
   description?: string;
 }
+// `toolName` is the field the pane cannot do without: it keys the row and is what a click sends.
+// The other two are display text and may legitimately be absent — but a PRESENT one of the wrong
+// type would be asserted as a string and rendered.
+const isAvailableTool = (value: unknown): value is AvailableTool =>
+  isRecord(value) && typeof value.toolName === "string" && optionalString(value.title) && optionalString(value.description);
+
 interface ToolCall {
   toolUseId?: string;
   toolName: string;
@@ -25,8 +35,13 @@ interface ToolCall {
   durationMs?: number;
 }
 
-const props = defineProps<{ sessionId: string | null }>();
-const emit = defineEmits<{ close: [] }>();
+const props = defineProps<{
+  sessionId: string | null;
+  // Whether this pane currently covers the terminal area. Owned by the grid (it is the grid's
+  // layout that changes), shown here because the button that flips it lives in this header.
+  expanded?: boolean;
+}>();
+const emit = defineEmits<{ close: []; toggleExpand: [] }>();
 
 // Whether this session's history holds the GUI tools ALONE (the broker fed it) rather than every
 // tool (claude's hooks fed it). An empty GUI-only history looks exactly like an agent that ran
@@ -39,6 +54,24 @@ const guiOnlyHistory = ref(false);
 
 const availableTools = ref<AvailableTool[]>([]);
 const toolCalls = ref<ToolCall[]>([]);
+
+// One call off the live channel. `toolName`, `status` and `at` are what every row renders from;
+// without them there is no row to draw.
+const CALL_STATUSES: readonly ToolCall["status"][] = ["running", "completed", "failed"];
+function readToolCall(raw: unknown): ToolCall | null {
+  if (!isRecord(raw) || typeof raw.toolName !== "string" || typeof raw.at !== "number") return null;
+  const status = CALL_STATUSES.find((known) => known === raw.status);
+  if (!status) return null;
+  return {
+    toolName: raw.toolName,
+    status,
+    at: raw.at,
+    ...(typeof raw.toolUseId === "string" ? { toolUseId: raw.toolUseId } : {}),
+    ...(raw.toolInput !== undefined ? { toolInput: raw.toolInput } : {}),
+    ...(raw.toolOutput !== undefined ? { toolOutput: raw.toolOutput } : {}),
+    ...(typeof raw.durationMs === "number" ? { durationMs: raw.durationMs } : {}),
+  };
+}
 const expandedTools = ref<Set<string>>(new Set());
 const expandedCalls = ref<Set<string>>(new Set());
 
@@ -63,11 +96,11 @@ async function loadAvailableTools(sessionId: string | null) {
   // Overtaken: a load for another session (we switched away), or a newer load for this one.
   const overtaken = () => sessionId !== props.sessionId || loadId !== latestToolsLoad;
   try {
-    const res = await fetch(url);
+    const res = await fetchWithTimeout(url);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const body = await res.json();
+    const body = await jsonBody(res);
     if (overtaken()) return;
-    availableTools.value = body.tools ?? [];
+    availableTools.value = isUnknownArray(body.tools) ? body.tools.filter(isAvailableTool) : [];
     guiOnlyHistory.value = body.guiOnlyHistory === true;
   } catch {
     if (overtaken()) return;
@@ -105,6 +138,7 @@ useSessionFeed(toolCalls, {
   historyKey: "toolCalls",
   channel: (id) => `toolcalls:${id}`,
   identify: (call) => call.toolUseId,
+  parse: readToolCall,
   onSessionChange: () => {
     expandedCalls.value = new Set();
   },
@@ -163,15 +197,31 @@ onUnmounted(() => window.clearTimeout(historyCopyTimer));
   <section class="flex h-full w-[340px] shrink-0 flex-col border-l border-border bg-deep">
     <div class="flex items-center justify-between bg-panel px-4 py-2 font-sans text-[14px] text-fg">
       <span class="font-semibold">Tools</span>
-      <button
-        type="button"
-        class="cursor-pointer rounded border-0 bg-transparent px-1 py-0.5 text-[15px] leading-none text-dim hover:text-fg"
-        title="Close tools pane"
-        aria-label="Close tools pane"
-        @click="emit('close')"
-      >
-        <span class="material-symbols-outlined" aria-hidden="true">close</span>
-      </button>
+      <!-- Expand then close, in that order, exactly as the Canvas header has them: the two panes
+           share one slot, so the same control must be in the same place in both. -->
+      <div class="flex items-center gap-1">
+        <button
+          type="button"
+          data-testid="tools-expand-btn"
+          class="cursor-pointer rounded border-0 bg-transparent px-1 py-0.5 text-[15px] leading-none text-dim hover:text-fg"
+          :title="expanded ? 'Restore the terminal beside the tools' : 'Expand the tools over the terminal'"
+          :aria-label="expanded ? 'Restore tools pane width' : 'Expand tools pane'"
+          :aria-pressed="expanded === true"
+          @click="emit('toggleExpand')"
+        >
+          <span class="material-symbols-outlined" aria-hidden="true">{{ expanded ? "close_fullscreen" : "open_in_full" }}</span>
+        </button>
+        <button
+          type="button"
+          data-testid="tools-close-btn"
+          class="cursor-pointer rounded border-0 bg-transparent px-1 py-0.5 text-[15px] leading-none text-dim hover:text-fg"
+          title="Close tools pane"
+          aria-label="Close tools pane"
+          @click="emit('close')"
+        >
+          <span class="material-symbols-outlined" aria-hidden="true">close</span>
+        </button>
+      </div>
     </div>
     <div class="flex-1 overflow-y-auto font-sans text-[13px] text-fg">
       <!-- Available tools -->

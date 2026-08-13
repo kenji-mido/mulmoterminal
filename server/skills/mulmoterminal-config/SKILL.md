@@ -111,7 +111,7 @@ State these when they matter; they are the ones that cost people an afternoon.
   `fontFamily`, provider keys, and any hand-edit made while the server is running → **restart the
   server**.
 
-## Two settings that live here
+## Three settings that live here
 
 Small enough not to warrant their own skill.
 
@@ -145,3 +145,25 @@ otherwise only recoverable by scrolling the whole session.
 - `true` / `false` only. There is **no way to substitute custom wording** — do not offer one.
 - Independent of `prWorkdirFooter`: both ride on `--append-system-prompt`, and turning one off
   leaves the other.
+
+### `gitlabHosts` — a GitLab of your own
+
+The cross-repo **PRs & Issues** view reads github.com with `gh` and gitlab.com with `glab`. A
+self-hosted GitLab cannot be recognised from its address — nothing in `gitlab.example.com` says
+which forge runs there — so it is declared:
+
+```json
+{
+  "gitlabHosts": ["gitlab.example.com"],
+  "prRepos": ["gitlab.example.com/group/project"]
+}
+```
+
+- A declared host then does everything gitlab.com does: the list, starting work from an issue, work
+  comments, opening a merge request.
+- **`glab` must be logged in to it**: `glab auth login --hostname gitlab.example.com`. Check with
+  `glab auth status` — this app holds no token of its own.
+- **Hostnames only.** A project path, a port, or a value that is not a hostname is dropped on load,
+  which looks exactly like never having written it — audit with `/api/config` rather than assuming.
+- Global only, and **no Settings control**, so an edit made while the server runs needs a restart.
+- Until a host is declared, its row in the view says so and names this key.

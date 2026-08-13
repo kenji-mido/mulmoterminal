@@ -91,4 +91,26 @@ describe("useRateLimits polling lifecycle", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     stop();
   });
+
+  // Why the reason travels as the server's own word for it (#1293): the note the gauge shows for a
+  // trust prompt is not the one it shows for any other silence.
+  it("carries the server's stall reason through to the snapshot", async () => {
+    fetchMock.mockImplementation(() => respond({ claude: null, codex: null, probing: false, claudeProbe: "no-report", claudeProbeStall: "trust-prompt" }));
+    const { start, stop, snapshot } = useRateLimits();
+    start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(snapshot.value?.claudeStall).toBe("trust-prompt");
+    stop();
+  });
+
+  // A field the server never sent, or one it sent a new value for, must not reach the note as a
+  // string nothing knows how to render.
+  it("ignores a stall it does not recognise", async () => {
+    fetchMock.mockImplementation(() => respond({ claude: null, codex: null, probing: false, claudeProbe: "no-report", claudeProbeStall: "something-new" }));
+    const { start, stop, snapshot } = useRateLimits();
+    start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(snapshot.value?.claudeStall).toBeUndefined();
+    stop();
+  });
 });

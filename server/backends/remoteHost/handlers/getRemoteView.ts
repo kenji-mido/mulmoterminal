@@ -5,10 +5,11 @@
 import { loadCollection } from "@mulmoclaude/core/collection/server";
 import { toJsonObject, type CommandHandlers, type JsonObject } from "@mulmoclaude/core/remote-host";
 import { buildRemoteView, remoteViewFailureMessage } from "../../remoteView.js";
+import { readString } from "../../../../common/readString.js";
 
 export const getRemoteView: CommandHandlers["getRemoteView"] = async (params: JsonObject) => {
-  const slug = String(params.slug ?? "");
-  const viewId = String(params.viewId ?? "");
+  const slug = readString(params.slug);
+  const viewId = readString(params.viewId);
   const locale = typeof params.locale === "string" ? params.locale : "";
   const collection = await loadCollection(slug);
   if (!collection) throw new Error(`collection '${slug}' not found`);

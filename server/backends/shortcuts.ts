@@ -10,6 +10,8 @@ import { promises as fs } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { Express, Request, Response } from "express";
 import { sameShortcut, SHORTCUT_KINDS, type Shortcut, type ShortcutKind } from "../../common/shortcuts.js";
+import { isRecord } from "../../common/isRecord.js";
+import { hasErrnoCode } from "../errors.js";
 
 /** On-disk shape — object wrapper (not a bare array) so the schema can grow
  *  without a migration. THIS is the cross-app contract. */
@@ -18,6 +20,9 @@ interface ShortcutsFile {
 }
 
 const KINDS = new Set<string>(SHORTCUT_KINDS);
+// The Set answers membership; the predicate is what carries that answer into the type, so the
+// entry below can be built without asserting the kind it just checked.
+const isShortcutKind = (value: string): value is ShortcutKind => KINDS.has(value);
 
 /** Coerce arbitrary JSON into a clean `Shortcut[]`: drop malformed entries (bad
  *  kind / empty slug / non-string fields), default title→slug and icon→"bookmark",
@@ -26,13 +31,12 @@ export function normalizeShortcuts(input: unknown): Shortcut[] {
   if (!Array.isArray(input)) return [];
   const out: Shortcut[] = [];
   for (const raw of input) {
-    if (typeof raw !== "object" || raw === null) continue;
-    const candidate = raw as Record<string, unknown>;
-    const { kind, slug, title, icon } = candidate;
-    if (typeof kind !== "string" || !KINDS.has(kind)) continue;
+    if (!isRecord(raw)) continue;
+    const { kind, slug, title, icon } = raw;
+    if (typeof kind !== "string" || !isShortcutKind(kind)) continue;
     if (typeof slug !== "string" || slug.length === 0) continue;
     const entry: Shortcut = {
-      kind: kind as ShortcutKind,
+      kind,
       slug,
       title: typeof title === "string" ? title : slug,
       icon: typeof icon === "string" && icon.length > 0 ? icon : "bookmark",
@@ -57,8 +61,8 @@ export async function readShortcuts(workspace: string): Promise<Shortcut[]> {
     return [];
   }
   try {
-    const parsed = JSON.parse(text) as Partial<ShortcutsFile>;
-    return normalizeShortcuts(parsed?.shortcuts);
+    const parsed: unknown = JSON.parse(text);
+    return normalizeShortcuts(isRecord(parsed) ? parsed.shortcuts : undefined);
   } catch {
     return [];
   }
@@ -76,7 +80,7 @@ async function renameReplacing(from: string, to: string): Promise<void> {
     try {
       return await fs.rename(from, to);
     } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code ?? "";
+      const code = (hasErrnoCode(err) ? err.code : undefined) ?? "";
       if (attempt >= RENAME_RETRIES || !RENAME_LOCK_CODES.has(code)) throw err;
       await new Promise((resolve) => setTimeout(resolve, RENAME_RETRY_DELAY_MS));
     }
@@ -123,7 +127,7 @@ export function mountShortcutsRoutes(app: Express, deps: { workspace: string }):
   // normalises (validate kind, non-empty slug, dedupe) before persisting. A single
   // replace endpoint avoids add/remove route sprawl.
   app.put("/api/shortcuts", async (req: Request, res: Response) => {
-    const incoming = (req.body ?? {}) as { shortcuts?: unknown };
+    const incoming: Record<string, unknown> = isRecord(req.body) ? req.body : {};
     if (!Array.isArray(incoming.shortcuts)) {
       res.status(400).json({ error: "Request body must be { shortcuts: Shortcut[] }" });
       return;

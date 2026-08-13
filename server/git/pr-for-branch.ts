@@ -3,6 +3,7 @@
 // doesn't shell out to gh each time. Pure parse + injectable deps keep it unit-testable without gh.
 import { createTtlCache } from "./ttl-cache.js";
 import { branchQuery, type BranchQueryDeps } from "./branch-query.js";
+import { isRecord } from "../../common/isRecord.js";
 
 const cache = createTtlCache<string | null>();
 
@@ -12,8 +13,8 @@ export function parsePrUrl(stdout: string): string | null {
     const arr: unknown = JSON.parse(stdout);
     if (Array.isArray(arr) && arr.length > 0) {
       const first: unknown = arr[0];
-      if (typeof first === "object" && first !== null && typeof (first as { url?: unknown }).url === "string") {
-        return (first as { url: string }).url;
+      if (isRecord(first) && typeof first.url === "string") {
+        return first.url;
       }
     }
   } catch {

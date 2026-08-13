@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import { isSamePath, isWithin, isStrictlyWithin } from "../../../server/infra/path-within";
 

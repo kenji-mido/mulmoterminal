@@ -15,6 +15,7 @@ import AccountingOverlay from "./components/AccountingOverlay.vue";
 import WikiBrowseOverlay from "./components/WikiBrowseOverlay.vue";
 import PrsOverlay from "./components/PrsOverlay.vue";
 import FilesOverlay from "./components/FilesOverlay.vue";
+import HoverTip from "./components/HoverTip.vue";
 import GridView from "./components/GridView.vue";
 import FilePickerHost from "./components/FilePickerHost.vue";
 import ReloadPrompt from "./components/ReloadPrompt.vue";
@@ -27,6 +28,7 @@ import { useUnloadGuard } from "./composables/useUnloadGuard";
 import { usePubSub } from "./composables/usePubSub";
 import { openTerminalAt } from "./composables/useNewTerminal";
 import { LAUNCH_TERMINAL_CHANNEL, isLaunchAgent, type LaunchAgent } from "../common/launchAgent";
+import { isRecord } from "../common/isRecord";
 
 // The phone asked for a new terminal in a session's directory (#831). The grid is browser state —
 // the host can only ask — so SOMETHING has to be listening for this to be servable, and the host
@@ -34,8 +36,8 @@ import { LAUNCH_TERMINAL_CHANNEL, isLaunchAgent, type LaunchAgent } from "../com
 // component is the one that certainly exists: the grid is mounted for the life of the page now,
 // but openTerminalAt already queues and brings it on screen, so the seam costs nothing to keep.
 const launchRequestOf = (data: unknown): { cwd: string; agent: LaunchAgent } | null => {
-  if (typeof data !== "object" || data === null) return null;
-  const { cwd, agent } = data as { cwd?: unknown; agent?: unknown };
+  if (!isRecord(data)) return null;
+  const { cwd, agent } = data;
   return typeof cwd === "string" && cwd && isLaunchAgent(agent) ? { cwd, agent } : null;
 };
 // Appended at the end of the grid: the phone has no notion of which desktop cell is
@@ -95,4 +97,8 @@ useFaviconState(sessions);
   <!-- A tab still running an old client build is wrong whatever it is showing, so this belongs to
        the page too. -->
   <ReloadPrompt />
+  <!-- The one hover tip every cell-header chip opens (#1235). Mounted here, and only here, so the
+       document can never hold two — it teleports to <body> and positions itself against whichever
+       chip the pointer is on. -->
+  <HoverTip />
 </template>

@@ -1,5 +1,7 @@
 import { ref, computed, onMounted, onUnmounted } from "vue";
 import { parseUpdateNotice } from "./updateNotice";
+import { jsonBody } from "../jsonBody";
+import { fetchWithTimeout } from "../utils/fetchWithTimeout";
 
 // The server runs the check at startup and it reaches the network (git ls-remote can take
 // several seconds), so an early read returns null before it lands. Poll a few times to catch a
@@ -16,12 +18,12 @@ export function useUpdateStatus() {
 
   async function fetchOnce(): Promise<void> {
     try {
-      const res = await fetch("/api/update-status");
+      const res = await fetchWithTimeout("/api/update-status");
       if (!res.ok) return;
-      const data = await res.json();
+      const data = await jsonBody(res);
       // Assign both ways: a null answer must CLEAR a notice an earlier read picked up (e.g.
       // after a `git pull` + restart), not just be ignored.
-      notice.value = typeof data?.notice === "string" ? data.notice : null;
+      notice.value = typeof data.notice === "string" ? data.notice : null;
     } catch {
       // best-effort — no badge is fine
     }

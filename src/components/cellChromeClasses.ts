@@ -79,6 +79,31 @@ export const CELL_BTN = `${CELL_BTN_BOX} ${CELL_BTN_SIZE} ${CELL_BTN_INK}`;
 export const CELL_BTN_INK_DISABLEABLE = `enabled:cursor-pointer text-[var(--cell-btn,var(--text-secondary))] enabled:hover:bg-hover enabled:hover:text-fg disabled:cursor-default disabled:opacity-40`;
 export const CELL_BTN_DISABLEABLE = `${CELL_BTN_BOX} ${CELL_BTN_SIZE} ${CELL_BTN_INK_DISABLEABLE}`;
 
+// A PRESSABLE CHIP — the second design language on a cell header's row 1, for the controls that
+// live INSIDE the info track rather than in the actions pinned to the right: the unread-canvas
+// count, the diff badge, the note pencil. They are sized like the chips they sit among, not like
+// CELL_BTN, so adding one never changes the header's height — a cell with a note is exactly as
+// tall as one without.
+//
+// One constant because there were three hand-written copies of it that had already drifted apart
+// (the note pencil had no border, no fill and a 14px icon against the others' 13px), which read as
+// one button being styled by mistake rather than as a family.
+//
+// No `gap` and no text colour: a chip with one child needs no gap and a two-child one picks its
+// own, and the colour is state on some of them (the pencil is accent once a note exists). Layering
+// a second `gap-*` or `text-*` over one already in here would leave which wins to Tailwind's
+// output order rather than to intent — the same rule as the dot and the buttons above.
+export const CELL_CHIP_BTN =
+  "inline-flex flex-none cursor-pointer items-center rounded-[10px] border border-border bg-elevated px-[7px] py-px font-mono text-[11px] hover:bg-hover";
+// The icon inside one, a step down from CELL_BTN's 16px so it reads as chip-sized.
+export const CELL_CHIP_ICON = "material-symbols-outlined text-[13px]";
+
+// One row in a dropdown hung off a cell header (the path menu, the "bring another terminal's turn
+// here" menu). Shape and ink only — a caller adds its own layout, since one of them stretches a row
+// to make room for a trailing button and another lays an icon out beside the label.
+export const CELL_MENU_ITEM =
+  "cursor-pointer rounded-[4px] border-none bg-transparent px-2 py-1.5 text-left font-sans text-[12px] text-secondary hover:bg-hover hover:text-fg";
+
 // The header button whose pane is CURRENTLY OPEN. Files, Canvas and Tools share one slot beside
 // the enlarged terminal, so exactly one of them can be in this state — and which one has to be
 // readable without moving the pointer. Idle chrome differs from hover by a background alone,

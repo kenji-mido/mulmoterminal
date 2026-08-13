@@ -59,7 +59,7 @@ export const parseSkillDescription = (raw: string): string | null => {
 // the common quoted-string case.
 const unquote = (value: string): string => {
   const quoted = /^(['"])(.*)\1$/.exec(value);
-  return quoted ? quoted[2] : value;
+  return quoted?.[2] ?? value;
 };
 
 // Read `dir/SKILL.md` and return its description, or null when the dir isn't a

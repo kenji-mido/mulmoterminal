@@ -1,5 +1,13 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
-import { createSummaryScan } from "../../../server/session/summary-scan.js";
+import {
+  copySummaryState,
+  createSummaryScan,
+  emptySummaryState,
+  foldSummary,
+  summaryPartsOf,
+  type SummaryState,
+} from "../../../server/session/summary-scan.js";
 import {
   aiTitleFromParsed,
   countUserTurnsFromParsed,
@@ -138,3 +146,74 @@ describe("createSummaryScan agrees with the whole-array fold", () => {
     expect(scanned([user("q"), assistant(long)]).lastResponse).toHaveLength(RESPONSE_MAX);
   });
 });
+
+// The state holds no raw records, which is what lets the fold be PAUSED and continued — beside the
+// transcript, and across processes (#1386). What has to hold is that continuing it lands where one
+// uninterrupted pass would, including for the fields that are "the last X" and the one that resets
+// on every user prompt.
+describe("a summary folded in two goes", () => {
+  const foldAll = (records: Record<string, unknown>[]): SummaryState => {
+    const state = emptySummaryState();
+    records.forEach((r) => foldSummary(state, r));
+    return state;
+  };
+
+  const resumeFrom = (state: SummaryState, records: Record<string, unknown>[]): SummaryState => {
+    const next = copySummaryState(state);
+    records.forEach((r) => foldSummary(next, r));
+    return next;
+  };
+
+  const transcript = [
+    user("build the parser"),
+    assistant("on it", { content: [{ type: "tool_use", name: "Read" }] }),
+    assistant("here you go"),
+    user("ok"),
+    assistant("anything else?", { content: [{ type: "tool_use", name: "Edit" }] }),
+  ];
+
+  it("equals one uninterrupted pass, wherever it is cut", () => {
+    const whole = summaryPartsOf(foldAll(transcript), RESPONSE_MAX);
+    for (let cut = 0; cut <= transcript.length; cut++) {
+      const resumed = summaryPartsOf(resumeFrom(foldAll(transcript.slice(0, cut)), transcript.slice(cut)), RESPONSE_MAX);
+      expect(resumed, `cut after ${cut} records`).toEqual(whole);
+    }
+  });
+
+  // The reason `copy` exists: the resumed fold pushes into turnTools and adds into usage, and the
+  // state it continued from has already been read by a caller.
+  it("leaves the state it continued from untouched", () => {
+    const first = foldAll(transcript.slice(0, 3));
+    const before = summaryPartsOf(first, RESPONSE_MAX);
+    const beforeTools = [...before.toolNames];
+    const beforeUsage = { ...before.usage };
+
+    resumeFrom(first, transcript.slice(3));
+
+    expect(summaryPartsOf(first, RESPONSE_MAX).toolNames).toEqual(beforeTools);
+    expect(summaryPartsOf(first, RESPONSE_MAX).usage).toEqual(beforeUsage);
+  });
+
+  // A resumed fold has to survive the round trip through a sidecar, which is JSON.
+  it("survives being written down and read back", () => {
+    const half = foldAll(transcript.slice(0, 3));
+    const parsed: unknown = JSON.parse(JSON.stringify(half));
+    if (!isSummaryStateShape(parsed)) throw new Error("a folded summary should round-trip through JSON");
+    expect(summaryPartsOf(resumeFrom(parsed, transcript.slice(3)), RESPONSE_MAX)).toEqual(summaryPartsOf(foldAll(transcript), RESPONSE_MAX));
+  });
+});
+
+// The same shape check readSessionSummary applies to a sidecar, kept here so the round-trip test
+// above fails loudly rather than casting its way past a state JSON could not carry.
+function isSummaryStateShape(value: unknown): value is SummaryState {
+  if (typeof value !== "object" || value === null) return false;
+  const state: Partial<SummaryState> = value;
+  return (
+    typeof state.userTurns === "number" &&
+    typeof state.usage?.inputTokens === "number" &&
+    Array.isArray(state.turnTools) &&
+    typeof state.prompts === "object" &&
+    state.prompts !== null &&
+    typeof state.context?.contextTokens === "number"
+  );
+}

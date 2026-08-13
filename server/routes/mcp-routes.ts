@@ -13,7 +13,7 @@ import type { Express, Request, Response } from "express";
 import { PORT, SESSION_ID_RE } from "../config/env.js";
 import { buildGuiMcpServer } from "../mcp/broker.js";
 import type { GuiCallRecorder } from "../mcp/gui-call-history.js";
-import { translationWorkerIds, markSessionToolGroup, sessionToolGroups, markAllToolsSession } from "../session/registry.js";
+import { translationWorkerIds, markSessionToolGroup, sessionToolGroups, markAllToolsSession, hasAllGuiTools } from "../session/registry.js";
 import { isToolGroup, TOOL_GROUPS, type ToolGroup } from "../../common/toolGroups.js";
 import { submitTranslation } from "../session/translation-worker.js";
 import { translationSubmitOutcome } from "../session/translation-submit.js";
@@ -86,7 +86,7 @@ export function mountMcpRoutes(app: Express, deps: McpRouteDeps): void {
   // We run in STATELESS mode (sessionIdGenerator: undefined): one fresh Server+transport per
   // request, no session header and no initialize handshake required across requests. The SDK
   // forbids reusing a stateless transport, so it is never cached.
-  async function handleMcpRequest(req: Request, res: Response, sessionId: string, group: ToolGroup | null) {
+  async function handleMcpRequest(req: Request, res: Response, sessionId: string, group: ToolGroup | null, carriesAllTools = false) {
     if (!SESSION_ID_RE.test(sessionId)) {
       return res.status(400).json({ error: "invalid sessionId" });
     }
@@ -101,14 +101,15 @@ export function mountMcpRoutes(app: Express, deps: McpRouteDeps): void {
     const server = buildGuiMcpServer(sessionId, `http://127.0.0.1:${PORT}`, {
       submitTranslationTool: isWorker,
       group,
+      carriesAllTools,
       history: isWorker ? null : deps.guiCallHistory(sessionId),
     });
     // No sessionIdGenerator at all is the SDK's stateless mode. Spelling it `undefined` says
     // the same thing to the runtime but not to the type — the option is exact-optional.
     const transport = new StreamableHTTPServerTransport({});
     res.on("close", () => {
-      transport.close();
-      server.close();
+      void transport.close();
+      void server.close();
     });
     try {
       // A cast, which this codebase otherwise refuses — and it asserts only what the SDK itself declares.
@@ -161,9 +162,15 @@ export function mountMcpRoutes(app: Express, deps: McpRouteDeps): void {
     if (!isToolGroup(group)) return res.status(404).json({ error: `unknown tool group: ${group}` });
     // Reaching us here IS the evidence that this session has the group — nothing else tells
     // us, since the registration lives in the user's own MCP config. Marked before the request
-    // is served so a panel asking right after the first ListTools already sees it.
+    // is served so a panel asking right after the first ListTools already sees it. Still recorded
+    // when the group stands down below: the directory really did register it, and the Canvas gate
+    // reads that fact.
     learnToolGroups(sessionId, [group]);
-    return handleMcpRequest(req, res, sessionId, group);
+    // A session already holding the all-tools url reaches every one of these tools under a name of
+    // its own, so this url serves none of them (#1338). Answerable on the FIRST request only
+    // because the spawn recorded it — learning it from whichever url connected first would make
+    // the answer depend on connection order.
+    return handleMcpRequest(req, res, sessionId, group, hasAllGuiTools(sessionId));
   });
   app.get("/api/mcp/:group/:sessionId", rejectNonPost);
   app.delete("/api/mcp/:group/:sessionId", rejectNonPost);

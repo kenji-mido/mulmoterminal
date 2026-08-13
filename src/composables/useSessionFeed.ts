@@ -4,6 +4,9 @@
 import { onUnmounted, watch, type Ref } from "vue";
 import { usePubSub } from "./usePubSub";
 import { mergeLiveIntoSnapshot } from "./liveMerge";
+import { isUnknownArray } from "../../common/isUnknownArray";
+import { jsonBody } from "../jsonBody";
+import { fetchWithTimeout } from "../utils/fetchWithTimeout";
 
 interface SessionFeedOptions<T> {
   sessionId: () => string | null;
@@ -11,6 +14,13 @@ interface SessionFeedOptions<T> {
   historyKey: string;
   channel: (id: string) => string;
   identify: (item: T) => string | undefined;
+  /**
+   * Read one item off the live channel, or null to drop it.
+   *
+   * The channel carries `unknown`, and this used to be `data as T` — the composable naming a shape
+   * only the CALLER knows (#1231). Each caller supplies the reader for its own item instead.
+   */
+  parse: (raw: unknown) => T | null;
   onSessionChange?: () => void;
   /**
    * Fold an arriving item into the list by something OTHER than its identity, before the dedupe
@@ -35,6 +45,16 @@ type Reconcile<T> = (items: T[], incoming: T) => "store" | "skip";
  * the one it replaces. Replaying the rule over the merged list, in arrival order, is the same fold
  * the live path does one item at a time, so both directions settle to the same answer.
  */
+// The stored rows, through the SAME reader the live channel uses. The history path used to take
+// them as-is, so a shape the channel would have dropped still reached the list on first load.
+function readHistory<T>(rows: unknown, parse: (raw: unknown) => T | null): T[] {
+  if (!isUnknownArray(rows)) return [];
+  return rows.flatMap((raw) => {
+    const item = parse(raw);
+    return item === null ? [] : [item];
+  });
+}
+
 function mergeSettled<T>(snapshot: readonly T[], buffered: readonly T[], identify: (item: T) => string | undefined, reconcile?: Reconcile<T>): T[] {
   const merged = mergeLiveIntoSnapshot(snapshot, buffered, identify);
   if (!reconcile) return merged;
@@ -43,8 +63,17 @@ function mergeSettled<T>(snapshot: readonly T[], buffered: readonly T[], identif
   return settled;
 }
 
+// The channel listener: read the frame with the CALLER's reader, and drop what it rejects. At
+// module scope so the composable stays inside its line budget.
+const receiver =
+  <T>(parse: (raw: unknown) => T | null, upsert: (item: T) => void) =>
+  (data: unknown): void => {
+    const item = parse(data);
+    if (item) upsert(item);
+  };
+
 export function useSessionFeed<T>(items: Ref<T[]>, options: SessionFeedOptions<T>) {
-  const { sessionId, historyUrl, historyKey, channel, identify, onSessionChange, reconcile } = options;
+  const { sessionId, historyUrl, historyKey, channel, identify, parse, onSessionChange, reconcile } = options;
 
   // What the live channel delivered while a history request was in flight. The response is
   // authoritative as of when it was SENT, so these have to survive it (#620 F1).
@@ -79,12 +108,12 @@ export function useSessionFeed<T>(items: Ref<T[]>, options: SessionFeedOptions<T
     // switched away — nor an older response for the session they switched back to.
     const overtaken = () => id !== sessionId() || loadId !== latestLoad;
     try {
-      const res = await fetch(historyUrl(id));
+      const res = await fetchWithTimeout(historyUrl(id));
       if (overtaken()) return;
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
+      const data = await jsonBody(res);
       if (overtaken()) return;
-      items.value = mergeSettled(data[historyKey] ?? [], arrivedDuringLoad, identify, reconcile);
+      items.value = mergeSettled(readHistory(data[historyKey], parse), arrivedDuringLoad, identify, reconcile);
     } catch {
       // A failed history read must not take the live events with it.
       if (!overtaken()) items.value = mergeSettled([], arrivedDuringLoad, identify, reconcile);
@@ -105,14 +134,14 @@ export function useSessionFeed<T>(items: Ref<T[]>, options: SessionFeedOptions<T
     unsubscribe?.();
     unsubscribe = undefined;
     if (!id) return;
-    unsubscribe = subscribe(channel(id), (data) => upsert(data as T));
+    unsubscribe = subscribe(channel(id), receiver(parse, upsert));
   }
 
   watch(
     sessionId,
     (id) => {
       onSessionChange?.();
-      if (id) loadHistory(id);
+      if (id) void loadHistory(id);
       else items.value = [];
       subscribeTo(id);
     },

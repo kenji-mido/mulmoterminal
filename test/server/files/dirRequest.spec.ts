@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import type { Request, Response } from "express";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";

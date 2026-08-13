@@ -101,7 +101,7 @@ const accountingActive = computed(() => accountingOpen.value);
 const wikiActive = computed(() => wikiOpen.value);
 const prsActive = computed(() => prsOpen.value);
 function showGrid(): void {
-  router.push("/terminals");
+  void router.push("/terminals");
 }
 function showCollections(): void {
   browseGotoIndex("collection");
@@ -191,7 +191,10 @@ function showPrs(): void {
         <span v-if="statusCounts.blocked" class="inline-flex items-center gap-1 font-mono text-[12px] leading-none text-amber" aria-hidden="true">
           <span class="h-2 w-2 rounded-full bg-current" />{{ statusCounts.blocked }}
         </span>
-        <span v-if="statusCounts.done" class="inline-flex items-center gap-1 font-mono text-[12px] leading-none text-accent" aria-hidden="true">
+        <!-- Green like every other `done` mark (#1307), but --ok rather than --done: this tally is
+             INK on the toolbar, and --done is a fill colour that reads at 2.3:1 on a white panel.
+             --ok is the same pairing --warn/--amber already make for the blocked count. -->
+        <span v-if="statusCounts.done" class="inline-flex items-center gap-1 font-mono text-[12px] leading-none text-ok" aria-hidden="true">
           <span class="h-2 w-2 rounded-full bg-current" />{{ statusCounts.done }}
         </span>
         <span v-if="statusCounts.working" class="inline-flex items-center gap-1 font-mono text-[12px] leading-none text-muted" aria-hidden="true">

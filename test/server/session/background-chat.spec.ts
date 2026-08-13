@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import { backgroundChatMessage, parseBackgroundChat, spawnModeFor } from "../../../server/session/background-chat.js";
 

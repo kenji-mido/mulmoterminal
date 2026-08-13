@@ -6,7 +6,7 @@ import type { IPty } from "node-pty";
 import { claudeAdapter } from "../agents/claude.js";
 import type { PtyEntry } from "./types.js";
 import { sanitizeDraftText } from "./pty-text.js";
-import { squashForMarker } from "./pty-scan.js";
+import { squashForMarker, trustDialogIsUp } from "./pty-scan.js";
 import { planDraftInjection } from "./draft-plan.js";
 import { submittableLineForAgent } from "../../common/terminalSubmit.js";
 
@@ -46,36 +46,13 @@ const DRAFT_QUIET_MS = 6000;
 // the stream cannot tell whether the dialog is still up — answering it repaints the dialog and the
 // new screen together, and then the screen stops changing — so a scanner that waited forever for
 // proof would never type at all. Observed doing exactly that.
-const TRUST_QUIET_MS = 60_000;
-const TRUST_PROMPT_MARKER = /yes,itrustthisfolder|projectyoucreatedoroneyoutrust/g;
-
 // Which is why the dialog's text ALONE is not the question — "was it painted" and "is it still on
-// screen" are different facts, and the long window is only right for the second. An answering
-// repaint carries the dismissed dialog and the new screen in one burst, so text-alone re-arms the
-// full minute at the exact moment the input box appears. With a readiness hint in that same burst
-// the marker above wins and none of this is reached; in a pane too narrow for the hint there is
-// nothing else to go on, and a fresh-worktree draft waits a minute for a box already waiting for it.
-//
-// What separates the two is what FOLLOWS the dialog. Up, it is the last thing painted: a couple of
-// short lines (the second option, the confirm hint) and then the stream stops, since nothing paints
-// while it waits for an answer. Answered, a whole screen is drawn after it. So the long window is
-// armed only when little enough follows the LAST match for the dialog to still be what is showing.
-//
-// The threshold is deliberately far below a screen and comfortably above the dialog's own tail
-// (~40 characters squashed): the failure it must not have is reading an ANSWERED dialog as an open
-// one, which is the minute-long wait this exists to remove. Erring the other way costs the guard on
-// a pane so narrow that the repaint squashes to under this — the behaviour before this rule, so
-// nothing regresses.
-const TRUST_TAIL_MAX = 120;
-
-// Is the trust dialog what the screen is CURRENTLY showing? Scans for the last match because a
-// repaint can hold several: the answered dialog earlier in the burst, and any older one still in
-// the tail we keep.
-const trustDialogIsUp = (screen: string): boolean => {
-  let end = -1;
-  for (const match of screen.matchAll(TRUST_PROMPT_MARKER)) end = match.index + match[0].length;
-  return end !== -1 && screen.length - end <= TRUST_TAIL_MAX;
-};
+// screen" are different facts, and the long window is only right for the second. That distinction
+// lives in `trustDialogIsUp` (pty-scan.ts), which the rate-limit probe also reads. With a readiness
+// hint in the same burst the marker above wins and none of this is reached; in a pane too narrow
+// for the hint there is nothing else to go on, and a fresh-worktree draft would otherwise wait a
+// minute for a box already waiting for it.
+const TRUST_QUIET_MS = 60_000;
 // Claude's TUI commits a bracketed paste to its input box asynchronously; a CR glued
 // onto the same write can arrive before the paste lands and be dropped — leaving an
 // auto-run prompt typed-but-unsent. Send the submitting Enter as a SEPARATE chunk a

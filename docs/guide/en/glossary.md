@@ -1,8 +1,9 @@
 ---
-title: Glossary
+title: Glossary — parallel agents, worktrees, vibe coding
+nav_title: Glossary
 layout: default
 parent: English
-nav_order: 6
+nav_order: 13
 description: Vibe coding, parallel agents, AI coding agents, git worktrees, the cockpit roster — the words this guide uses, tied to what you actually see on screen in MulmoTerminal.
 ---
 
@@ -44,7 +45,7 @@ you can put the same task to both and compare, or have one review the other.
 Running several agents at the same time. While one thinks you can move another forward — what runs
 out is **your attention**, not the machine's. The grid solves that with colour and sound.
 
-- **Awaiting input** is amber; a **finished turn** gets a blue ring
+- **Awaiting input** is amber; a **finished turn** gets a green ring
 - You only pick up the cells that called you
 - A sound and a phone push mean you notice without watching the screen
 
@@ -73,6 +74,16 @@ documents, HTML and slides rather than printed text.
 
 Until 3.x it belonged to a separate *single view* at `/chat`. That view was removed in 4.0.0 and the
 panel moved to the zoomed cell, which is the same thing — one agent with the window to itself.
+
+## Workspace {#workspace}
+
+The server's **default working directory** (`CLAUDE_CWD`) — settled in the order `--cwd`, the `CLAUDE_CWD` environment variable, then the directory you ran `npx mulmoterminal` in; a server started directly falls back to `~/mulmoclaude`.
+It is printed as `Workspace: …` at startup.
+Collections, Wiki and Accounting read and write there, and if you also run MulmoClaude it should be **the same directory for both** (`~/mulmoclaude` by default) — not the directory you cloned MulmoClaude into.
+
+It is treated differently from a project directory: **only a Claude cell launched in the workspace** carries the whole GUI MCP, the way the single view in 3.x did.
+
+→ [Which directory to launch in](basics.html#launch-dir)
 
 ## git worktree
 

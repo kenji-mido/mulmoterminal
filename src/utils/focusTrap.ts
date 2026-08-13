@@ -13,6 +13,7 @@ export function trapTabKey(e: KeyboardEvent, container: HTMLElement, selector = 
   if (focusable.length === 0) return;
   const first = focusable[0];
   const last = focusable[focusable.length - 1];
+  if (!first || !last) return; // unreachable: the length check above answered
   if (e.shiftKey && document.activeElement === first) {
     e.preventDefault();
     last.focus();

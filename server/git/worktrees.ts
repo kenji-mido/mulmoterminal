@@ -11,7 +11,9 @@ import os from "node:os";
 import path from "node:path";
 import { isStrictlyWithin } from "../infra/path-within.js";
 import { splitLines } from "../infra/split-lines.js";
-import { ISSUE_BRANCH_PREFIX } from "../../common/prPhase.js";
+import { DIR_CONFIG_FILE } from "../config/dir-config.js";
+import { writeInheritedDirConfig } from "../config/worktree-dir-config.js";
+import { ISSUE_BRANCH_PREFIX, issueFromAnchoredBranch } from "../../common/prPhase.js";
 
 // realpathSync.native, not the JS one: on Windows only the native call expands an
 // 8.3 short component (C:\Users\RUNNER~1 → …\runneradmin) to the long form that
@@ -215,6 +217,22 @@ export async function listWorktrees(repoDir: string): Promise<WorktreeInfo[]> {
   );
 }
 
+/** The managed worktree this repo already has for `issue`, or null.
+ *
+ *  Read through `issueFromAnchoredBranch` — the same reader the PR body's `Fixes #N` and the work
+ *  chip use — so "which issue is this branch for" has ONE answer in the app rather than a second
+ *  regex that can drift from it. A uniqueness suffix does not change the number, so an
+ *  `issue/12-x-2` created before this existed is still found and reopened.
+ *
+ *  A worktree whose DIRECTORY is gone does not count. `git worktree list` keeps reporting one that
+ *  was deleted by hand until somebody prunes, and the caller starts a session in what this returns
+ *  — so trusting the list alone would spawn an agent in a directory that no longer exists, where
+ *  before it would simply have cut a new tree. */
+export async function issueWorktree(repoDir: string, issue: number): Promise<WorktreeInfo | null> {
+  const found = (await listWorktrees(repoDir)).find((w) => issueFromAnchoredBranch(w.branch) === issue && existsSync(w.path));
+  return found ?? null;
+}
+
 // Whether a worktree has uncommitted changes (so we don't delete it silently).
 export async function isDirty(worktreePath: string): Promise<boolean> {
   const res = await git(["status", "--porcelain"], worktreePath);
@@ -266,6 +284,27 @@ function serializeCreate<T>(task: () => Promise<T>): Promise<T> {
   return run;
 }
 
+// Carry the project's look and settings into a worktree that has just been created (#1317):
+// same name, theme, model and grid rank, with the chrome colours nudged around the hue wheel so
+// each tree is its own shade of the project. The parent is the MAIN checkout, so cutting a
+// worktree from another worktree still measures the gradient from the project itself.
+//
+// Only where git would IGNORE the file. A worktree whose `git status` gains an untracked file is
+// not merely untidy: `isDirty` reads that same status, so removeWorktree would go on refusing to
+// clean up a worktree whose only change we wrote ourselves.
+//
+// Best effort throughout — a worktree without its parent's colours is a worktree that works.
+async function adoptParentDirConfig(repo: string, worktreeDir: string): Promise<void> {
+  try {
+    if (!(await git(["check-ignore", "--quiet", "--", DIR_CONFIG_FILE], worktreeDir)).ok) return;
+    // Counted AFTER the add, so it includes the new tree: the first worktree of a repo is index
+    // 1 and therefore already one hue step away from the parent, not identical to it.
+    writeInheritedDirConfig(repo, worktreeDir, (await listWorktrees(repo)).length);
+  } catch {
+    // ignored
+  }
+}
+
 // Create a fresh worktree + branch for `task`, forked from the repo's base branch. Pass `issue`
 // to anchor the branch to a GitHub issue (`issue/<N>-<slug>`), which also forks from the base as
 // the REMOTE has it. Returns the worktree path + branch, or null if `repoDir` isn't a git repo /
@@ -283,7 +322,9 @@ export async function createWorktree(repoDir: string, task: string, issue?: numb
     const branch = await uniqueBranch(repo, stem, root);
     const dir = path.join(root, worktreeDirName(branch));
     const res = await git(["worktree", "add", "-b", branch, dir, start], repo);
-    return res.ok ? { path: dir, branch } : null;
+    if (!res.ok) return null;
+    await adoptParentDirConfig(repo, dir);
+    return { path: dir, branch };
   });
 }
 

@@ -1,4 +1,7 @@
 import { browserLocale } from "./browserLocale";
+import { isRecord } from "../../common/isRecord";
+import { isUnknownArray } from "../../common/isUnknownArray";
+import { fetchWithTimeout } from "./fetchWithTimeout";
 
 const REQUEST_TIMEOUT_MS = 8000;
 
@@ -10,21 +13,22 @@ const REQUEST_TIMEOUT_MS = 8000;
 export async function translateUiSentence(english: string, namespace: string): Promise<string> {
   const locale = browserLocale();
   if (locale === "en") return english;
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+
   try {
-    const res = await fetch("/api/translation", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ namespace, targetLanguage: locale, sentences: [english] }),
-      signal: controller.signal,
-    });
+    const res = await fetchWithTimeout(
+      "/api/translation",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ namespace, targetLanguage: locale, sentences: [english] }),
+      },
+      REQUEST_TIMEOUT_MS,
+    );
     if (!res.ok) return english;
-    const data = (await res.json()) as { translations?: string[] };
-    return typeof data.translations?.[0] === "string" ? data.translations[0] : english;
+    const data: unknown = await res.json();
+    const first = isRecord(data) && isUnknownArray(data.translations) ? data.translations[0] : undefined;
+    return typeof first === "string" ? first : english;
   } catch {
     return english;
-  } finally {
-    clearTimeout(timer);
   }
 }

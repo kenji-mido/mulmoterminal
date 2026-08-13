@@ -18,12 +18,12 @@ export function filesGotoFile(cwd: string | null, path: string): void {
 }
 
 function pushFilesRoute(query: Record<string, string>): void {
-  router.push({ name: "files", query, state: overlayOriginState() });
+  void router.push({ name: "files", query, state: overlayOriginState() });
 }
 
 /** Close the Files view → back to the view it was opened from. */
 export function filesClose(): void {
-  router.push(overlayReturnPath());
+  void router.push(overlayReturnPath());
 }
 
 export function useFilesView(): {

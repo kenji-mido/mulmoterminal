@@ -3,6 +3,7 @@ import path from "node:path";
 import { CLAUDE_CWD } from "./env.js";
 import { canonicalDir } from "../infra/path-within.js";
 import { cwdProblemMessage, diagnoseSpawnCwd } from "../infra/spawn-cwd.js";
+import { describeValue } from "../../common/readString.js";
 
 // Validate a client-supplied workspace dir: an absolute path naming an existing directory, or
 // null. There is deliberately no variant that answers the DEFAULT workspace for a directory it
@@ -72,7 +73,7 @@ function unusableWorkspace(requested: string): WorkspaceRequest {
 export function workspaceRequest(cwd: unknown): WorkspaceRequest {
   if (cwd === undefined || cwd === null || cwd === "") return { kind: "default", cwd: CLAUDE_CWD };
   if (typeof cwd !== "string")
-    return { kind: "unusable", requested: String(cwd), problem: "The working directory must be given exactly once, as a path.", malformed: true };
+    return { kind: "unusable", requested: describeValue(cwd), problem: "The working directory must be given exactly once, as a path.", malformed: true };
   const resolved = existingWorkspace(cwd);
   return resolved ? { kind: "resolved", cwd: resolved } : unusableWorkspace(cwd);
 }

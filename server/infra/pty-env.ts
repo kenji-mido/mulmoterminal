@@ -59,6 +59,7 @@ export function isLauncherPathEntry(entry: string): boolean {
   const segments = entry.split(/[\\/]/).filter((segment) => segment !== "");
   if (segments.length === 0) return false; // "" and "/" name no directory of ours
   const last = segments[segments.length - 1];
+  if (last === undefined) return false; // unreachable: length was checked above
   const parent = segments[segments.length - 2];
   return YARN_SHIM_DIR.test(last) || (last === ".bin" && parent === "node_modules") || last === "node-gyp-bin";
 }

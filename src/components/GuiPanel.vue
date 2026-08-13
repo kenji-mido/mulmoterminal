@@ -1,11 +1,17 @@
 <script setup lang="ts">
-import { ref, computed, watch } from "vue";
+import { ref, computed, watch, nextTick } from "vue";
 import { useSessionFeed } from "../composables/useSessionFeed";
 import { onToolGroupsAnnounced } from "../composables/useToolGroupsAnnounce";
 import { getPlugin } from "../plugins-registry";
 import PluginFrame from "./PluginFrame.vue";
 import { TOOL_GROUPS, groupOfTool, toolsInGroup } from "../../common/toolGroups";
 import { reconcileCollectionCard } from "../../common/collectionSeed";
+import { collapseByIdentity } from "../utils/canvasCollapse";
+import { useCanvasCardHeight } from "../composables/useCanvasCardHeight";
+import { isRecord } from "../../common/isRecord";
+import { isUnknownArray } from "../../common/isUnknownArray";
+import { jsonBody } from "../jsonBody";
+import { fetchWithTimeout } from "../utils/fetchWithTimeout";
 
 // The GUI panel renders the toolResults produced by GUI-protocol plugins. It
 // mirrors the terminal's active session: live results arrive on that session's
@@ -25,7 +31,9 @@ interface ToolResult {
 const props = defineProps<{
   sessionId: string | null;
   sendTextMessage: (text: string) => boolean;
-  toolsOpen?: boolean;
+  // Whether the panel currently covers the terminal area. Owned by the grid (it is the grid's
+  // layout that changes), shown here because the button that flips it lives in this toolbar.
+  expanded?: boolean;
   // Why this panel cannot show anything, when that is knowable. The pane outlives the cell it
   // was opened on — walking the zoom to a launcher or to a directory with no render MCP leaves
   // it mounted — and the empty-state hint below ("ask Claude to use one of these") is a LIE in
@@ -33,9 +41,34 @@ const props = defineProps<{
   // panel is usable, which keeps the single view (where it always is) unchanged.
   unavailable?: "no-session" | "no-canvas-mcp" | null;
 }>();
-const emit = defineEmits<{ toggleTools: [] }>();
+const emit = defineEmits<{ toggleExpand: []; close: [] }>();
 
 const results = ref<ToolResult[]>([]);
+
+// One card off the live channel. The channel carries untrusted JSON, and this panel keys and
+// dedupes by uuid — a card without one is not something it can render. The optional fields are
+// carried through as they arrive (each is `unknown` or a string the views check themselves).
+function readToolResult(raw: unknown): ToolResult | null {
+  if (!isRecord(raw) || typeof raw.uuid !== "string" || typeof raw.toolName !== "string") return null;
+  return {
+    uuid: raw.uuid,
+    toolName: raw.toolName,
+    ...(typeof raw.title === "string" ? { title: raw.title } : {}),
+    ...(typeof raw.message === "string" ? { message: raw.message } : {}),
+    ...(raw.data !== undefined ? { data: raw.data } : {}),
+    ...(raw.jsonData !== undefined ? { jsonData: raw.jsonData } : {}),
+    ...(raw.viewState !== undefined ? { viewState: raw.viewState } : {}),
+  };
+}
+
+// Auto-follow state. Declared HERE, above useSessionFeed: its session watcher is `immediate`, so
+// the onSessionChange below runs during that call — a declaration further down would still be in
+// its temporal dead zone when it fires.
+const scrollRef = ref<HTMLElement | null>(null);
+// True while the reader is parked at the end. Ported from MulmoClaude's StackView (#2179): a
+// reader who scrolled UP to look at an earlier card must not be yanked back down.
+const stickToBottom = ref(true);
+const NEAR_BOTTOM_THRESHOLD_PX = 80;
 
 // Deduping by uuid mirrors applyToolResultToSession.
 const { upsert } = useSessionFeed(results, {
@@ -44,6 +77,9 @@ const { upsert } = useSessionFeed(results, {
   historyKey: "toolResults",
   channel: (id) => `session:${id}`,
   identify: (result) => result.uuid,
+  // The channel carries untrusted JSON; a card with no uuid cannot be deduped or keyed, so it is
+  // not a result this panel can render.
+  parse: readToolResult,
   // The one pair uuid dedupe cannot relate: a collection placeholder seeded by the browser at
   // spawn, and the agent's own presentCollection card for the same collection. Different writers,
   // different uuids, one thing on screen — the real card wins. The server applies the same rule to
@@ -52,7 +88,14 @@ const { upsert } = useSessionFeed(results, {
   // Drop the previous session's views the moment the session changes, rather than when its
   // replacement's history arrives: until then the panel would still be showing another cell's
   // drawings under this cell's name.
-  onSessionChange: () => (results.value = []),
+  //
+  // Re-arming the auto-follow gate is part of the same reset: having scrolled up in the cell you
+  // came from must not decide where you land in the one you switched to, and arriving on the
+  // newest card is the point of the follow.
+  onSessionChange: () => {
+    results.value = [];
+    stickToBottom.value = true;
+  },
 });
 
 // A plugin view changed its state (e.g. a form field edited / submitted). Per the
@@ -72,7 +115,7 @@ async function onUpdateResult(existing: ToolResult, update: Partial<ToolResult>)
   upsert(merged);
   if (!props.sessionId) return;
   try {
-    await fetch("/api/agent/toolResult", {
+    await fetchWithTimeout("/api/agent/toolResult", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ ...merged, sessionId: props.sessionId, persistOnly: true }),
@@ -83,6 +126,88 @@ async function onUpdateResult(existing: ToolResult, update: Partial<ToolResult>)
 }
 
 const hasContent = computed(() => results.value.length > 0);
+
+// What a result IS, for the purpose of "this is the same thing you already drew". The plugin
+// decides (Registration.identityOf); the toolName prefix is added here so two plugins returning
+// the same string — a collection slug that happens to read like a path — stay separate.
+function cardIdentity(result: ToolResult): string | null {
+  const identity = getPlugin(result.toolName)?.identityOf?.(result) ?? null;
+  return identity === null ? null : `${result.toolName}:${identity}`;
+}
+
+// The cards actually rendered: one per identity, newest at that identity's newest position. See
+// canvasCollapse.ts for why the superseded ones are dropped rather than kept as members.
+const cards = computed(() => collapseByIdentity(results.value, cardIdentity));
+
+// v-for key. The UUID, deliberately — NOT the identity, which would look like the tidier choice
+// (same subject, same key, one instance kept across edits) and is the wrong one.
+//
+// The remount IS the refresh. A re-presented card is meant to show state that CHANGED, and the
+// views have no other way to learn that. The collection View reloads from a
+// `watch(activeSlug, …)`: re-presenting the same collection leaves that slug identical, so the
+// watch never fires, and MulmoTerminal does not configure the package's optional
+// `subscribeChanges` hook (see src/composables/collectionUi.ts) that would otherwise push the
+// change in. Keeping the instance therefore keeps its STALE contents — a card that collapsed to
+// "the newest" while rendering the oldest, which is worse than the stacking this replaces.
+// presentHtml's iframe and presentDocument's rendered body are the same story.
+//
+// What is lost is what the view held internally — the table's scroll position, expanded rows —
+// and that is exactly what today's behaviour already loses, since today every edit draws a whole
+// new card. Correct-and-unchanged beats stale-but-smooth. Caught by Codex on PR #1223; pinned by
+// "remounts the view … so it refetches" in GuiPanelCollapse.spec.ts.
+const cardKey = (result: ToolResult) => result.uuid;
+
+// Each card paired with the plugin that draws it, resolved ONCE here rather than in the template.
+// A template cannot carry `v-if="getPlugin(...)"` narrowing across to the sibling attributes, so
+// expressing this inline meant looking the plugin up four times per card and asserting away the
+// undefined three times — and a non-null assertion inside a template is invisible to
+// @typescript-eslint/no-non-null-assertion, which is on and catches the same thing in .ts (#1231).
+// Resolving here puts it where the compiler proves it instead.
+const drawableCards = computed(() =>
+  cards.value.flatMap((result) => {
+    const plugin = getPlugin(result.toolName);
+    return plugin ? [{ result, plugin }] : [];
+  }),
+);
+
+// Auto-follow. The pane never scrolled itself, so each new card landed below the fold and the
+// user had to go find it; collapsing above removes most of that, but a card can still arrive
+// under an earlier one that is still on screen. State is declared above useSessionFeed.
+function onScroll() {
+  const element = scrollRef.value;
+  if (!element) return;
+  // A programmatic jump lands AT the bottom, so it re-affirms the gate rather than cancelling it
+  // — which is why this needs no suppression flag around the scroll below.
+  stickToBottom.value = element.scrollHeight - element.scrollTop - element.clientHeight <= NEAR_BOTTOM_THRESHOLD_PX;
+}
+
+// Changes when a card is added, or when a DIFFERENT result takes the last slot (a re-presented
+// collection moving down from above). Deliberately NOT sensitive to a view persisting its own
+// state: onUpdateResult replaces the object but keeps its uuid, and following a form's every
+// keystroke back to the bottom would fight the person typing in it.
+const latestCardKey = computed(() => {
+  const list = cards.value;
+  const last = list[list.length - 1];
+  return `${list.length}:${last?.uuid ?? ""}`;
+});
+
+// After the pending layout — the new/resized card's height is what we are scrolling past.
+function followToEnd() {
+  if (!stickToBottom.value) return;
+  void nextTick(() => {
+    const element = scrollRef.value;
+    if (element) element.scrollTop = element.scrollHeight;
+  });
+}
+
+watch(latestCardKey, followToEnd);
+
+// Fixed-height cards are sized from THIS box rather than from the viewport — see
+// useCanvasCardHeight for why `vh` was the wrong unit for a panel that sits under the app
+// chrome. Re-pinning on resize is part of it: every card changes height at once, which moves
+// scrollHeight while the browser holds scrollTop in pixels, so a reader parked at the end
+// would otherwise be left mid-card by a window resize.
+useCanvasCardHeight(scrollRef, followToEnd);
 
 // What each tool produces, so the empty state says what asking for one would get rather than
 // only naming it. A Map for the same reason common/toolGroups.ts uses one, and consulted with a
@@ -116,13 +241,13 @@ const availableTools = ref<string[] | null>(null);
 async function loadAvailableTools(sessionId: string | null) {
   availableTools.value = null;
   try {
-    const res = await fetch(sessionId ? `/api/tools?sessionId=${encodeURIComponent(sessionId)}` : "/api/tools");
+    const res = await fetchWithTimeout(sessionId ? `/api/tools?sessionId=${encodeURIComponent(sessionId)}` : "/api/tools");
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const body = await res.json();
+    const body = await jsonBody(res);
     // Late reply for a session we have since walked away from would list another cell's tools.
     if (sessionId !== props.sessionId) return;
-    if (!Array.isArray(body.tools)) return;
-    availableTools.value = body.tools.map((tool: { toolName?: unknown }) => tool?.toolName).filter((name: unknown): name is string => typeof name === "string");
+    if (!isUnknownArray(body.tools)) return;
+    availableTools.value = body.tools.map((tool) => (isRecord(tool) ? tool.toolName : undefined)).filter((name): name is string => typeof name === "string");
   } catch {
     // Leave it unknown rather than empty — the hint falls back to the full list, which is a
     // better answer than telling a working session it has nothing.
@@ -134,7 +259,7 @@ watch(() => props.sessionId, loadAvailableTools, { immediate: true });
 // while claude is still being spawned, so its MCP client has not connected to the group URLs yet
 // and the server has not learned which tools this cell got.
 onToolGroupsAnnounced((announcement) => {
-  if (announcement.sessionId === props.sessionId) loadAvailableTools(props.sessionId);
+  if (announcement.sessionId === props.sessionId) void loadAvailableTools(props.sessionId);
 });
 
 // What this session can be asked for, grouped. Ordered by TOOL_GROUPS (blast radius, least
@@ -163,18 +288,36 @@ const hasTools = computed(() => toolSections.value.some((section) => section.too
   <section class="flex h-full min-w-0 flex-1 flex-col border-l border-border bg-deep">
     <div class="py-2 px-4 bg-panel text-fg font-sans text-[14px] flex items-center justify-between">
       <span class="font-semibold">Canvas</span>
-      <button
-        v-if="!toolsOpen"
-        type="button"
-        class="bg-transparent border-0 text-dim text-[15px] leading-none py-0.5 px-1 cursor-pointer rounded hover:text-fg"
-        title="Tools & tool-call history"
-        aria-label="Open tools pane"
-        @click="emit('toggleTools')"
-      >
-        <span class="material-symbols-outlined" aria-hidden="true">build</span>
-      </button>
+      <!-- Close sits at the RIGHT END, where the files and tools panes put theirs — three panes
+           share one slot, so the button that dismisses whichever one is showing has to be in the
+           same place each time. Expand is the pane's own control and sits inside it. -->
+      <div class="flex items-center gap-1">
+        <!-- Same glyph pair as a cell's own enlarge/restore button (CellChromeButtons), because it
+             is the same gesture one level in: give this thing the whole area beside the roster. -->
+        <button
+          type="button"
+          data-testid="canvas-expand-btn"
+          class="bg-transparent border-0 text-dim text-[15px] leading-none py-0.5 px-1 cursor-pointer rounded hover:text-fg"
+          :title="expanded ? 'Restore the terminal beside the canvas' : 'Expand the canvas over the terminal'"
+          :aria-label="expanded ? 'Restore canvas width' : 'Expand canvas'"
+          :aria-pressed="expanded === true"
+          @click="emit('toggleExpand')"
+        >
+          <span class="material-symbols-outlined" aria-hidden="true">{{ expanded ? "close_fullscreen" : "open_in_full" }}</span>
+        </button>
+        <button
+          type="button"
+          data-testid="canvas-close-btn"
+          class="cursor-pointer rounded border-0 bg-transparent px-1 py-0.5 text-[15px] leading-none text-dim hover:text-fg"
+          title="Close canvas pane"
+          aria-label="Close canvas pane"
+          @click="emit('close')"
+        >
+          <span class="material-symbols-outlined" aria-hidden="true">close</span>
+        </button>
+      </div>
     </div>
-    <div class="flex-1 overflow-y-auto px-4 py-3 font-sans text-[14px] leading-normal text-fg">
+    <div ref="scrollRef" data-testid="canvas-scroll" class="flex-1 overflow-y-auto px-4 py-3 font-sans text-[14px] leading-normal text-fg" @scroll="onScroll">
       <!-- Unavailable outranks empty: both look like "nothing here", but only one of them is
            something the user can act on by talking to the agent. -->
       <div v-if="unavailable" data-testid="canvas-unavailable" class="text-[13px] text-dim">
@@ -213,18 +356,13 @@ const hasTools = computed(() => toolSections.value.some((section) => section.too
       </div>
       <!-- Guarded as well as cleared on session change: a stale view rendered under an
            "unavailable" heading would contradict it. -->
-      <template v-for="r in unavailable ? [] : results" :key="r.uuid">
-        <PluginFrame
-          v-if="getPlugin(r.toolName)"
-          class="[&+&]:mt-4 [&+&]:border-t [&+&]:border-border [&+&]:pt-4"
-          :css="getPlugin(r.toolName)!.css"
-          :height="getPlugin(r.toolName)!.height"
-        >
+      <template v-for="{ result, plugin } in unavailable ? [] : drawableCards" :key="cardKey(result)">
+        <PluginFrame class="[&+&]:mt-4 [&+&]:border-t [&+&]:border-border [&+&]:pt-4" :css="plugin.css" :height="plugin.height">
           <component
-            :is="getPlugin(r.toolName)!.viewComponent"
-            :selected-result="r"
+            :is="plugin.viewComponent"
+            :selected-result="result"
             :send-text-message="sendTextMessage"
-            @update-result="(update: Partial<ToolResult>) => onUpdateResult(r, update)"
+            @update-result="(update: Partial<ToolResult>) => onUpdateResult(result, update)"
           />
         </PluginFrame>
       </template>

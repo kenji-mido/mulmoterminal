@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import { nextActivity, sessionRow, shouldRefreshReply } from "../../../server/session/activity-transition.js";
 

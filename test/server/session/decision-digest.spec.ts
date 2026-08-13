@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import type { DecisionQuestion, DecisionRecord } from "../../../common/decisionLog";
 import { decisionDigestMarkdown } from "../../../server/session/decision-digest";

@@ -20,7 +20,7 @@ export function parseRemoteRef(remoteUrl: string): RemoteRef | null {
   if (!url) return null;
   // The scp-like form has no scheme (user@host:path), so the URL parser can't read it.
   const scp = /^[^/@]+@([^/:]+):([^:]+)$/.exec(url);
-  const { host, rawPath } = scp ? { host: scp[1], rawPath: scp[2] } : fromUrl(url);
+  const { host, rawPath } = scp ? { host: scp[1] ?? "", rawPath: scp[2] ?? "" } : fromUrl(url);
   const cleaned = cleanPath(rawPath);
   return host && cleaned ? { host: host.toLowerCase(), path: cleaned } : null;
 }

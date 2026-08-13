@@ -63,6 +63,7 @@ function relaunch() {
     :canvas-available="canvasAvailable"
     :home="home"
     :cwd="cwd"
+    :default-cwd="defaultCwd"
     :finished="finished"
     idle-title="Exited"
     icon="rocket_launch"

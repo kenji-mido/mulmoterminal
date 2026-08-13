@@ -7,11 +7,16 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { computeUpdateNotice, isUpdateCheckDisabled } from "../../bin/update-check.js";
+import { isRecord } from "../../common/isRecord.js";
 
 // This file is server/config/update-status.ts, so two dirs up is the install root — the git
 // checkout (dev / a clone) or the package dir under node_modules (npm) the check runs against.
 const PKG_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
-const { version: VERSION } = createRequire(import.meta.url)("../../package.json") as { version: string };
+// Our OWN package.json, read through require so the version is available without a JSON import
+// assertion. Validated rather than asserted: a build that ships a package.json without a version
+// should say so here, not hand `undefined` to the update check as though it were a version.
+const pkg: unknown = createRequire(import.meta.url)("../../package.json");
+const VERSION = isRecord(pkg) && typeof pkg.version === "string" ? pkg.version : "0.0.0";
 
 export interface UpdateStatus {
   notice: string | null;

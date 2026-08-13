@@ -111,11 +111,18 @@ export function isThemeId(value: unknown): value is ThemeId {
 export const missingThemeId = ref<string | null>(null);
 
 // Built-in palettes, read once from the stylesheet the first time a custom theme needs a base.
-let builtinVars: Record<ThemeId, ThemeVars> | null = null;
-function builtins(): Record<ThemeId, ThemeVars> {
+// PARTIAL, honestly: `readBuiltinVars` returns null when the stylesheet has no block for an id,
+// so a key can be absent — which the assertion this replaces claimed could not happen. Every
+// consumer looks up ONE key and already handles a miss, so nothing needed the stronger promise.
+let builtinVars: Partial<Record<ThemeId, ThemeVars>> | null = null;
+function builtins(): Partial<Record<ThemeId, ThemeVars>> {
   if (!builtinVars) {
-    const entries = THEME_IDS.map((id) => [id, readBuiltinVars(id)] as const).filter(([, vars]) => vars !== null);
-    builtinVars = Object.fromEntries(entries) as Record<ThemeId, ThemeVars>;
+    const vars: Partial<Record<ThemeId, ThemeVars>> = {};
+    for (const id of THEME_IDS) {
+      const read = readBuiltinVars(id);
+      if (read) vars[id] = read;
+    }
+    builtinVars = vars;
   }
   return builtinVars;
 }
@@ -169,7 +176,9 @@ export function termThemeFor(id: string): Theme["term"] {
   // colours come from the base it extends — hence the spread over that base's palette.
   const derived = custom ? customTermTheme(custom, builtins()) : null;
   const base = THEMES.find((t) => t.id === custom?.extends) ?? THEMES[0];
-  return derived ? { ...base.term, ...derived } : THEMES[0].term;
+  const fallback = THEMES[0];
+  if (!fallback) return {};
+  return derived ? { ...(base?.term ?? fallback.term), ...derived } : fallback.term;
 }
 
 // Called from main.ts before mount so the persisted theme is on <html> before
@@ -189,7 +198,8 @@ export function refreshTheme() {
 function swatchFor(id: string): Theme["swatch"] {
   const custom = findCustomTheme(id);
   const vars = custom ? resolveThemeVars(custom, builtins()) : null;
-  if (!vars) return THEMES[0].swatch;
+  const fallbackSwatch = THEMES[0]?.swatch ?? { base: "", panel: "", accent: "" };
+  if (!vars) return fallbackSwatch;
   return { base: vars["--bg-base"], panel: vars["--bg-panel"], accent: vars["--accent"] };
 }
 

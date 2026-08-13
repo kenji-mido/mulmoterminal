@@ -7,6 +7,7 @@
 // here rather than imported.
 import type { CompletionPriority } from "@mulmoclaude/core/collection-watchers";
 import type { NotifierSeverity } from "@mulmoclaude/core/notifier";
+import { isRecord } from "../../common/isRecord.js";
 
 // `legacy: true` + a string `legacyId` + a string `kind` is the marker both apps'
 // readEntry recognise; the navigate `action` preserves the bell's icon/routing.
@@ -19,8 +20,8 @@ export interface LegacyNotifierPluginData {
 }
 
 export function isLegacyNotifierPluginData(value: unknown): value is LegacyNotifierPluginData {
-  if (value === null || typeof value !== "object") return false;
-  const rec = value as Record<string, unknown>;
+  if (!isRecord(value)) return false;
+  const rec = value;
   return rec.legacy === true && typeof rec.legacyId === "string" && typeof rec.kind === "string";
 }
 

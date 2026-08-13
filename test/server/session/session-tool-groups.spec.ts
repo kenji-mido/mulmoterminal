@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 
 import { parseSessionToolGroups, sessionToolGroupLine, TOOL_GROUP_RESET } from "../../../server/session/session-tool-groups.js";

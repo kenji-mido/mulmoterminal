@@ -1,3 +1,4 @@
+// @vitest-environment node
 // A config file a human edited on Windows may start with a byte-order mark: Notepad,
 // `Set-Content` and PowerShell 5.1's `Out-File -Encoding utf8` all write one, and node keeps
 // it as a leading U+FEFF. `JSON.parse` then throws on the first character — and every config

@@ -48,7 +48,7 @@ export const DEFAULT_LOCALE = "en";
 // The value is interpolated into the claude prompt, so anything unexpected falls back
 // to the default rather than injecting a free-form string.
 export function normalizeLocale(v: unknown): string {
-  const base = typeof v === "string" ? v.split("-")[0].toLowerCase() : "";
+  const base = typeof v === "string" ? (v.split("-")[0] ?? "").toLowerCase() : "";
   return /^[a-z]{2,8}$/.test(base) ? base : DEFAULT_LOCALE;
 }
 

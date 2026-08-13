@@ -58,6 +58,69 @@ describe("useResumableSessions", () => {
     expect(value.value).toEqual({ sessions: [{ id: "fast", title: "fast", mtime: 2 }], cwd: "/fast" });
   });
 
+  // #1372: the rows have to go when the FIELD changes, not when the replacement lands. Until then
+  // they are the previous directory's, and clicking one resumes exactly the session it names.
+  it("empties the rows and reports loading the moment the dir is forgotten", async () => {
+    globalThis.fetch = vi.fn(async () => ok({ sessions: [{ id: "a", title: "one", mtime: 1 }], cwd: "/x" })) as unknown as typeof fetch;
+    const { value, loading, forget, load } = useResumableSessions();
+    await load("/x");
+    expect(loading.value).toBe(false);
+    forget();
+    expect(value.value).toEqual({ sessions: [], cwd: null });
+    expect(loading.value).toBe(true);
+  });
+
+  it("drops an answer that was already in flight when the dir was forgotten", async () => {
+    const slow = deferred<ReturnType<typeof ok>>();
+    globalThis.fetch = vi.fn(async () => slow.promise) as unknown as typeof fetch;
+    const { value, load, forget } = useResumableSessions();
+    const pending = load("/slow");
+    forget();
+    slow.resolve(ok({ sessions: [{ id: "stale", title: "stale", mtime: 1 }], cwd: "/slow" }));
+    await pending;
+    expect(value.value).toEqual({ sessions: [], cwd: null });
+  });
+
+  it("empties the rows before it fetches, and stops loading when the answer lands", async () => {
+    globalThis.fetch = vi.fn(async (url: string) => {
+      const cwd = new URL(String(url), "http://localhost").searchParams.get("cwd");
+      return ok({ sessions: [{ id: `s:${cwd}`, title: "one", mtime: 1 }], cwd });
+    }) as unknown as typeof fetch;
+    const { value, loading, load } = useResumableSessions();
+    await load("/x");
+    const next = load("/y");
+    // Not awaited: /x's row is gone already, rather than standing there until /y answers.
+    expect(value.value).toEqual({ sessions: [], cwd: null });
+    expect(loading.value).toBe(true);
+    await next;
+    expect(value.value.cwd).toBe("/y");
+    expect(loading.value).toBe(false);
+  });
+
+  it("is not left loading when there is no dir to ask about", async () => {
+    const { loading, forget, load } = useResumableSessions();
+    forget();
+    await load(null);
+    expect(loading.value).toBe(false);
+  });
+
+  // The flag follows the same rule as the value: the newest request owns it. A superseded one
+  // clearing it would say "loaded" while the request that replaced it is still in flight.
+  it("leaves the flag to the request that superseded this one", async () => {
+    const slow = deferred<ReturnType<typeof ok>>();
+    const stillPending = deferred<ReturnType<typeof ok>>();
+    globalThis.fetch = vi.fn(async (url: string) => (String(url).includes("slow") ? slow.promise : stillPending.promise)) as unknown as typeof fetch;
+    const { loading, load } = useResumableSessions();
+    const first = load("/slow");
+    const newer = load("/newer");
+    slow.resolve(ok({ sessions: [], cwd: "/slow" }));
+    await first;
+    expect(loading.value).toBe(true);
+    stillPending.resolve(ok({ sessions: [], cwd: "/newer" }));
+    await newer;
+    expect(loading.value).toBe(false);
+  });
+
   it("clears the rows when the read throws, rather than showing another dir's", async () => {
     globalThis.fetch = vi.fn(async () => ok({ sessions: [{ id: "a", title: "one", mtime: 1 }], cwd: "/x" })) as unknown as typeof fetch;
     const { value, load } = useResumableSessions();

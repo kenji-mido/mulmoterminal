@@ -7,7 +7,8 @@
 // Pure, with the port and the user's servers passed in: index.ts read both from module state,
 // so the precedence rule below could not be tested without booting the server (#548).
 import type { UserMcpServer } from "../config/config-schema.js";
-import { toolGroupServerId, type ToolGroup } from "../../common/toolGroups.js";
+import { toolGroupServerId, GUI_SERVER_ID, type ToolGroup } from "../../common/toolGroups.js";
+import { isWorkspaceCwd } from "../config/env.js";
 import type { GuiMcpServer } from "../agents/codex-args.js";
 
 export interface McpConfigInput {
@@ -21,7 +22,32 @@ export interface McpConfigInput {
 }
 
 const DEFAULT_HOST = "127.0.0.1";
-const GUI_SERVER_ID = "mulmoterminal-gui";
+
+/**
+ * Does this session carry the WHOLE GUI MCP — every tool on the one `mt` URL — rather than the
+ * per-group URLs a directory registered for itself? Two ways to earn it, and they are different
+ * facts that used to be one flag:
+ *
+ *   `attachGuiMcp` — not a grid cell at all: the single view, or a chat spawned with no cell yet.
+ *   the CWD        — anything running in the workspace itself. Starting a terminal there is all
+ *                    but the same thing as running the single view, and that equivalence is what
+ *                    lets the single view eventually go.
+ *
+ * A session in a PROJECT directory is false on both counts and takes exactly the branch it took
+ * before any of this. Named and exported rather than left inline because that last sentence is the
+ * invariant the whole design is written around, and an invariant nothing can assert is just a hope.
+ *
+ * It lives HERE, next to the two payload builders, because all three agents now ask it — claude's
+ * argv, codex's `-c` overrides, and the launcher chip's rewritten command line. It was a local
+ * detail of spawn-claude.ts while claude was the only caller.
+ *
+ * This is also WHY THE TOOL NAMES DIFFER between cells, which looks like a bug until you know it:
+ * true carries every tool under one generated server id (`mt`), so the agent sees
+ * `mcp__mt__presentChart`; false picks the tools up from the user's per-folder config under the
+ * group ids, so the SAME tool is `mcp__mulmoterminal-render__presentChart`. Neither name is stale.
+ * See common/toolGroups.ts for why the two ids are not unified, and README's "MCP server ids".
+ */
+export const carriesFullGuiMcp = (attachGuiMcp: boolean, cwd: string | undefined): boolean => attachGuiMcp || isWorkspaceCwd(cwd);
 
 // The counterpart for GRID cells, which are handed no --mcp-config at all: their GUI tools
 // come from the user's OWN per-folder MCP config (`claude mcp add -s local`, `.mcp.json`),
@@ -80,11 +106,33 @@ export function codexGuiMcpServers({
 
 export function mcpConfigJson({ sessionId, host = DEFAULT_HOST, port, userMcpServers }: McpConfigInput): string {
   const mcpServers: Record<string, { type: string; url: string }> = {};
-  // The user's servers go in FIRST so the built-in GUI entry below always wins on a clashing
-  // id. sanitizeUserMcpServers already reserves that id; this is defense in depth.
+  // The user's servers go in FIRST so the built-in GUI entry below always wins on a clashing id.
+  // This is where that collision is settled — sanitizeUserMcpServers deliberately KEEPS an entry
+  // named like ours (erasing it would destroy a line of the user's own config on the next save),
+  // so the last write here is what stops it shadowing the built-in.
   for (const server of userMcpServers) {
     mcpServers[server.id] = { type: "http", url: server.url };
   }
   mcpServers[GUI_SERVER_ID] = { type: "http", url: `http://${host}:${port}/api/mcp/${sessionId}` };
   return JSON.stringify({ mcpServers });
 }
+
+/**
+ * What a full-GUI-MCP session pre-approves: our own tools, plus the user's Settings servers by id.
+ *
+ * Both halves matter, and the second is the one that surprises. The generated `--mcp-config`
+ * INCLUDES `userMcpServers` (above), so those servers arrive through our payload rather than
+ * through the user's own config — and pre-approving them here is what stops each of their tools
+ * raising a permission prompt, which is the behaviour the single view has always had.
+ *
+ * Only what WE hand over is pre-approved. The servers Claude Code loads on its own — the
+ * directory's `.mcp.json`, the claude.ai connectors, `~/.claude.json` — prompt as they do in any
+ * other cell; they became reachable here when `--strict-mcp-config` was dropped (#1338, #1385),
+ * and that is a scoping fix, not a licence to auto-allow someone else's tools.
+ *
+ * Shared rather than spelled out at each spawn because the two callers — a claude cell and a
+ * launcher chip running claude — are supposed to be indistinguishable, and this PR exists because
+ * they had drifted. Two copies of a join is exactly how they drift again.
+ */
+export const fullGuiAllowedTools = (guiMcpTools: string, userMcpServers: readonly UserMcpServer[]): string =>
+  [guiMcpTools, ...userMcpServers.map((server) => `mcp__${server.id}`)].join(",");

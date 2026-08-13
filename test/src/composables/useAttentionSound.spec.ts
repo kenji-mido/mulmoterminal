@@ -76,7 +76,7 @@ class FakeAudioContext {
 
 const ALL_KINDS: NotifyKind[] = ["finished", "waiting"];
 
-async function mountPlayer(enabled = true) {
+async function mountPlayer(enabled = true, soundFile: string | null = null) {
   vi.resetModules();
   const { useAttentionSound } = await import("../../../src/composables/useAttentionSound");
   const { useMissedAttention } = await import("../../../src/composables/useMissedAttention");
@@ -87,7 +87,7 @@ async function mountPlayer(enabled = true) {
     setup() {
       useAttentionSound(
         on,
-        computed<SoundConfig>(() => ({ kinds: kinds.value, sounds: {}, soundFile: null })),
+        computed<SoundConfig>(() => ({ kinds: kinds.value, sounds: {}, soundFile })),
       );
       return () => h("div");
     },
@@ -245,6 +245,53 @@ describe("useAttentionSound once audio plays", () => {
     expect(isMissed("e")).toBe(true);
     push({ id: "e", working: false, waiting: false, event: "Stop" });
     expect(isMissed("e")).toBe(false);
+    wrapper.unmount();
+  });
+});
+
+// Which failures are a verdict about the file, and which are just the network (#1398).
+//
+// `isDefinitiveMiss` exists so one offline moment cannot silence a kind for good. Since #1393 the
+// request deadline reaches the BODY, which added a new way for the transfer to fail — and folding
+// that in with a decode failure would file a slow network under "this sound is wrong".
+describe("a sound whose bytes never arrive", () => {
+  const respondWith = (body: () => Promise<ArrayBuffer>) => {
+    const calls: string[] = [];
+    vi.stubGlobal("AudioContext", FakeAudioContext);
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL) => {
+      calls.push(String(input));
+      return { ok: true, status: 200, arrayBuffer: body } as unknown as Response;
+    });
+    return calls;
+  };
+
+  const beep = async (ctx: FakeAudioContext) => {
+    push({ id: "a", working: true, event: "UserPromptSubmit" });
+    push({ id: "a", working: false, event: "Stop", waiting: true });
+    await ctx.resume();
+    await new Promise((r) => setTimeout(r, 0));
+  };
+
+  it("is tried again on the next beep, rather than remembered as a missing sound", async () => {
+    const calls = respondWith(() => Promise.reject(new DOMException("Aborted", "AbortError")));
+    const { wrapper, ctx } = await mountPlayer(true, "/abs/slow.mp3");
+    await beep(ctx);
+    const afterFirst = calls.length;
+    expect(afterFirst).toBeGreaterThan(0);
+    await beep(ctx);
+    // Asked again: an aborted transfer says nothing about whether the file is playable.
+    expect(calls.length).toBeGreaterThan(afterFirst);
+    wrapper.unmount();
+  });
+
+  it("is NOT tried again when the bytes arrived and simply were not audio", async () => {
+    const calls = respondWith(() => Promise.resolve(new ArrayBuffer(8)));
+    const { wrapper, ctx } = await mountPlayer(true, "/abs/not-audio.mp3");
+    await beep(ctx);
+    const afterFirst = calls.length;
+    await beep(ctx);
+    // The file is wrong, and that IS a verdict — decoding the same bad bytes every beep is waste.
+    expect(calls).toHaveLength(afterFirst);
     wrapper.unmount();
   });
 });

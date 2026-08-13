@@ -13,6 +13,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { statusLineCommand } from "./statusline.js";
+import { appendProbeScreen, classifyProbeStall, type ProbeStall } from "./probe-stall.js";
 
 // Long enough for a cold `claude` to boot, answer, and re-render its status line; short enough
 // that a probe which will never report (no binary, an unaccepted trust prompt, an expired login)
@@ -28,8 +29,17 @@ export const PROBE_TIMEOUT_MS = 90_000;
 export const PROBE_PROMPT = "reply with the single character: .";
 
 export interface ProbePty {
-  write(data: string): void;
   kill(): void;
+  /** The probe's own output. Read only to explain a failure — see probe-stall.ts. */
+  onData(listener: (chunk: string) => void): void;
+}
+
+/** How a probe ended: what its terminal proved, and the terminal itself for the cases where it
+ *  proved nothing. Handed to `onSettled` whether or not the probe succeeded — the store owns the
+ *  question of whether anything reported, and this owns the question of what was on screen. */
+export interface ProbeOutcome {
+  stall: ProbeStall;
+  screen: string;
 }
 
 export interface ProbeDeps {
@@ -39,12 +49,7 @@ export interface ProbeDeps {
   port: string | number;
   cwd: string;
   sessionId: string;
-  onSettled: () => void;
-  // The byte(s) that submit on THIS host, read when the probe submits (`terminalSubmit`). The
-  // probe drives a real `claude` TUI, so on an `esc-cr` host a bare CR is the NEWLINE: hardcoding
-  // it left the question typed but never asked, and the probe could only time out — the gauge then
-  // never refreshes, with nothing on screen to say why (#1148).
-  submitSequence: () => string;
+  onSettled: (outcome: ProbeOutcome) => void;
 }
 
 /**
@@ -59,6 +64,9 @@ export interface ProbeDeps {
  * runs (a PATH lookup, not a spawn), and "a status line arrived carrying no windows" is decided by
  * the report route. Both used to arrive here as the same silence, which is how a failing probe
  * re-fired every 90 seconds forever (#1011).
+ *
+ * What this DOES carry out is the screen: the terminal is the only place a stalled probe leaves any
+ * evidence at all, so `onSettled` gets what was on it (#1293).
  */
 export function startRateLimitProbe(deps: ProbeDeps): () => void {
   // Setup is inside the guard, not before it. It reaches the disk — a full or read-only tmp throws
@@ -74,13 +82,14 @@ export function startRateLimitProbe(deps: ProbeDeps): () => void {
     });
     settings = { dir, file };
   } catch {
-    deps.onSettled();
+    deps.onSettled({ stall: "unknown", screen: "" });
     return () => {};
   }
   const { dir, file: settingsFile } = settings;
 
   let stopped = false;
   let pty: ProbePty | null = null;
+  let screen = "";
   const stop = (): void => {
     if (stopped) return;
     stopped = true;
@@ -91,7 +100,7 @@ export function startRateLimitProbe(deps: ProbeDeps): () => void {
       // already gone
     }
     rmSync(dir, { recursive: true, force: true });
-    deps.onSettled();
+    deps.onSettled({ stall: classifyProbeStall(screen), screen });
   };
   const timer = setTimeout(stop, PROBE_TIMEOUT_MS);
 
@@ -100,26 +109,10 @@ export function startRateLimitProbe(deps: ProbeDeps): () => void {
     // its own, and a session nobody asked for lands in /api/sessions and `claude --resume` with
     // nothing to identify it by (#1010). The caller registers the same id as an internal helper,
     // which is what keeps it out of the listing.
-    pty = deps.spawn(["--session-id", deps.sessionId, "--permission-mode", "auto", "--settings", settingsFile], deps.cwd);
-    // The prompt has to arrive after the TUI is listening; there is no readiness signal to wait
-    // for that is worth parsing, and sending early costs only this probe.
-    setTimeout(() => {
-      // Guarded like kill() is: the PTY may have exited between the timer being set and it firing,
-      // and a throw here lands in a bare timer callback where there is nobody to catch it.
-      try {
-        if (stopped) return;
-        pty?.write(PROBE_PROMPT);
-        setTimeout(() => {
-          try {
-            if (!stopped) pty?.write(deps.submitSequence());
-          } catch {
-            stop();
-          }
-        }, TYPE_TO_SUBMIT_MS);
-      } catch {
-        stop();
-      }
-    }, BOOT_MS);
+    pty = deps.spawn(probeArgs(deps.sessionId, settingsFile), deps.cwd);
+    pty.onData((chunk) => {
+      screen = appendProbeScreen(screen, chunk);
+    });
   } catch {
     // `claude` is not installed, or cannot be launched at all. Same outcome as any other failure.
     stop();
@@ -127,7 +120,36 @@ export function startRateLimitProbe(deps: ProbeDeps): () => void {
   return stop;
 }
 
-// The TUI paints before it accepts input, and text typed into a still-booting one is lost.
-const BOOT_MS = 4000;
-// Enter sent in the same breath as the text can land before the input box has it.
-const TYPE_TO_SUBMIT_MS = 800;
+/**
+ * How the probe asks its question: as claude's own positional prompt, so the session submits it
+ * itself and nothing is ever typed at the terminal.
+ *
+ * It used to be typed — the prompt written 4 seconds after the spawn and a submit 800ms after that
+ * — and the fixed wait is what made the gauge unfixable in some setups (#1293). A TUI that is not
+ * accepting input yet DISCARDS the keystrokes: measured on a real pty, typing early leaves
+ * `❯ replywiththesinglecharacter:.` in the box (the spaces swallowed too) with the Enter lost, so
+ * nothing is ever asked, no API response happens, and the probe can only time out — then back off,
+ * retry on the same fixed timings, and fail identically. Anything that slows a claude start past
+ * that window (MCP connectors negotiating OAuth, plugin sync, a slow disk) makes the usage readout
+ * permanently unavailable with nothing on screen to say why.
+ *
+ * Sending no keys also means the probe can no longer ANSWER anything: a blind Enter confirms the
+ * default choice of whatever dialog is up, and in an untrusted directory that is "Yes, I trust this
+ * folder" — verified writing `hasTrustDialogAccepted` for a directory nobody approved.
+ *
+ * `--strict-mcp-config` for the same reason as the prompt: the probe asks one question that needs
+ * no tools, so loading the user's MCP servers (account connectors, plugins, `.mcp.json`) buys
+ * nothing and costs startup time — measured at 8.0s to first windows without them and 9-15s with a
+ * single unauthenticated one. It affects this hidden session only; the user's own sessions keep
+ * every server they have configured.
+ */
+export const probeArgs = (sessionId: string, settingsFile: string): string[] => [
+  "--session-id",
+  sessionId,
+  "--permission-mode",
+  "auto",
+  "--strict-mcp-config",
+  "--settings",
+  settingsFile,
+  PROBE_PROMPT,
+];

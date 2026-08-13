@@ -50,7 +50,7 @@ import {
   resolveAddDirs,
 } from "./config-schema.js";
 
-const DIR_CONFIG_FILE = ".mulmoterminal.json";
+export const DIR_CONFIG_FILE = ".mulmoterminal.json";
 
 export interface DirConfig extends DirChrome {
   theme: ThemeId | null;

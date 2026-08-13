@@ -3,9 +3,10 @@ import { presetLabel, type CwdPreset } from "../components/presets";
 import type { Launcher } from "../components/launchers";
 import type { UserMcpServer } from "../components/userMcp";
 import type { QuickCommand } from "../../common/quickCommands";
-import type { PushKind } from "../../common/pushKinds";
+import { isPushKind, type PushKind } from "../../common/pushKinds";
 import { DEFAULT_SOUND_KINDS, isNotifyKind, type NotifyKind } from "../../common/notifyKinds";
 import { isRecord } from "../../common/isRecord";
+import { isUnknownArray } from "../../common/isUnknownArray";
 import { readSoundMap, type SoundMap } from "./soundSettings";
 import type { SoundConfig } from "./useAttentionSound";
 import { DEFAULT_TERMINAL_SUBMIT_MODE, isTerminalSubmitMode } from "../../common/terminalSubmit";
@@ -17,6 +18,7 @@ import { setActiveKeymap } from "./activeKeymap";
 import { setCockpitLines } from "./cockpitLines";
 import { setCopyOnSelect } from "./copyOnSelect";
 import { setIssueWorkComments } from "./issueWorkComments";
+import { fetchWithTimeout } from "../utils/fetchWithTimeout";
 
 // The custom attention-sound file is a SINGLETON ref shared across every
 // useAppConfig() caller — the beep player lives in the single view while the
@@ -63,6 +65,17 @@ const home = ref<string | null>(null);
 
 const prRepos = ref<string[]>([]);
 
+// The hosts declared as self-hosted GitLab (#1332). Read-only here — config.json is the only place
+// it can be set — but the browser needs it to know that a `gitlab.hogefuga.com/...` row can start
+// work, which is a decision this side makes on its own (common/issueStartPlan.ts).
+const gitlabHosts = ref<string[]>([]);
+
+/** The declared hosts, for a reader outside the composable — same shape as `currentSoundConfig`
+ *  above, and for the same reason: useAppConfig() builds per-call refs, so calling it from a
+ *  render path to read one singleton is waste. Reading `.value` here still tracks the dependency,
+ *  so a computed that calls this re-runs when the config lands. */
+export const currentGitlabHosts = (): string[] => gitlabHosts.value;
+
 // Which clone each repo's work starts in (#1172) — a SINGLETON for the same reason, and read from
 // the CONFIG rather than reconstructed from /api/repo-dirs: that view drops a recording whose
 // directory it cannot currently see, so merging a new choice into it would quietly delete the
@@ -99,16 +112,32 @@ function readLegacyRecents(): string[] {
 // POST a single config field as a partial update; the server keeps the other fields, so
 // this never clobbers them. Returns the server's echoed value for that field (or
 // `{ ok: false }` on failure) so each caller can update just its own singleton ref.
-async function postConfigField<T>(field: string, value: unknown): Promise<{ ok: true; value: T } | { ok: false }> {
+async function postConfigField(field: string, value: unknown): Promise<{ ok: true; value: unknown } | { ok: false }> {
   try {
-    const res = await fetch("/api/config", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ [field]: value }) });
+    const res = await fetchWithTimeout("/api/config", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ [field]: value }),
+    });
     if (!res.ok) return { ok: false };
-    const body: Record<string, unknown> = await res.json();
-    return { ok: true, value: body[field] as T };
+    const body: unknown = await res.json();
+    // `unknown`, not a caller-named `T`: this is the server's echo, and the type argument used to
+    // let each caller DECLARE the shape it wanted. Several already narrowed it anyway; now all do.
+    return { ok: true, value: isRecord(body) ? body[field] : undefined };
   } catch {
     return { ok: false };
   }
 }
+
+// The elements of a config list that pass their own guard. Anything else is dropped rather than
+// loaded: the list is a set of independent entries, so one bad entry costs only itself.
+const listOf = <T>(value: unknown, isEntry: (entry: unknown) => entry is T): T[] => (isUnknownArray(value) ? value.filter(isEntry) : []);
+
+const stringsOf = (value: unknown): string[] => (Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : []);
+const isCwdPreset = (value: unknown): value is CwdPreset => isRecord(value) && typeof value.label === "string" && typeof value.path === "string";
+const isQuickCommand = (value: unknown): value is QuickCommand => isRecord(value) && typeof value.label === "string" && typeof value.text === "string";
+const isUserMcpServer = (value: unknown): value is UserMcpServer => isRecord(value) && typeof value.id === "string" && typeof value.url === "string";
+const isLauncher = (value: unknown): value is Launcher => isRecord(value) && typeof value.label === "string" && typeof value.command === "string";
 
 // The record/remove/migrate preset mutations. Each preset write POSTs the whole array, so
 // concurrent record/remove calls (two grid cells launching at once) must not each derive
@@ -191,9 +220,14 @@ function createPresetManager(presets: Ref<CwdPreset[]>, saving: Ref<boolean>, er
     saving.value = true;
     error.value = null;
     try {
-      const res = await fetch("/api/config", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ cwdPresets: next }) });
+      const res = await fetchWithTimeout("/api/config", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ cwdPresets: next }),
+      });
       if (!res.ok) throw new Error(`save failed (${res.status})`);
-      presets.value = (await res.json()).cwdPresets ?? [];
+      const saved: unknown = await res.json();
+      presets.value = isRecord(saved) && isUnknownArray(saved.cwdPresets) ? saved.cwdPresets.filter(isCwdPreset) : [];
       version++;
       return true;
     } catch {
@@ -206,7 +240,7 @@ function createPresetManager(presets: Ref<CwdPreset[]>, saving: Ref<boolean>, er
 
   const snapshotVersion = (): number => version;
   const adoptServerPresets = (list: unknown, capturedVersion: number): void => {
-    if (version === capturedVersion) presets.value = Array.isArray(list) ? list : [];
+    if (version === capturedVersion) presets.value = isUnknownArray(list) ? list.filter(isCwdPreset) : [];
   };
 
   return { savePresets, ...createPresetMutations(presets, savePresets), snapshotVersion, adoptServerPresets };
@@ -216,20 +250,20 @@ function createPresetManager(presets: Ref<CwdPreset[]>, saving: Ref<boolean>, er
 // they're module-level (no per-composable state) — useAppConfig just re-exports them.
 // Persist just the custom attention sound (a file path, or null to use the chime).
 async function saveSound(file: string | null): Promise<boolean> {
-  const r = await postConfigField<unknown>("soundFile", file);
+  const r = await postConfigField("soundFile", file);
   if (r.ok) soundFile.value = typeof r.value === "string" ? r.value : null;
   return r.ok;
 }
 // Persist the "send a Web Push on task finish" toggle (partial update).
 async function savePushEnabled(on: boolean): Promise<boolean> {
-  const r = await postConfigField<unknown>("pushEnabled", on);
+  const r = await postConfigField("pushEnabled", on);
   if (r.ok) pushEnabled.value = r.value === true;
   return r.ok;
 }
 // Persist the cross-repo PR list's repos (partial update, other fields untouched).
 async function savePrRepos(next: string[]): Promise<boolean> {
-  const r = await postConfigField<string[]>("prRepos", next);
-  if (r.ok) prRepos.value = r.value ?? [];
+  const r = await postConfigField("prRepos", next);
+  if (r.ok) prRepos.value = stringsOf(r.value);
   return r.ok;
 }
 
@@ -260,10 +294,11 @@ function applyGlobalSettings(c: Record<string, unknown>): void {
   refreshTheme();
 }
 
-// The two GitHub-repo fields, adopted together — like adoptSoundConfig, so loadConfig keeps
-// reading as a list of facts rather than growing a ternary per field.
+// The repo fields, adopted together — like adoptSoundConfig, so loadConfig keeps reading as a list
+// of facts rather than growing a ternary per field.
 function adoptRepoConfig(c: Record<string, unknown>): void {
-  prRepos.value = Array.isArray(c.prRepos) ? c.prRepos : [];
+  prRepos.value = stringsOf(c.prRepos);
+  gitlabHosts.value = stringsOf(c.gitlabHosts);
   repoDirs.value = isRecord(c.repoDirs) ? readRepoDirs(c.repoDirs) : {};
 }
 
@@ -280,45 +315,45 @@ const readRepoDirs = (raw: Record<string, unknown>): Record<string, string> => {
 // replacing it: this is called with one repo's answer, and a whole-map write would drop every
 // other repo's choice.
 async function saveRepoDir(repo: string, dir: string): Promise<boolean> {
-  const r = await postConfigField<Record<string, unknown>>("repoDirs", { ...repoDirs.value, [repo]: dir });
+  const r = await postConfigField("repoDirs", { ...repoDirs.value, [repo]: dir });
   if (r.ok) repoDirs.value = isRecord(r.value) ? readRepoDirs(r.value) : repoDirs.value;
   return r.ok;
 }
 // Persist the cell-launcher commands (partial update).
 async function saveLaunchers(next: Launcher[]): Promise<boolean> {
-  const r = await postConfigField<Launcher[]>("launchers", next);
-  if (r.ok) launchers.value = r.value ?? [];
+  const r = await postConfigField("launchers", next);
+  if (r.ok) launchers.value = Array.isArray(r.value) ? r.value.filter(isLauncher) : [];
   return r.ok;
 }
 // Persist which kinds of push to send (partial update).
 async function savePushKinds(next: PushKind[]): Promise<boolean> {
-  const r = await postConfigField<PushKind[]>("pushKinds", next);
-  if (r.ok) pushKinds.value = r.value ?? [];
+  const r = await postConfigField("pushKinds", next);
+  if (r.ok) pushKinds.value = Array.isArray(r.value) ? r.value.filter(isPushKind) : [];
   return r.ok;
 }
 // Persist which moments beep (partial update).
 async function saveSoundKinds(next: NotifyKind[]): Promise<boolean> {
-  const r = await postConfigField<NotifyKind[]>("soundKinds", next);
-  if (r.ok) soundKinds.value = r.value ?? [];
+  const r = await postConfigField("soundKinds", next);
+  if (r.ok) soundKinds.value = Array.isArray(r.value) ? r.value.filter(isNotifyKind) : [];
   return r.ok;
 }
 // Persist the per-kind sounds (partial update). The whole map goes each time — the server
 // merges by FIELD, not by key, so sending one kind would drop the others.
 async function saveSounds(next: SoundMap): Promise<boolean> {
-  const r = await postConfigField<SoundMap>("sounds", next);
-  if (r.ok) sounds.value = r.value ?? {};
+  const r = await postConfigField("sounds", next);
+  if (r.ok) sounds.value = isRecord(r.value) ? readSoundMap(r.value) : {};
   return r.ok;
 }
 // Persist the phone quick commands (partial update).
 async function saveQuickCommands(next: QuickCommand[]): Promise<boolean> {
-  const r = await postConfigField<QuickCommand[]>("quickCommands", next);
-  if (r.ok) quickCommands.value = r.value ?? [];
+  const r = await postConfigField("quickCommands", next);
+  if (r.ok) quickCommands.value = Array.isArray(r.value) ? r.value.filter(isQuickCommand) : [];
   return r.ok;
 }
 // Persist the user MCP servers (partial update).
 async function saveUserMcpServers(next: UserMcpServer[]): Promise<boolean> {
-  const r = await postConfigField<UserMcpServer[]>("userMcpServers", next);
-  if (r.ok) userMcpServers.value = r.value ?? [];
+  const r = await postConfigField("userMcpServers", next);
+  if (r.ok) userMcpServers.value = Array.isArray(r.value) ? r.value.filter(isUserMcpServer) : [];
   return r.ok;
 }
 
@@ -348,19 +383,23 @@ export function useAppConfig() {
   async function loadConfig() {
     const version = snapshotVersion();
     try {
-      const res = await fetch("/api/config");
+      const res = await fetchWithTimeout("/api/config");
       if (!res.ok) return;
-      const c = await res.json();
-      defaultCwd.value = c.cwd ?? null;
-      home.value = c.home ?? null;
+      const body: unknown = await res.json();
+      if (!isRecord(body)) return;
+      const c = body;
+      defaultCwd.value = typeof c.cwd === "string" ? c.cwd : null;
+      home.value = typeof c.home === "string" ? c.home : null;
       adoptServerPresets(c.cwdPresets, version);
       adoptSoundConfig(c);
       pushEnabled.value = c.pushEnabled === true;
-      pushKinds.value = Array.isArray(c.pushKinds) ? c.pushKinds : [];
+      // Each list is filtered by the SAME guard its own save path uses (postConfigField below).
+      // They used to differ: a save validated, the load on every page open did not.
+      pushKinds.value = listOf(c.pushKinds, isPushKind);
       adoptRepoConfig(c);
-      launchers.value = Array.isArray(c.launchers) ? c.launchers : [];
-      quickCommands.value = Array.isArray(c.quickCommands) ? c.quickCommands : [];
-      userMcpServers.value = Array.isArray(c.userMcpServers) ? c.userMcpServers : [];
+      launchers.value = listOf(c.launchers, isLauncher);
+      quickCommands.value = listOf(c.quickCommands, isQuickCommand);
+      userMcpServers.value = listOf(c.userMcpServers, isUserMcpServer);
       applyGlobalSettings(c);
       await migrateLegacyRecents();
     } catch {

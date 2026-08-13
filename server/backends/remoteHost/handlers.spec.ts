@@ -9,6 +9,7 @@ import type { SessionScreen } from "./terminalScreen.js";
 import { initCollectionsBackend } from "../collections.js";
 
 const unusedTerminalDeps = {
+  spawnIssueSeed: () => "unused-session",
   listTerminalSessions: async () => [],
   captureTerminalScreen: async () => ({ screen: "", suggestion: "", quickCommands: [] }),
   writeToSession: () => false,
@@ -62,6 +63,8 @@ describe("createRemoteHostHandlers", () => {
       "listSkills",
       "listAccountingBooks",
       "startChat",
+      "listIssues",
+      "startIssueWork",
       "getRemoteView",
       "getRemoteViewItems",
       "mutateRemoteViewItem",

@@ -44,11 +44,51 @@ export function launcherAgent(command: string): SessionAgent {
 }
 
 /**
- * The command to actually run, with codex's MCP overrides inserted when this launcher runs codex.
+ * Whether a chip's command line will actually be HANDED the GUI MCP — that is, whether one of the
+ * two rewriters below will fire on it.
  *
- * The flags go directly after the program: codex's clap layout takes global options before the
- * subcommand, so appending them at the end would break `codex resume`-style invocations.
+ * Not `launcherRunsAgent`: that also answers yes for antigravity, which has no rewriter here. The
+ * difference matters to anything that records a consequence of the injection rather than performing
+ * it — a chip running `zsh`, `yarn dev` or `agy` is handed no MCP at all, and marking it as carrying
+ * every GUI tool misreports it to `/api/tools` (Codex review on #1399). The same mistake the config
+ * FILE made before #1358, made again for the record instead of the file.
+ *
+ * A spec pins this against what the rewriters actually do, so the two cannot drift apart.
  */
+export const launcherTakesGuiMcp = (command: string): boolean => {
+  const program = launcherProgram(command);
+  return program === "claude" || program === "codex";
+};
+
+/**
+ * A launcher chip that runs CLAUDE, which reaches the GUI MCP through flags
+ * rather than `-c` overrides: `--mcp-config <path> --allowedTools <list>`, the same two a claude
+ * cell in the workspace is spawned with.
+ *
+ * It used to pass `--strict-mcp-config` as well, for parity with the cell — and that was right
+ * about parity and wrong about the flag: both were hiding the user's claude.ai connectors and
+ * their own MCP servers (#1338, #1385). Parity is still the goal, so this drops the flag on the
+ * same commit the cell does. What keeps the chip from seeing a tool twice is not the flag; it is
+ * that the group urls stand down for a session holding the all-tools url (mcp/tool-gate.ts).
+ *
+ * The config is a PATH, never inline JSON — see mcpConfigFileArgument.
+ *
+ * Only the workspace asks for this, and the caller decides that: a chip in a project directory is
+ * passed nothing, exactly as a project cell is, and its claude reads the directory's own config.
+ */
+export function launcherCommandWithClaudeGuiMcp(
+  command: string,
+  gui: { mcpConfigPath: string; allowedTools: string } | null,
+  platform: NodeJS.Platform,
+): string {
+  if (gui === null || launcherProgram(command) !== "claude") return command;
+  const quote = shellQuoteFor(platform);
+  const flags = ["--mcp-config", quote(gui.mcpConfigPath)];
+  if (gui.allowedTools) flags.push("--allowedTools", quote(gui.allowedTools));
+  return insertAfterProgram(command, flags);
+}
+
+/** The command to actually run, with codex's MCP overrides inserted when this launcher runs codex. */
 export function launcherCommandWithGuiMcp(command: string, servers: readonly GuiMcpServer[], platform: NodeJS.Platform): string {
   if (servers.length === 0 || launcherProgram(command) !== "codex") return command;
   const quote = shellQuoteFor(platform);
@@ -60,13 +100,23 @@ export function launcherCommandWithGuiMcp(command: string, servers: readonly Gui
     if (server.autoApprove) parts.push(`-c`, quote(`mcp_servers.${server.id}.default_tools_approval_mode="approve"`));
     return parts;
   });
-  // Scanned rather than split-and-rejoined: everything around the program is the user's text —
-  // quoting, spacing, and a trailing backslash-newline continuation included — and it is put back
-  // byte for byte. Trimming the tail would turn such a continuation into an unterminated command.
-  //
-  // Two index walks rather than one anchored regex: `^(\s*)(\S+)([\s\S]*)$` backtracks
-  // super-linearly on a long command (sonarjs flags it), and this says the same thing.
-  const isSpace = (index: number): boolean => /\s/.test(command[index]);
+  return insertAfterProgram(command, flags);
+}
+
+// Put `flags` directly after the program, leaving everything else byte for byte.
+//
+// Scanned rather than split-and-rejoined: everything around the program is the user's text —
+// quoting, spacing, and a trailing backslash-newline continuation included. Trimming the tail
+// would turn such a continuation into an unterminated command.
+//
+// Two index walks rather than one anchored regex: `^(\s*)(\S+)([\s\S]*)$` backtracks
+// super-linearly on a long command (sonarjs flags it), and this says the same thing.
+//
+// Directly after the program rather than appended, because BOTH agents need it there: codex's clap
+// layout takes global options before the subcommand (`codex resume`), and claude's own trailing
+// `--add-dir` is variadic, so a flag after it would be swallowed as one more directory.
+function insertAfterProgram(command: string, flags: readonly string[]): string {
+  const isSpace = (index: number): boolean => /\s/.test(command[index] ?? "");
   let start = 0;
   while (start < command.length && isSpace(start)) start++;
   if (start === command.length) return command; // whitespace only — nothing to run

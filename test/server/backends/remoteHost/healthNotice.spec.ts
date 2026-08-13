@@ -1,3 +1,4 @@
+// @vitest-environment node
 // Before #823 a dropped command channel left one line in the server log and nothing else,
 // so the first sign was the phone failing to connect. These pin the bell entry that now
 // says so — and, just as importantly, that a self-healed blip does NOT raise one.

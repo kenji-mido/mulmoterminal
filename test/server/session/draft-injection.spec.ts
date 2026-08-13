@@ -252,11 +252,13 @@ describe("attachDraftInjection", () => {
       const t = target();
       const scan = attachDraftInjection(t.entry, undefined, "edit me", () => ESC_CR);
       scan(
-        `\u001b[2GQuick\u001b[8Gsafety\u001b[15Gcheck:\u001b[22GIs\u001b[25Gthis\u001b[30Ga\u001b[32Gproject\u001b[40Gyou\u001b[44Gcreated\u001b[52Gor\u001b[55Gone\u001b[59Gyou\u001b[63Gtrust?`,
+        `\u001b\u001b[2GQuick\u001b\u001b[8Gsafety\u001b\u001b[15Gcheck:\u001b\u001b[22GIs\u001b\u001b[25Gthis\u001b\u001b[30Ga\u001b\u001b[32Gproject\u001b\u001b[40Gyou\u001b\u001b[44Gcreated\u001b\u001b[52Gor\u001b\u001b[55Gone\u001b\u001b[59Gyou\u001b\u001b[63Gtrust?`,
       );
       vi.advanceTimersByTime(FALLBACK_MS * 5);
       expect(t.writes).toEqual([]);
-      scan(`\u001b[3G⏸\u001b[5Gmanual\u001b[12Gmode\u001b[17Gon\u001b[20G·\u001b[22G?\u001b[24Gfor\u001b[28Gshortcuts`);
+      scan(
+        `\u001b\u001b[3G⏸\u001b\u001b[5Gmanual\u001b\u001b[12Gmode\u001b\u001b[17Gon\u001b\u001b[20G·\u001b\u001b[22G?\u001b\u001b[24Gfor\u001b\u001b[28Gshortcuts`,
+      );
       vi.advanceTimersByTime(SETTLE_MS);
       expect(t.writes).toEqual([`${PASTE_START}edit me${PASTE_END}`]);
     });

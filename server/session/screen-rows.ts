@@ -43,7 +43,7 @@ const dimAfter = (dim: boolean, params: readonly string[]): boolean => {
 
 const dimAfterEscape = (sequence: string, dim: boolean): boolean => {
   const sgr = SGR.exec(sequence);
-  return sgr === null ? dim : dimAfter(dim, sgr[1].split(";"));
+  return sgr === null ? dim : dimAfter(dim, (sgr[1] ?? "").split(";"));
 };
 
 interface RowScan {
@@ -119,5 +119,7 @@ const wrappedRows = (rows: readonly ScreenRow[]): readonly ScreenRow[] => {
 export const suggestionFromRows = (rows: readonly ScreenRow[]): string => {
   const start = rows.findLastIndex(offersSuggestion);
   if (start === -1) return "";
-  return [rows[start], ...wrappedRows(rows.slice(start + 1))].map((row) => row.dim.trim()).reduce(joinWrapped);
+  const head = rows[start];
+  if (head === undefined) return ""; // unreachable: findLastIndex answered a real index
+  return [head, ...wrappedRows(rows.slice(start + 1))].map((row) => row.dim.trim()).reduce(joinWrapped);
 };

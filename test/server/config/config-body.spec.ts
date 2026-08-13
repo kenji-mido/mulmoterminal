@@ -42,6 +42,7 @@ describe("badArrayField", () => {
     expect([...ARRAY_FIELDS]).toEqual([
       "cwdPresets",
       "prRepos",
+      "gitlabHosts",
       "launchers",
       "quickCommands",
       "pushKinds",

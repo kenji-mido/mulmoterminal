@@ -32,17 +32,23 @@ function activateLink(el: HTMLElement | null): void {
   if (slug) wikiGotoPage(slug);
 }
 
+// The .wiki-link an event landed on, or null. `e.target` is `EventTarget | null`, so this asks
+// whether it is an Element instead of declaring it one.
+function wikiLinkAt(target: EventTarget | null): HTMLElement | null {
+  return target instanceof Element ? target.closest<HTMLElement>(".wiki-link") : null;
+}
+
 // Mouse + keyboard activation, both event-delegated over the rendered body. The spans
 // carry role="link" + tabindex="0" (added in renderWikiHtml) so they're focusable.
 function onBodyClick(e: MouseEvent): void {
-  const el = (e.target as HTMLElement).closest<HTMLElement>(".wiki-link");
+  const el = wikiLinkAt(e.target);
   if (!el) return;
   e.preventDefault();
   activateLink(el);
 }
 function onBodyKeydown(e: KeyboardEvent): void {
   if (e.key !== "Enter" && e.key !== " ") return;
-  const el = (e.target as HTMLElement).closest<HTMLElement>(".wiki-link");
+  const el = wikiLinkAt(e.target);
   if (!el) return;
   e.preventDefault();
   activateLink(el);

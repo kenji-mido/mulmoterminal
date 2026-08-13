@@ -39,6 +39,8 @@ grouped in `handlers/terminalSession.ts`.
 | `sendTerminalInput` | `sessionId`, `text` | `{ sent: true }` |
 | `launchTerminal` | `agent`, `sessionId` | `{ ok: true }` |
 | `startChat` | `message`, `attachments?` | `{ started: true, chatId }` |
+| `listIssues` | — | `{ repos: RepoIssueRows[] }` |
+| `startIssueWork` | `repo`, `issue`, `run?` | `{ started: true, sessionId, branch, issue, outcome, ran }` |
 | `listFeeds` | — | `{ feeds }` |
 | `getFeed` | `slug`, `offset?`, `limit?` | the feed page |
 | `listCollections` | — | `{ collections }` (feed-backed ones excluded) |
@@ -61,6 +63,90 @@ the byte budget, so a successful edit is never shown as a failure (#747).
 Image fields are **not** inlined by this host (there is no thumbnail store yet): they come back
 as workspace paths, unrenderable on the phone, and count toward `omitted`.
 
+### Starting work on an issue (#1184)
+
+`listIssues` is the phone's half of the `/prs` issue list: the open issues of the repos in
+Settings' `prRepos`, capped per repo, no bodies. Each repo row carries what
+`GET /api/issues` answers with (`repo`, `issues[]`, `truncated?`, `url?`, `error?`) plus:
+
+```ts
+{ canStart: boolean; startBlocked?: string }   // the sentence only when canStart is false
+```
+
+`startIssueWork` then reads the issue, cuts its `issue/<N>-<slug>` worktree off the fetched
+mainline, and spawns a session there seeded with the issue. It answers
+`{ started: true, sessionId, branch, issue: { number, title }, outcome, ran }`; `sessionId` is the
+id `getTerminalScreen` takes, so the phone can watch what it just started.
+
+**An issue has ONE worktree, so a second call for it does not start a second thing** (#1219).
+`outcome` says which of three happened:
+
+| `outcome` | what happened | was the issue typed into it? |
+|---|---|---|
+| `created` | the worktree was cut and a session seeded in it | yes |
+| `reused` | the worktree was already there and empty; the session is new | yes |
+| `resumed` | the worktree's own session opened — nothing was spawned | **no** — it has its own history |
+
+A fourth case is a refusal rather than an answer: the worktree's session is **open in another
+terminal**, and the sentence says to close it there first. One working tree runs one agent
+(#1207), and that rule is not suspended because the request came from the phone.
+
+### `run` — start it, don't just type it (#1253)
+
+By default the seed is **typed and not submitted**: the text was written by whoever opened the
+issue, so the Enter is the user's. That is right on the desktop and wrong on a phone, which has no
+Enter key — the work simply stops there. **`run: true`** submits it instead.
+
+**Only the host can do this.** The seed is typed once the TUI's input box has painted
+(`server/session/draft-injection.ts`), so an Enter sent from the phone would race the injection,
+and nothing outside this process knows when it landed. `sendTerminalInput` cannot send a bare Enter
+either (empty text is rejected), and a one-character workaround would be cleared by the
+before-paste Ctrl-C. So this is a parameter here rather than a sequence the phone performs.
+
+**Auto-running is safe because of what the seed says.** `issueSeedPrompt` ends with *"Read it
+through first and confirm the approach with me before implementing"*, so the session stops for a
+decision before it writes anything.
+
+`ran` is not an echo of `run` — it is false whenever nothing was seeded, whatever was asked:
+
+| | `run: true` | `run` absent / `false` |
+|---|---|---|
+| `created` / `reused` | `ran: true` — typed and submitted | `ran: false` — typed, waiting for Enter |
+| `resumed` | **`ran: false`** — nothing was typed, so there is nothing to submit | `ran: false` |
+
+`resumed` never runs, whatever was asked: that session has its own history and **nothing was typed
+into it**, so submitting would send whatever the user left in its box, or an empty line. Anything
+other than `true` is read as `false`, which leaves the behaviour every caller had before this
+option existed.
+
+**`ran: true` means the session was started to run its seed, not that a keystroke has landed.** The
+reply is sent as soon as the session exists; the seed is typed — and submitted — afterwards, once
+the TUI's input box has painted. So the phone should word it as *started*, not as *the agent has
+answered*, and read the session itself (`getTerminalScreen`) for the latter.
+
+**The desktop keeps the draft.** `POST /api/issues/start` takes no `run` — there, the person who
+opened the issue and the person about to run it are often not the same, and the reviewing Enter is
+the point.
+
+**It takes no `dir`, by rule** (see "The phone never sends a path" below). The work starts in the
+clone recorded for that repo — or in the only one, when the repo has exactly one here. When
+several clones could host it and none has been recorded, the command **refuses** and says to
+choose once on the desktop. Picking for the user is not a smaller decision than it looks: an
+agent runs where it is started, that cannot be undone, and the phone has no way to show which
+tree it landed in. `canStart` exists so the phone learns this before the tap rather than after.
+
+**It has no open-tab prerequisite**, unlike `launchTerminal` below. The spawn is the host's own,
+and the session is marked *unplaced* (`server/session/registry.ts`), which is how a session
+nobody's browser asked for gets a cell: a desktop grid that is already on screen adopts it within
+the moment, and one that isn't picks it up the next time it loads.
+
+The same mark is what puts the session in **`listTerminalSessions`** before any of that happens.
+That list is the grid's cells, and a session joins that set on a browser attach and in no other
+way — so until #1184 a session the phone had just started was absent from the phone's own list,
+and the work it began was findable only by holding on to the returned `sessionId`. It now answers
+with cells **and** the sessions on their way to being one, which is the same set one moment later.
+This covers `startChat` too, which had the same hole.
+
 ### `TerminalSessionSummary`
 
 ```ts
@@ -71,8 +157,9 @@ as workspace paths, unrenderable on the phone, and count toward `omitted`.
 (`capture-pane` doesn't need our process) but **not writable**, and `agent` is then `null`
 because the process that knew what it was launched with is gone.
 
-The list is filtered to **grid cells**: the single-view chat session and any tmux shell that
-was never a cell are excluded, even while live.
+The list is filtered to **grid cells, plus the sessions waiting to become one** — a chat or an
+issue the phone started that no browser has adopted yet (`isPhoneListableSession`). A tmux shell
+that was never a cell and that nobody spawned for one is excluded, even while live.
 
 ### `SessionScreen`
 
@@ -115,8 +202,10 @@ rather than "not known". **It calls `.trim()` on every value, so only strings ma
 always present, `[]` when nothing applies.
 
 **The phone never sends a path.** `launchTerminal` takes a session id and the host looks the
-directory up (`ptys.get(id)?.cwd`). A path parameter would let a remote client choose where a
-process starts. Apply this to anything new that touches the filesystem.
+directory up (`ptys.get(id)?.cwd`). `startIssueWork` takes `owner/repo` and the host looks up the
+clone recorded for it. A path parameter would let a remote client choose where a process starts.
+Apply this to anything new that touches the filesystem — including when the host would then have
+to refuse, which is the honest answer and not a gap to close by accepting the path.
 
 **Authorization is the connected Firebase account, with no per-command gate.**
 `sendTerminalInput` already types arbitrary text into a Claude session, which can run anything,
@@ -140,6 +229,10 @@ Consequences the phone has to live with:
 - `agent` is `"shell" | "claude" | "codex"` (`common/launchAgent.ts`) — deliberately not the
   user's configured `launchers`, which are arbitrary commands.
 
+This is about opening a cell for a session that already exists, not about starting one: a command
+that SPAWNS can mark its session unplaced and let a grid adopt it later, which is what
+`startChat` and `startIssueWork` do. Nothing has to be open for those.
+
 ## Where the pieces are
 
 | Concern | File |
@@ -149,6 +242,9 @@ Consequences the phone has to live with:
 | Typing into a session (sanitize, bracketed paste, Enter timing) | `server/backends/remoteHost/terminalInput.ts` |
 | Quick-command scoping | `server/backends/remoteHost/quickCommands.ts` |
 | Launch validation | `server/backends/remoteHost/launchTerminal.ts` |
+| Issue work (list, refuse, start) | `server/backends/remoteHost/handlers/issueWork.ts`, `server/git/issue-work.ts` |
+| Whether the seed is typed or typed-and-run | `server/session/issue-spawn-options.ts` |
+| Which clone a repo starts in | `server/git/repo-dirs.ts`, `common/issueStartPlan.ts` |
 | Reconnect + health | `server/backends/remoteHost/resilientRunner.ts`, `healthNotice.ts` |
 | Wiring (PTY table, pub/sub, config) | `server/index.ts` |
 | Shared with the UI | `common/sessionAgent.ts`, `common/quickCommands.ts`, `common/launchAgent.ts` |
@@ -156,4 +252,4 @@ Consequences the phone has to live with:
 ## Related
 
 `docs/spawn-architecture.md` (how a session is spawned), `docs/terminal-notes.md` (the terminal
-stack). Issues: #435, #445, #563, #572, #781, #786, #823, #830, #831, #832.
+stack). Issues: #435, #445, #563, #572, #781, #786, #823, #830, #831, #832, #1184.

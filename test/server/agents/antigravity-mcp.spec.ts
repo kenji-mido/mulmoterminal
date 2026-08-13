@@ -32,6 +32,15 @@ describe("mergeAntigravityMcpServers", () => {
   it("drops the legacy all-tools entry", () => {
     expect(mergeAntigravityMcpServers({ "mulmoterminal-gui": { command: "old" } }, [])).toEqual({});
   });
+
+  // `mt` is the CURRENT all-tools id, and this path has never written it — the all-tools entry
+  // belongs to the claude/codex spawn config, not to `.agents/mcp_config.json`. So an agy server
+  // a user called `mt` is theirs, and deleting it here would be this code destroying a file it
+  // does not own (Codex review on #1355). Short generic ids are exactly the ones this can hit.
+  it("leaves a user's own `mt` entry alone — this path never wrote one", () => {
+    const merged = mergeAntigravityMcpServers({ mt: { command: "theirs" } }, ["render"]);
+    expect(merged["mt"]).toEqual({ command: "theirs" });
+  });
 });
 
 describe("syncAntigravityMcpConfig", () => {

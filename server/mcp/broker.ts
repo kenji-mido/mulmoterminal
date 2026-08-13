@@ -28,19 +28,20 @@ import { ListToolsRequestSchema, CallToolRequestSchema } from "@modelcontextprot
 import { randomUUID } from "node:crypto";
 import { toolDefinitions } from "../infra/plugins-registry.js";
 import { offeredTools, routeToolCall, SUBMIT_TRANSLATION_TOOL_NAME } from "./tool-gate.js";
-import { toolGroupServerId, type ToolGroup } from "../../common/toolGroups.js";
+import { toolGroupServerId, GUI_SERVER_ID, type ToolGroup } from "../../common/toolGroups.js";
 import { interpretToolEnvelope } from "./tool-envelope.js";
 import { isRecord } from "../../common/isRecord.js";
+import { SESSION_HEADER } from "../backends/presentPathRoot.js";
 import type { GuiCallRecorder } from "./gui-call-history.js";
 import { messageOf } from "../errors.js";
 
 // Shape of the dispatch route's response (POST /api/plugin/<tool>). `data` gates
 // whether a toolResult is published to the GUI; the rest is narration/metadata.
 
-async function postJson(url: string, body: unknown) {
+async function postJson(url: string, body: unknown, headers: Record<string, string> = {}) {
   const res = await fetch(url, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...headers },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`${url} responded ${res.status}`);
@@ -84,25 +85,28 @@ const SUBMIT_TRANSLATION_TOOL = {
 export function buildGuiMcpServer(
   sessionId: string,
   baseUrl: string,
-  opts: { submitTranslationTool?: boolean; group?: ToolGroup | null; history?: GuiCallRecorder | null } = {},
+  opts: { submitTranslationTool?: boolean; group?: ToolGroup | null; history?: GuiCallRecorder | null; carriesAllTools?: boolean } = {},
 ): Server {
   const group = opts.group ?? null;
+  // Whether this session already reaches every tool on the all-tools url, in which case a group
+  // url of ours has nothing left to add and stands down (see tool-gate.ts).
+  const carriesAllTools = !!opts.carriesAllTools;
   // The advertised server name follows the id a group is expected to be registered under, so
   // what a user sees in `claude mcp list` matches what they wrote in their own config.
-  const serverName = group === null ? "mulmoterminal-gui" : toolGroupServerId(group);
+  const serverName = group === null ? GUI_SERVER_ID : toolGroupServerId(group);
   const server = new Server({ name: serverName, version: "0.0.0" }, { capabilities: { tools: {} } });
 
   // Both layers of the worker AND group gates live in mcp/tool-gate.ts (pure/tested): the
   // offer is filtered here, and anything outside it that gets named anyway is refused below.
   const isWorker = !!opts.submitTranslationTool;
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: offeredTools(isWorker, toolDefinitions, SUBMIT_TRANSLATION_TOOL, group),
+    tools: offeredTools(isWorker, toolDefinitions, SUBMIT_TRANSLATION_TOOL, group, carriesAllTools),
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
 
-    const route = routeToolCall(name, isWorker, group);
+    const route = routeToolCall(name, isWorker, group, carriesAllTools);
 
     // Worker-only result tool: deliver the structured translations back to the
     // waiting request (keyed by session id), bypassing the plugin dispatch path.
@@ -133,7 +137,11 @@ export function buildGuiMcpServer(
     started();
     try {
       // Dispatch to the plugin's server-side handler, then interpret its envelope (tool-envelope.ts).
-      const parsed = await (await postJson(`${baseUrl}/api/plugin/${name}`, args ?? {})).json();
+      // The session id travels as a header, not in the body: the args are the tool's own
+      // schema and every plugin sees them. It is what lets a relative `path` be read as
+      // "relative to the directory THIS cell runs in" (backends/presentPathRoot.ts);
+      // plugins that don't care never look at it.
+      const parsed = await (await postJson(`${baseUrl}/api/plugin/${name}`, args ?? {}, { [SESSION_HEADER]: sessionId })).json();
       const { publish, narration } = interpretToolEnvelope(isRecord(parsed) ? parsed : {});
 
       // A GUI toolResult, only when there is data to render.

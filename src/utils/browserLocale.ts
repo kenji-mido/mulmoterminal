@@ -9,5 +9,5 @@
 // `en-GB` and `en-US` want the same one. A caller that needs the full tag should read
 // `navigator.language` itself and say why.
 export function browserLocale(): string {
-  return (navigator.language || "en").split("-")[0];
+  return (navigator.language || "en").split("-")[0] ?? "en";
 }

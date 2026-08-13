@@ -5,6 +5,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { defineComponent, h, ref, nextTick } from "vue";
 import { flushPromises, mount } from "@vue/test-utils";
+import { isRecord } from "../../../common/isRecord";
 
 const handlers = new Map<string, (data: unknown) => void>();
 vi.mock("../../../src/composables/usePubSub", () => ({
@@ -37,6 +38,9 @@ function mountFeed(respond: () => Promise<{ ok: boolean; json?: () => Promise<un
           historyKey: "items",
           channel: (id) => `feed:${id}`,
           identify: (item) => item.id,
+          // The channel carries untrusted JSON; the composable no longer names the item type for
+          // its caller (#1231), so the test supplies the same reader a real caller would.
+          parse: (raw) => (isRecord(raw) && typeof raw.id === "string" && typeof raw.text === "string" ? { id: raw.id, text: raw.text } : null),
           ...(reconcile ? { reconcile } : {}),
         });
         return () => h("div");

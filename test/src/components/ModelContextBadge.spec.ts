@@ -11,10 +11,14 @@ function mountBadge(props: { agent?: "claude" | "codex"; model: string | null; c
 }
 
 describe("ModelContextBadge", () => {
-  it("renders the badge text, with the tooltip on the same element", () => {
+  // The reading moved from a `title` to the shared hover tip (#1235): the browser's tooltip could
+  // not be made to appear promptly, and its one line had nowhere to put the full model name. What
+  // the tip says is pinned in tipContent.spec.ts; what matters here is that the attribute is GONE,
+  // or the old slow tooltip would surface a second time on top of the new one.
+  it("renders the badge text and no longer carries a native tooltip", () => {
     const badge = mountBadge({ model: "claude-opus-4-20250514", contextTokens: 70_000 }).find('[data-testid="model-badge"]');
     expect(badge.text()).toBe("Opus · ctx 35%");
-    expect(badge.attributes("title")).toContain("70,000 / 200,000 (35%)");
+    expect(badge.attributes("title")).toBeUndefined();
   });
 
   it("renders nothing when the model is unknown/null (no transcript model yet)", () => {

@@ -15,6 +15,13 @@ import { browserLocale } from "../utils/browserLocale";
 
 const { subscribe } = usePubSub();
 
+// The plugin package declares the generic — `AccountingApiCall = <T = unknown>(path, opts) =>
+// Promise<ApiResult<T>>` — so the PLUGIN chooses T and the host has to produce it from a body
+// nothing has checked. Unprovable by construction, exactly like gui-chat-protocol's `dispatch<T>`
+// (see the type-assertion allowlist in eslint.config.js). The claim is made HERE, at the seam,
+// rather than hidden inside fetchJson where it would apply to every caller.
+const asDeclared = <T>(raw: unknown): T => raw as T;
+
 // Network seam — normalise fetch into the package's ApiResult union (the View
 // pattern-matches on `.ok`). Mirrors MulmoClaude's apiCall shape so the View's
 // `apiCall("/api/accounting", { method, body })` calls just work.
@@ -22,7 +29,7 @@ function apiCall<T = unknown>(path: string, opts: { method: "GET" | "POST" | "PU
   // RequestInit spells its fields exact, so a bodyless call omits both keys rather than
   // sending them as undefined.
   const hasBody = opts.body !== undefined;
-  return fetchJson<T>(path, {
+  return fetchJson<T>(path, asDeclared, {
     method: opts.method,
     ...(hasBody ? { headers: { "content-type": "application/json" }, body: JSON.stringify(opts.body) } : {}),
   });

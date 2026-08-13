@@ -9,6 +9,11 @@ export interface GhResult {
   stderr: string;
 }
 
+// What `spawnCollect` reports when `gh` could not be started at all. Named rather than inlined
+// because it is the ONLY way to tell "no CLI here" from "the CLI ran and the forge said no" —
+// a spawn failure produces no exit status and no HTTP status (see forge-failure.ts).
+export const GH_MISSING_STDERR = "gh not found (install the GitHub CLI and run `gh auth login`)";
+
 export function runGh(args: string[]): Promise<GhResult> {
-  return spawnCollect("gh", args, { errorStderr: "gh not found (install the GitHub CLI and run `gh auth login`)" });
+  return spawnCollect("gh", args, { errorStderr: GH_MISSING_STDERR });
 }

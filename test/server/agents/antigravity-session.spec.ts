@@ -5,7 +5,7 @@ import path from "node:path";
 import os from "node:os";
 import {
   antigravityConversationExists,
-  listAntigravitySessions,
+  listAntigravityConversationIds,
   snapshotAntigravitySessions,
   pickFreshAntigravitySession,
   watchForAntigravitySession,
@@ -30,7 +30,7 @@ describe("antigravity-session", () => {
     fs.mkdirSync(path.join(brainDir, uuid2));
     fs.mkdirSync(path.join(brainDir, "not-a-uuid"));
 
-    const sessions = listAntigravitySessions(brainDir);
+    const sessions = listAntigravityConversationIds(brainDir);
     expect(sessions).toContain(uuid1);
     expect(sessions).toContain(uuid2);
     expect(sessions).not.toContain("not-a-uuid");

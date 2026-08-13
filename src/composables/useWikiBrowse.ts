@@ -15,13 +15,13 @@ export type WikiView = { mode: "closed" } | { mode: "index" } | { mode: "page"; 
 
 /** Open the wiki index (the page catalog). */
 export function wikiGotoIndex(): void {
-  router.push({ path: "/wiki", state: overlayOriginState() });
+  void router.push({ path: "/wiki", state: overlayOriginState() });
 }
 
 /** Open the wiki index pre-filtered to a tag (e.g. the Worklog shortcut → `#worklog`).
  *  WikiIndexView reads `?tag=` into its initial selection. */
 export function wikiGotoTag(tag: string): void {
-  router.push({ path: "/wiki", query: { tag }, state: overlayOriginState() });
+  void router.push({ path: "/wiki", query: { tag }, state: overlayOriginState() });
 }
 
 /** Open one page by slug. Unsafe slugs are coerced to the index rather than pushing a
@@ -29,25 +29,25 @@ export function wikiGotoTag(tag: string): void {
 export function wikiGotoPage(slug: string): void {
   const state = overlayOriginState();
   if (!isSafeWikiSlug(slug)) {
-    router.push({ path: "/wiki", state });
+    void router.push({ path: "/wiki", state });
     return;
   }
-  router.push({ path: `/wiki/pages/${encodeURIComponent(slug)}`, state });
+  void router.push({ path: `/wiki/pages/${encodeURIComponent(slug)}`, state });
 }
 
 /** Open the link graph. */
 export function wikiGotoGraph(): void {
-  router.push({ path: "/wiki/graph", state: overlayOriginState() });
+  void router.push({ path: "/wiki/graph", state: overlayOriginState() });
 }
 
 /** Open the lint report. */
 export function wikiGotoLint(): void {
-  router.push({ path: "/wiki/lint", state: overlayOriginState() });
+  void router.push({ path: "/wiki/lint", state: overlayOriginState() });
 }
 
 /** Close the wiki overlay → back to the view it was opened from. */
 export function wikiClose(): void {
-  router.push(overlayReturnPath());
+  void router.push(overlayReturnPath());
 }
 
 /** Current page slug when on a page route, else undefined. */

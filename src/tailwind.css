@@ -38,6 +38,7 @@
   --color-ok: var(--ok);
   --color-warn: var(--warn);
   --color-amber: var(--amber);
+  --color-done: var(--done);
   --color-err: var(--err);
   --color-err-text: var(--err-text);
 

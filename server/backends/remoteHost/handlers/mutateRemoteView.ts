@@ -8,10 +8,12 @@ import { normalizeMutate } from "@mulmoclaude/core/remote-view";
 import { toJsonObject, type CommandHandlers, type JsonObject } from "@mulmoclaude/core/remote-host";
 import { mutateRemoteView, mutateRemoteViewFailureMessage } from "../../remoteView.js";
 import { mutateWriteApplied } from "../../mutateStatus.js";
+import { jsonPayload } from "../jsonPayload.js";
+import { readString } from "../../../../common/readString.js";
 
 export const mutateRemoteViewItem: CommandHandlers["mutateRemoteViewItem"] = async (params: JsonObject) => {
-  const slug = String(params.slug ?? "");
-  const viewId = String(params.viewId ?? "");
+  const slug = readString(params.slug);
+  const viewId = readString(params.viewId);
   const request = normalizeMutate({ op: params.op, id: params.id, patch: params.patch });
   if (!request) throw new Error("invalid mutate request — expected { op: 'update'|'delete', id, patch? }");
   const collection = await loadCollection(slug);
@@ -24,6 +26,6 @@ export const mutateRemoteViewItem: CommandHandlers["mutateRemoteViewItem"] = asy
   }
   if (result.kind !== "ok") throw new Error(mutateRemoteViewFailureMessage(result, slug));
   // Same reason as getRemoteViewItems: `CollectionItem`'s `unknown`-valued index signature is not
-  // provably JSON, though the loader only ever writes JSON into it.
-  return (result.op === "delete" ? { op: "delete", id: result.id } : { op: "update", item: result.item }) as JsonObject;
+  // provably JSON, though the loader only ever writes JSON into it. Converted, not asserted.
+  return jsonPayload(result.op === "delete" ? { op: "delete", id: result.id } : { op: "update", item: result.item });
 };

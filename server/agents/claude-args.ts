@@ -1,6 +1,11 @@
 // Pure builder for the `claude` CLI argv. Kept separate so the exact flag set —
-// especially the GUI-MCP / --strict-mcp-config switch — is unit-testable without
-// spawning a PTY.
+// especially the GUI-MCP switch — is unit-testable without spawning a PTY.
+//
+// It passes NO `--strict-mcp-config`. The flag was welded to `--mcp-config` here, which is how
+// attaching the GUI panel came to also hide the user's claude.ai connectors, `~/.claude.json`,
+// their plugin servers and the directory's own `.mcp.json` (#1338, #1385). Deleted rather than
+// made a parameter: no caller would set it, and a one-valued flag is the weld waiting to be
+// re-made. `rate-limit-probe.ts` still passes it, for a different and measured reason.
 
 export interface ClaudeArgsInput {
   sessionId: string;
@@ -10,18 +15,19 @@ export interface ClaudeArgsInput {
   canResume: boolean;
   settings: string; // hook settings JSON (--settings)
   permissionMode: string; // --permission-mode
-  // true  (single view): attach the in-process GUI MCP, auto-allow its tools, and
-  //        isolate to it with --strict-mcp-config (main's classic behavior).
-  // false (grid dev terminal): no GUI MCP and no --strict-mcp-config, so the user's
-  //        + project's MCP servers load normally — INCLUDING a GUI tool group the
-  //        directory registered itself (see common/toolGroups.ts).
+  // true  (single view, workspace cell): attach the in-process GUI MCP on one url carrying every
+  //        tool, and auto-allow its tools.
+  // false (project-directory cell): no GUI MCP of ours — the directory's own config is where its
+  //        GUI tool groups come from (see common/toolGroups.ts).
+  // Either way the user's + project's MCP servers load: the difference is what WE add, not what
+  // they lose.
   attachGuiMcp: boolean;
   mcpConfig: string; // GUI MCP config JSON (--mcp-config), used only when attachGuiMcp
   // Comma-joined fully-qualified tool names for --allowedTools. Passed in BOTH modes: a grid
   // cell gets no --mcp-config, but still needs its render-group tools pre-approved so they
-  // don't stop at a permission prompt on every call. Verified that --allowedTools alone (no
-  // --mcp-config, no --strict-mcp-config) pre-approves without restricting anything else —
-  // it is an additive allowlist, not "only these".
+  // don't stop at a permission prompt on every call. Verified that --allowedTools alone
+  // pre-approves without restricting anything else — it is an additive allowlist, not "only
+  // these".
   allowedTools: string;
   // What this session runs (#579): an alias (sonnet/opus/haiku) or a backend's own model
   // name. Null leaves the choice to Claude Code. `--model` outranks both the settings
@@ -48,12 +54,15 @@ export function buildClaudeArgs(input: ClaudeArgsInput): string[] {
   // is nowhere near the tmux arg limit that forced the seed prompt out of the argv (#942).
   if (input.appendedPrompt) guiArgs.push("--append-system-prompt", input.appendedPrompt);
   if (input.model) guiArgs.push("--model", input.model);
+  // --mcp-config ADDS our broker; it does not replace anything. `--strict-mcp-config` used to
+  // ride along on this same line, and that is what made "give this session the GUI panel" also
+  // mean "cut it off from the user's own MCP" (#1338, #1385).
   if (input.attachGuiMcp) {
-    guiArgs.push("--mcp-config", input.mcpConfig, "--strict-mcp-config");
+    guiArgs.push("--mcp-config", input.mcpConfig);
   }
-  // Outside the block: --strict-mcp-config is what makes --mcp-config the ONLY source, and a
-  // grid cell wants neither — but it does want its render-group tools auto-allowed, and those
-  // reach it through the user's own MCP config. Empty means nothing to pre-approve.
+  // Outside the block: a grid cell gets no --mcp-config but still wants its render-group tools
+  // auto-allowed, and those reach it through the user's own MCP config. Empty means nothing to
+  // pre-approve.
   if (input.allowedTools) guiArgs.push("--allowedTools", input.allowedTools);
   // LAST, and one flag for the whole list: `--add-dir` is variadic (`<directories...>`), so a
   // flag placed after it would be fine but a VALUE would be swallowed. Keeping it at the end

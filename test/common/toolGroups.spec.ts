@@ -6,6 +6,8 @@ import {
   groupOfTool,
   toolsInGroup,
   toolGroupServerId,
+  GUI_SERVER_ID,
+  LEGACY_GUI_SERVER_IDS,
   AUTO_ALLOWED_TOOLS,
   CANVAS_TOOL_GROUPS,
   TOOL_GROUP_HEADINGS,
@@ -67,6 +69,23 @@ describe("tool groups", () => {
   it("names each group's expected MCP server id", () => {
     expect(toolGroupServerId("render")).toBe("mulmoterminal-render");
     expect(TOOL_GROUPS.map(toolGroupServerId)).toEqual(["mulmoterminal-render", "mulmoterminal-data", "mulmoterminal-media", "mulmoterminal-external"]);
+  });
+
+  // The client prefixes EVERY tool with this id (`mcp__mt__presentChart`,
+  // `mcp-mt-presentChart`), so its length is paid once per tool name in every listing. Short is
+  // the point of the constant; a "clearer" rename here spends that budget again.
+  it("keeps the single-view server id short, and distinct from every group id", () => {
+    expect(GUI_SERVER_ID).toBe("mt");
+    expect(GUI_SERVER_ID.length).toBeLessThanOrEqual(4);
+    expect(TOOL_GROUPS.map(toolGroupServerId)).not.toContain(GUI_SERVER_ID);
+  });
+
+  // Not live, and must not be dropped: the reserved-id list and the Antigravity config merge both
+  // recognise our own past output by these, so removing one lets a stale entry outlive us (or lets
+  // a user claim an id an older session still writes).
+  it("remembers the ids the single-view server shipped under before", () => {
+    expect(LEGACY_GUI_SERVER_IDS).toContain("mulmoterminal-gui");
+    expect(LEGACY_GUI_SERVER_IDS).not.toContain(GUI_SERVER_ID);
   });
 
   // Per TOOL, not per group: "which tools may this directory reach" and "which may run without

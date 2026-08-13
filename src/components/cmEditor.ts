@@ -35,14 +35,22 @@ const EXTENSIONS_BY_KIND = {
   sql: ["sql"],
 } as const;
 
+// `Object.entries` widens the table's keys back to `string`; this carries them back into the type
+// without asserting, so a kind added to the table above is picked up here with no second list.
+const isLangKind = (kind: string): kind is LangKind => Object.prototype.hasOwnProperty.call(EXTENSIONS_BY_KIND, kind);
+
 // Pick a syntax mode from a filename's extension. Only the modes we bundle are
 // recognised; everything else edits as plain text.
 export function langKindForFilename(name: string): LangKind {
   const dot = name.lastIndexOf(".");
   if (dot < 0) return "text"; // no extension (Makefile, LICENSE, …)
   const ext = name.slice(dot + 1).toLowerCase();
-  const found = Object.entries(EXTENSIONS_BY_KIND).find(([, exts]) => (exts as readonly string[]).includes(ext));
-  return found ? (found[0] as LangKind) : "text";
+  // Over the table's own keys rather than Object.entries, which widens them back to `string` —
+  // the two assertions this replaces were both undoing that widening.
+  for (const [kind, exts] of Object.entries(EXTENSIONS_BY_KIND)) {
+    if (exts.some((candidate: string) => candidate === ext) && isLangKind(kind)) return kind;
+  }
+  return "text";
 }
 
 // How each mode is obtained. The three that were here first stay bundled — markdown, JS/TS and

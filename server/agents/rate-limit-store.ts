@@ -9,6 +9,7 @@
 // Codex is not in that bargain — its windows are read from a rollout file — so it is refreshed
 // whenever asked and never gates on staleness.
 import type { ClaudeStatus, RateLimits } from "./statusline.js";
+import type { ProbeStall } from "./probe-stall.js";
 
 export type RateLimitAgent = "claude" | "codex";
 
@@ -22,6 +23,19 @@ export type RateLimitSnapshot = Partial<Record<RateLimitAgent, AgentRateLimits>>
 // How old a reading may be before asking is worth another query. The 5h window moves over hours,
 // so a minute of lag costs the reader nothing while a tighter loop would spend real budget.
 export const RATE_LIMIT_STALE_MS = 10 * 60_000;
+
+// How old a reading may be and still be DRAWN. A different question from the one above — that one
+// decides when to spend a query, this one decides whether the number is still a fact — and the gap
+// between them is where #1293 lived: while probing was broken the header went on showing the last
+// reading, and a 7d window is only dropped when its own reset passes, so a figure could be days old
+// and read as current. Usage only grows within a window, so an old percentage is not merely
+// imprecise, it understates, at exactly the moment the reader is checking whether they are near the
+// limit.
+//
+// An hour because the failure backoff caps there (PROBE_RETRY_MAX_MS): a reading older than that
+// means at least one whole retry cycle produced nothing, which is precisely when the gauge should
+// stop vouching for it and say so instead.
+export const CLAUDE_READING_MAX_AGE_MS = 60 * 60_000;
 
 // Why a probe stopped, when it did not bring windows back. Kept apart from "how old is the
 // reading" because they answer different questions: staleness decides whether a fresh probe is
@@ -45,7 +59,12 @@ export type ProbeState =
   | { kind: "no-windows" }
   // Asked, and nothing came back before the timeout: a trust prompt nobody answered, an expired
   // login, a machine too slow to boot the TUI in 90s. Retried with a widening gap.
-  | { kind: "no-report"; failures: number };
+  //
+  // `stall` is what the probe's own terminal proved about which of those it was (probe-stall.ts).
+  // Only the trust prompt can be named, and naming it matters more than it looks: the probe used to
+  // answer that dialog by accident, so it never surfaced — now it waits, correctly, and a user with
+  // an untrusted workspace needs to be told rather than left with a permanent `n/a` (#1293).
+  | { kind: "no-report"; failures: number; stall: ProbeStall };
 
 // The gap after a failed probe, doubling each time so a broken environment costs a query an hour
 // rather than one every 90 seconds. #1011: the bug was that there was no gap at all — a probe that
@@ -112,9 +131,10 @@ const answeredDuringAttempt = (lastStatusLineAt_ms: number | null, lastProbeAt_m
   lastStatusLineAt_ms !== null && (lastProbeAt_ms === null || lastStatusLineAt_ms >= lastProbeAt_ms);
 
 /** One more consecutive silence. */
-const afterSilence = (state: ProbeState): ProbeState => ({
+const afterSilence = (state: ProbeState, stall: ProbeStall): ProbeState => ({
   kind: "no-report",
   failures: state.kind === "no-report" ? state.failures + 1 : 1,
+  stall,
 });
 
 // Only `no-claude` is the availability check's to set OR clear. Any other verdict is about
@@ -123,6 +143,19 @@ const afterAvailability = (state: ProbeState, available: boolean): ProbeState =>
   if (!available) return { kind: "no-claude" };
   return state.kind === "no-claude" ? { kind: "ok" } : state;
 };
+
+/** Claude's windows if we can still vouch for them, null once the reading is too old to draw.
+ *
+ *  Claude only, and the asymmetry is deliberate: Codex's windows are re-read from its rollout file
+ *  on every poll at no cost, so there is no "we could not measure" state for them to fall into. The
+ *  Claude side is a query the server may be unable to spend. */
+export function currentClaudeLimits(snapshot: RateLimitSnapshot, now_ms: number): RateLimits | null {
+  const held = snapshot.claude;
+  if (!held) return null;
+  // Inclusive, so the rule is exactly the one written above it: a reading is dropped when it is
+  // OLDER than the age, not when it reaches it (Codex review).
+  return now_ms - held.reportedAt_ms <= CLAUDE_READING_MAX_AGE_MS ? held.limits : null;
+}
 
 /** Told after a report that carried windows. The agent is part of it because the two callers want
  *  different things from it: the cache wants the snapshot, while the probe wants to know its own
@@ -203,14 +236,18 @@ export function createRateLimitStore(initial: RateLimitSnapshot = {}, onChange: 
      *  Decided by comparing timestamps rather than by reading the state: a store that has never
      *  probed is also `ok`, so treating `ok` as "it worked" would swallow the FIRST failure — and
      *  the first failure is the one that starts the loop this fix exists for (#1011). */
-    noteProbeFailedIfNoReport(now_ms: number): void {
-      if (answeredDuringAttempt(lastStatusLineAt_ms, lastProbeAt_ms)) return;
+    noteProbeFailedIfNoReport(now_ms: number, stall: ProbeStall = "unknown"): boolean {
+      if (answeredDuringAttempt(lastStatusLineAt_ms, lastProbeAt_ms)) return false;
       // The gap is measured from when the attempt ENDED, not when it began. A probe times out
       // after PROBE_TIMEOUT_MS, which is the same 90 seconds as the first retry delay — so
       // measuring from the start would let the first retry fire the instant the timeout landed,
       // reproducing the exact cadence reported in #1011 for one more cycle.
       lastProbeAt_ms = now_ms;
-      state = afterSilence(state);
+      state = afterSilence(state, stall);
+      // Returned so the caller can keep the evidence for exactly the probes that failed. A caller
+      // cannot work this out from the state: `no-report` is also what the PREVIOUS failure left
+      // behind, so saving on that would overwrite the useful screen with a successful probe's.
+      return true;
     },
     /** Whether `claude` can be launched at all, told to the store by whoever can look.
      *

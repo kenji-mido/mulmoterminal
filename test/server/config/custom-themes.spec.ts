@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import { sanitizeCustomThemes, toPublicAppConfig, emptyConfig, mergeConfigUpdate } from "../../../server/config/app-config";
 import { THEME_VAR_KEYS } from "../../../common/themeVars";

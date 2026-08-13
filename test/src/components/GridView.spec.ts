@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 import { router } from "../../../src/router";
 import { defineComponent, h, KeepAlive, type Component } from "vue";
@@ -105,8 +105,14 @@ const SettingsStub = {
 // A toolbar stub that lets us open the settings modal (GridView: @settings="showSettings = true").
 const ToolbarStub = { name: "AppToolbar", emits: ["settings"], template: '<button class="open-settings" @click="$emit(\'settings\')" />' };
 
+// At module scope, not inside a test. Measured on this file: the import was 2132ms while the
+// mount it feeds was 18ms — so the first test to run was billed two seconds of module loading
+// against `testTimeout`, and on a loaded runner that is what crossed 15s (#1314). Collection
+// has no per-test budget, so the same work costs nothing here.
+const GridView = (await import("../../../src/components/GridView.vue")).default;
+
 const mountGrid = async () => {
-  const w = mount((await import("../../../src/components/GridView.vue")).default, {
+  const w = mount(GridView, {
     global: { stubs: { TerminalGrid: true, AppToolbar: ToolbarStub, SettingsModal: SettingsStub } },
   });
   await flushPromises(); // onMounted loadConfig
@@ -136,7 +142,7 @@ describe("GridView roster ordering (#720)", () => {
         sortMode: "auto",
       }),
     );
-    const w = mount((await import("../../../src/components/GridView.vue")).default, {
+    const w = mount(GridView, {
       global: { stubs: { TerminalGrid: OrderStub, AppToolbar: ToolbarStub, SettingsModal: SettingsStub } },
     });
     await flushPromises();
@@ -166,7 +172,7 @@ describe("GridView roster ordering (#720)", () => {
         sortMode: "manual",
       }),
     );
-    const w = mount((await import("../../../src/components/GridView.vue")).default, {
+    const w = mount(GridView, {
       global: { stubs: { TerminalGrid: OrderStub, AppToolbar: ToolbarStub, SettingsModal: SettingsStub } },
     });
     await flushPromises();
@@ -190,7 +196,7 @@ const ListModeGridStub = { name: "TerminalGrid", props: ["listMode", "expandedUi
 describe("GridView view toggle wiring", () => {
   it("shows the toggle only while zoomed and flips the grid's listMode when the header fires toggle-view", async () => {
     localStorage.setItem("grid_v2", JSON.stringify({ cells: [{ uid: 10, session: IDS.idleA, cwd: "/w" }], expanded: 10, page: 0, sortMode: "manual" }));
-    const w = mount((await import("../../../src/components/GridView.vue")).default, {
+    const w = mount(GridView, {
       global: { stubs: { TerminalGrid: ListModeGridStub, AppToolbar: ViewToggleToolbarStub, SettingsModal: SettingsStub } },
     });
     await flushPromises();
@@ -209,7 +215,7 @@ describe("GridView view toggle wiring", () => {
 
   it("hides the toggle when nothing is expanded", async () => {
     localStorage.setItem("grid_v2", JSON.stringify({ cells: [{ uid: 10, session: IDS.idleA, cwd: "/w" }], expanded: null, page: 0, sortMode: "manual" }));
-    const w = mount((await import("../../../src/components/GridView.vue")).default, {
+    const w = mount(GridView, {
       global: { stubs: { TerminalGrid: ListModeGridStub, AppToolbar: ViewToggleToolbarStub, SettingsModal: SettingsStub } },
     });
     await flushPromises();
@@ -231,7 +237,7 @@ describe("GridView guide help (empty state)", () => {
 
     // A running session cell (occupied) — the newcomer hint must step out of the way.
     localStorage.setItem("grid_v2", JSON.stringify({ cells: [{ uid: 1, session: IDS.idleA, cwd: "/w" }], expanded: null, page: 0, sortMode: "manual" }));
-    const running = mount((await import("../../../src/components/GridView.vue")).default, {
+    const running = mount(GridView, {
       global: { stubs: { TerminalGrid: true, AppToolbar: ToolbarStub, SettingsModal: SettingsStub } },
     });
     await flushPromises();
@@ -273,6 +279,7 @@ vi.mock("../../../src/composables/useTerminalConnections", async (orig) => ({
 }));
 
 import { setActiveKeymap } from "../../../src/composables/activeKeymap";
+import { resetImeComposition } from "../../../src/composables/imeComposition";
 import { PAGE_SIZE } from "../../../src/components/gridTabs";
 
 const uuid = (n: number) => `${String(n % 10).repeat(8)}-aaaa-aaaa-aaaa-aaaaaaaaaaaa`;
@@ -307,7 +314,7 @@ const mountShortcutGrid = async (count: number, extra: Record<string, unknown> =
       ...extra,
     }),
   );
-  const w = mount((await import("../../../src/components/GridView.vue")).default, {
+  const w = mount(GridView, {
     global: { stubs: { TerminalGrid: ShortcutGridStub, AppToolbar: ToolbarStub, SettingsModal: SettingsStub } },
   });
   await flushPromises();
@@ -321,6 +328,11 @@ describe("GridView keyboard shortcuts (#829)", () => {
   beforeEach(() => {
     focused.length = 0;
   });
+
+  // In a hook, not at the end of the test that opens a composition: the IME state is module-level,
+  // so a failing assertion before the reset would carry an open composition into the next test and
+  // silence its keys instead.
+  afterEach(() => resetImeComposition());
 
   it("does nothing at all when no keymap is configured — shortcuts are opt-in", async () => {
     // `null`, not `undefined` — passing undefined to a defaulted parameter selects the default.
@@ -429,6 +441,28 @@ describe("GridView keyboard shortcuts (#829)", () => {
     w.unmount();
   });
 
+  // A key confirming an IME candidate belongs to the IME, not to a shortcut. `gridShortcutFor`
+  // already refuses `isComposing`, so the case worth pinning is SAFARI's: compositionend fires
+  // BEFORE the confirming keydown, so the flag is false by then and the shortcut used to run
+  // (#1353). Anywhere the grid can hear — the shortcut listener is on `window`.
+  it("leaves the key that confirms an IME candidate alone", async () => {
+    const w = await mountShortcutGrid(4);
+    await press("F8"); // enlarge, so zoom-next has somewhere to go
+    const before = gridOf(w).props("expandedUid");
+
+    window.dispatchEvent(new Event("compositionstart"));
+    window.dispatchEvent(new Event("compositionend"));
+    await press("PageDown");
+
+    expect(gridOf(w).props("expandedUid")).toBe(before);
+
+    // And once the composition is behind us, the same key works again.
+    resetImeComposition();
+    await press("PageDown");
+    expect(gridOf(w).props("expandedUid")).not.toBe(before);
+    w.unmount();
+  });
+
   it("ignores an unbound key", async () => {
     const w = await mountShortcutGrid(4);
     await press("F7");
@@ -462,7 +496,7 @@ describe("GridView skill launch (#1111)", () => {
       }
       return realFetch(url, init);
     }) as typeof fetch;
-    const w = mountActivated((await import("../../../src/components/GridView.vue")).default, {
+    const w = mountActivated(GridView, {
       global: { stubs: { TerminalGrid: CellsStub, AppToolbar: ToolbarStub, SettingsModal: SkillSettingsStub } },
     });
     await flushPromises();
@@ -529,7 +563,7 @@ describe("GridView skill launch — capacity and placement (#1111)", () => {
       if (String(url).includes("spawnBackgroundChat")) return { ok: true, json: async () => ({ jsonData: { chatId: SPAWNED } }) } as Response;
       return realFetch(url, init);
     }) as typeof fetch;
-    const w = mountActivated((await import("../../../src/components/GridView.vue")).default, {
+    const w = mountActivated(GridView, {
       global: { stubs: { TerminalGrid: CellsStub, AppToolbar: ToolbarStub, SettingsModal: SkillSettingsStub } },
     });
     await flushPromises();
@@ -570,7 +604,7 @@ describe("GridView skill launch — capacity and placement (#1111)", () => {
         return { ok: true, json: async () => ({ sessions: [{ id: UNPLACED, agent: "codex", cwd: "/proj" }] }) } as Response;
       return realFetch(url, init);
     }) as typeof fetch;
-    const w = mountActivated((await import("../../../src/components/GridView.vue")).default, {
+    const w = mountActivated(GridView, {
       global: { stubs: { TerminalGrid: CellsStub, AppToolbar: ToolbarStub, SettingsModal: SkillSettingsStub } },
     });
     await flushPromises();
@@ -597,7 +631,7 @@ describe("GridView skill launch — capacity and placement (#1111)", () => {
       if (String(url).includes("/api/sessions/unplaced")) return { ok: true, json: async () => ({ sessions: rows }) } as Response;
       return realFetch(url, init);
     }) as typeof fetch;
-    const w = mountActivated((await import("../../../src/components/GridView.vue")).default, {
+    const w = mountActivated(GridView, {
       global: { stubs: { TerminalGrid: CellsStub, AppToolbar: ToolbarStub, SettingsModal: SkillSettingsStub } },
     });
     await flushPromises(); // the mount sweep: nothing waiting yet
@@ -632,7 +666,7 @@ describe("GridView skill launch — capacity and placement (#1111)", () => {
       }
       return realFetch(url, init);
     }) as typeof fetch;
-    const w = mountActivated((await import("../../../src/components/GridView.vue")).default, {
+    const w = mountActivated(GridView, {
       global: { stubs: { TerminalGrid: CellsStub, AppToolbar: ToolbarStub, SettingsModal: SkillSettingsStub } },
     });
     await flushPromises(); // the mount sweep is now parked inside its fetch
@@ -659,7 +693,7 @@ describe("GridView skill launch — capacity and placement (#1111)", () => {
       if (String(url).includes("/api/sessions/unplaced")) return { ok: true, json: async () => ({ sessions: rows }) } as Response;
       return realFetch(url, init);
     }) as typeof fetch;
-    const w = mountActivated((await import("../../../src/components/GridView.vue")).default, {
+    const w = mountActivated(GridView, {
       global: { stubs: { TerminalGrid: CellsStub, AppToolbar: ToolbarStub, SettingsModal: SkillSettingsStub } },
     });
     await flushPromises();
@@ -685,7 +719,7 @@ describe("GridView skill launch — capacity and placement (#1111)", () => {
       }
       return realFetch(url, init);
     }) as typeof fetch;
-    const w = mountActivated((await import("../../../src/components/GridView.vue")).default, {
+    const w = mountActivated(GridView, {
       global: { stubs: { TerminalGrid: CellsStub, AppToolbar: ToolbarStub, SettingsModal: SkillSettingsStub } },
     });
     await flushPromises();
@@ -714,7 +748,6 @@ describe("GridView skill launch — capacity and placement (#1111)", () => {
       return realFetch(url, init);
     }) as typeof fetch;
 
-    const GridView = (await import("../../../src/components/GridView.vue")).default;
     const holder = defineComponent({
       props: { show: { type: Boolean, default: true } },
       render() {
@@ -747,7 +780,7 @@ describe("GridView skill launch — capacity and placement (#1111)", () => {
         return { ok: true, json: async () => ({ sessions: [{ id: DUPE, agent: "claude", cwd: "/w" }] }) } as Response;
       return realFetch(url, init);
     }) as typeof fetch;
-    const w = mountActivated((await import("../../../src/components/GridView.vue")).default, {
+    const w = mountActivated(GridView, {
       global: { stubs: { TerminalGrid: CellsStub, AppToolbar: ToolbarStub, SettingsModal: SkillSettingsStub } },
     });
     await flushPromises();
@@ -772,7 +805,7 @@ describe("GridView skill launch — capacity and placement (#1111)", () => {
         return () => {};
       },
     };
-    const w = mountActivated((await import("../../../src/components/GridView.vue")).default, {
+    const w = mountActivated(GridView, {
       global: { stubs: { TerminalGrid: CanvasGridStub, AppToolbar: ToolbarStub, SettingsModal: SkillSettingsStub } },
     });
     await flushPromises();
@@ -805,7 +838,7 @@ describe("GridView skill launch — capacity and placement (#1111)", () => {
         return () => {};
       },
     };
-    const w = mountActivated((await import("../../../src/components/GridView.vue")).default, {
+    const w = mountActivated(GridView, {
       global: { stubs: { TerminalGrid: CanvasGridStub, AppToolbar: ToolbarStub, SettingsModal: SkillSettingsStub } },
     });
     await flushPromises();
@@ -830,7 +863,7 @@ const ShellLaunchStub = {
 
 describe("GridView launcher picks (#1114)", () => {
   it("turns the cell into a shell launcher cell when the form picks Shell", async () => {
-    const w = mount((await import("../../../src/components/GridView.vue")).default, {
+    const w = mount(GridView, {
       global: { stubs: { TerminalGrid: ShellLaunchStub, AppToolbar: ToolbarStub, SettingsModal: SettingsStub } },
     });
     await flushPromises();

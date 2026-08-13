@@ -1,7 +1,8 @@
+// @vitest-environment node
 import { canSymlink } from "../../support/canSymlink.js";
 import { makeTempDir } from "../../support/tempDir.js";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { writeFileSync, existsSync, symlinkSync } from "node:fs";
+import { writeFileSync, readFileSync, existsSync, symlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { rmDirRetrying, GIT_TEST_TIMEOUT_MS } from "./wtTestUtil.js";
@@ -19,6 +20,7 @@ import {
   branchStem,
   worktreeDirName,
   baseStartPoint,
+  issueWorktree,
 } from "../../../server/git/worktrees";
 import { issueFromAnchoredBranch } from "../../../common/prPhase";
 
@@ -151,6 +153,50 @@ describe("git worktree lifecycle", () => {
     GIT_TEST_TIMEOUT_MS,
   );
 
+  // #1317. `.mulmoterminal.json` is gitignored, so a worktree used to start with no config at
+  // all: the project's colours, name, model and grid rank all stopped at the main checkout.
+  it.skipIf(!hasGit)(
+    "gives each new worktree the project's settings, a hue further round each time",
+    async () => {
+      writeFileSync(path.join(repo, ".gitignore"), ".mulmoterminal.json\n");
+      const project = { name: "proj", headerColor: "#2d4ea9", headerTextColor: "#ffffff", orderPriority: 30, model: "qwen3:8b" };
+      writeFileSync(path.join(repo, ".mulmoterminal.json"), JSON.stringify(project));
+      await git(["add", ".gitignore"], repo);
+      await git(["commit", "-m", "ignore the local config"], repo);
+
+      const first = await createWorktree(repo, "first");
+      if (!first) throw new Error("expected a worktree");
+      const config = (dir: string): unknown => JSON.parse(readFileSync(path.join(dir, ".mulmoterminal.json"), "utf8"));
+      expect(config(first.path)).toEqual({ name: "proj", model: "qwen3:8b", headerColor: "#2d35a9", headerTextColor: "#ffffff", orderPriority: 31 });
+      // The file we just wrote must not read as a change. isDirty is what removeWorktree
+      // consults, so a worktree dirtied by our own write could no longer be cleaned up.
+      expect(await isDirty(first.path)).toBe(false);
+
+      const second = await createWorktree(repo, "second");
+      if (!second) throw new Error("expected a second worktree");
+      expect(config(second.path)).toMatchObject({ headerColor: "#3e2da9" });
+
+      // The failure the check-ignore guard exists to prevent, pinned end to end: a worktree
+      // holding a config we wrote is still removable WITHOUT force. Asserting isDirty alone
+      // would miss it — `git worktree remove` has its own idea of clean.
+      expect(await removeWorktree(repo, second.path, { deleteBranch: true })).toEqual({ ok: true });
+      expect(existsSync(second.path)).toBe(false);
+    },
+    GIT_TEST_TIMEOUT_MS,
+  );
+
+  it.skipIf(!hasGit)(
+    "writes no config where git would not ignore it",
+    async () => {
+      writeFileSync(path.join(repo, ".mulmoterminal.json"), JSON.stringify({ headerColor: "#2d4ea9" }));
+      const wt = await createWorktree(repo, "unignored");
+      if (!wt) throw new Error("expected a worktree");
+      expect(existsSync(path.join(wt.path, ".mulmoterminal.json"))).toBe(false);
+      expect(await isDirty(wt.path)).toBe(false);
+    },
+    GIT_TEST_TIMEOUT_MS,
+  );
+
   it.skipIf(!hasGit)(
     "anchors the branch to an issue, and still puts the worktree directly under the managed root",
     async () => {
@@ -276,6 +322,44 @@ describe("git worktree lifecycle", () => {
       expect(anchored.branch).toBe("issue/1171-x-2"); // suffixed because the directory was taken
       expect(anchored.path).not.toBe(unanchored.path);
       expect(existsSync(anchored.path)).toBe(true);
+    },
+    GIT_TEST_TIMEOUT_MS,
+  );
+
+  // #1219: whether this issue already has a tree here. The suffix case is the one that matters —
+  // those are exactly the second worktrees this bug produced, and they must be found and reopened
+  // rather than joined by a third.
+  it.skipIf(!hasGit)(
+    "finds the worktree an issue already has, suffix and all",
+    async () => {
+      expect(await issueWorktree(repo, 1171)).toBeNull();
+
+      await createWorktree(repo, "1171 x"); // agent/1171-x — takes the directory name
+      const anchored = await createWorktree(repo, "x", 1171); // issue/1171-x-2
+      if (!anchored) throw new Error("expected a worktree");
+
+      const found = await issueWorktree(repo, 1171);
+      expect(found?.branch).toBe("issue/1171-x-2");
+      expect(found?.path).toBe(anchored.path);
+      // The unanchored `agent/1171-x` sitting beside it names no issue, so it is not an answer
+      // here — its number came from a task the user typed, not from this app anchoring anything.
+      expect(await issueWorktree(repo, 1172)).toBeNull();
+    },
+    GIT_TEST_TIMEOUT_MS,
+  );
+
+  // git keeps reporting a worktree whose directory was deleted by hand until somebody prunes.
+  // The caller STARTS A SESSION in what this returns, so a stale entry would put an agent in a
+  // directory that is not there — where cutting a fresh tree is what should happen.
+  it.skipIf(!hasGit)(
+    "does not answer with a worktree whose directory has been deleted",
+    async () => {
+      const wt = await createWorktree(repo, "gone", 1171);
+      if (!wt) throw new Error("expected a worktree");
+      expect(await issueWorktree(repo, 1171)).not.toBeNull();
+
+      rmDirRetrying(wt.path);
+      expect(await issueWorktree(repo, 1171)).toBeNull();
     },
     GIT_TEST_TIMEOUT_MS,
   );

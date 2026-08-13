@@ -1,6 +1,8 @@
 import { reactive, watch, onMounted, onUnmounted, type Ref } from "vue";
 import { usePubSub } from "./usePubSub";
-import { parseSessionActivityPayload, type CellActivity } from "./sessionActivity";
+import { parseSessionActivityPayload, readCellActivity, type CellActivity } from "./sessionActivity";
+import { jsonBody } from "../jsonBody";
+import { fetchWithTimeout } from "../utils/fetchWithTimeout";
 
 // Live attention state (working / waiting / event) for a set of grid cell sessions,
 // keyed by session id. Unlike the sidebar's /api/sessions list this includes
@@ -36,14 +38,17 @@ export function useGridActivity(sessionIds: Ref<string[]>) {
     const pushed: unknown[] = [];
     pushedDuringSeed = pushed;
     try {
-      const res = await fetch(`/api/activity?ids=${encodeURIComponent(ids.join(","))}`);
+      const res = await fetchWithTimeout(`/api/activity?ids=${encodeURIComponent(ids.join(","))}`);
       // Overtaken while we waited: this answer is older than what is on screen. Returning
       // also leaves the newer seed's record alone — it is the one that will replay.
       if (seedId !== latestSeed || !res.ok) return;
-      const data: Record<string, CellActivity> = await res.json();
+      // Each row goes through the SAME reader the live channel uses; the seed used to take the
+      // whole map as CellActivity on the strength of the annotation alone.
+      const data = await jsonBody(res);
       if (seedId !== latestSeed) return;
-      for (const [id, a] of Object.entries(data)) {
-        activity.set(id, { working: !!a.working, waiting: !!a.waiting, event: a.event ?? null });
+      for (const [id, raw] of Object.entries(data)) {
+        const a = readCellActivity(raw);
+        if (a) activity.set(id, a);
       }
       // Stop recording before replaying, or each replayed update records itself again.
       if (pushedDuringSeed === pushed) pushedDuringSeed = null;

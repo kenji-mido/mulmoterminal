@@ -1,8 +1,9 @@
 ---
-title: Feature reference
+title: Feature reference — parallel terminals, worktrees, cost, phone
+nav_title: Feature reference
 layout: default
 parent: English
-nav_order: 4
+nav_order: 5
 description: Every MulmoTerminal feature: parallel terminals, the cockpit roster, git worktrees, the GUI panel, phone push, and Claude Code / Codex support.
 ---
 
@@ -21,10 +22,10 @@ MulmoTerminal — a browser terminal for parallel Claude Code and Codex agents �
 | Feature | Description |
 |---|---|
 | Parallel terminals | Up to **9 cells** per page; overflow adds a new **page (tab)**. Cells auto-sort by state (needs-you first) |
-| Status colors + sound | Working (blue) / **awaiting input (amber)** / **done, review it (blue ring)** / idle. Know you've been "called" without watching |
+| Status colors + sound | Working (blue) / **awaiting input (amber)** / **done, review it (green ring)** / idle. Know you've been "called" without watching |
 | Cockpit roster | While zoomed with **Expand**, a **one-row-per-session text list** beside the terminal (directory, AI summary, prompt, latest reply, status word). Click a row to swap; **Show list roster / Show thumbnail strip** toggles the thumbnail filmstrip |
 | Keyboard: switch the enlarged terminal | While zoomed, bound keys walk the enlargement along the on-screen order. **Opt-in — nothing is bound by default**; add a `keymap` to `config.json` ([config](config.html#keymap)) |
-| Rate-limit gauge | The **5h / 7d** windows your Claude (and Codex) subscription shares across every session, always visible in the grid header. Running many agents is what burns them fastest, and nothing else in the app showed them. Shown only once an agent reports; hover for when each window resets. Whenever more than one thing is on the row, each set of figures carries its tool's mark, so `claude usage n/a` beside a `7d` figure cannot be mistaken for Claude's own. **When it cannot be shown, it says why** — no `claude` on PATH, an account with no windows (API-key billing), or a check that got no answer and is retrying |
+| Rate-limit gauge | The **5h / 7d** windows your Claude (and Codex) subscription shares across every session, always visible in the grid header. Running many agents is what burns them fastest, and nothing else in the app showed them. Shown only once an agent reports; hover for when each window resets. Whenever more than one thing is on the row, each set of figures carries its tool's mark, so `claude usage n/a` beside a `7d` figure cannot be mistaken for Claude's own. **When it cannot be shown, it says why** — no `claude` on PATH, an account with no windows (API-key billing), a check waiting on Claude Code's trust prompt (run `claude` in that folder once and accept it), or one that got no answer and is retrying. A reading it can no longer vouch for is dropped rather than drawn as current |
 | Add / close / reorder cells | **New terminal**, each cell's close button, and **Move left / Move right** in reorder mode. Ordering is **auto** (attention first), **manual**, or **priority** (what each project declared in `orderPriority` — [config](config.html#order-priority)) |
 | Set a terminal aside | The moon button in a cell's header **sinks it** — the tile, its filmstrip thumbnail and its roster row all fade, and the working dot stops pulsing. It stays **connected and keeps its whole history**: this is the alternative to `/clear`-ing a cell you are done with for now, which resets the conversation to change how the cell looks. Survives a reload. **Enlarging it keeps it faded**, so you can read a set-aside session without waking it — the roster row keeps its blue "you are here" edge either way. **Typing into it wakes it** — clicking or scrolling to read it does not, even though a mouse-tracking agent receives those as input. Nothing has to be undone by hand. A cell that **stops for a permission prompt comes back to full strength on its own**; a merely finished turn does not, since that is what setting it aside leads to |
 | Six kinds of notification sound | Besides finished and input-waiting: a Run cell succeeding or failing, a session exiting, and a PR going red. **Only the first two are on by default**; the rest are opt-in ([config](config.html#sounds)) |

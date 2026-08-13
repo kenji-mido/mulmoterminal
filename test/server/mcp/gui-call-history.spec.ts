@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect, vi } from "vitest";
 
 import { brokerRecordsGuiCalls, guiCallRecorderFor, historyIsGuiOnly, type ToolCallSink } from "../../../server/mcp/gui-call-history.js";

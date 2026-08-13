@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import { sanitizeDraftText, sanitizeMultilineText } from "../../../server/session/pty-text.js";
 

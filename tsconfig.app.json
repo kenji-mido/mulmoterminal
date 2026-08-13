@@ -9,6 +9,13 @@
     /* See tsconfig.server.json for why: `field?: T` must mean "key absent", not
        "key present holding undefined". */
     "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    /* Added in #1301, both measured at 0 across app / server / test before going in. */
+    "useUnknownInCatchVariables": true,
+    "noImplicitOverride": true,
+    /* On here and in node, where #1348 measured it at 0. Deliberately NOT on for the server — see
+       tsconfig.server.json for the decision and the numbers behind it. */
+    "noImplicitReturns": true,
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "erasableSyntaxOnly": true,

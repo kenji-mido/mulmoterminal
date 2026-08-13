@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { createTranslationWorker, submitTranslation, failPendingTranslation } from "../../../server/session/translation-worker.js";
 import { hiddenSessions, translationWorkerIds, knownSessions, activity, lastPrompts } from "../../../server/session/registry.js";
@@ -80,11 +81,12 @@ describe("translateViaHiddenChat", () => {
     await expect(h.translateViaHiddenChat("ja", ["a", "b"])).rejects.toThrow(/2 inputs/);
   });
 
-  it("rejects a non-array answer, which arrives normalized to an empty list", async () => {
-    // submitTranslation substitutes [] for anything that isn't an array, so a junk
-    // payload reaches validation as a count mismatch rather than as a bad type.
+  it("rejects a non-array answer, and says it was a non-array", async () => {
+    // submitTranslation passes the worker's answer through untouched, so validation sees what
+    // actually arrived. It used to substitute [], which made a junk payload report itself as
+    // "0 strings" — a count mismatch, and the wrong thing to go looking for.
     const h = harness((id) => submitTranslation(id, "not an array"));
-    await expect(h.translateViaHiddenChat("ja", ["a"])).rejects.toThrow(/0 strings for 1 inputs/);
+    await expect(h.translateViaHiddenChat("ja", ["a"])).rejects.toThrow(/a non-array for 1 inputs/);
   });
 
   it("retries a fresh worker and succeeds on a later attempt", async () => {

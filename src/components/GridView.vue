@@ -46,6 +46,7 @@ import {
 import { activityStatus, type AttentionStatus } from "./attentionStatus";
 import { gridShortcutFor, isEditableTarget, type GridShortcut } from "../composables/gridShortcut";
 import { adoptedGridState, fetchServerGridState, saveServerGridState, parseServerGridState, normalizedGridJson, normalizeRawGridJson } from "./gridStateServer";
+import { isImeConfirming } from "../composables/imeComposition";
 import { useCaptureKeydown } from "../composables/useCaptureKeydown";
 import { getActiveKeymap } from "../composables/activeKeymap";
 import { preferredLaunchDir } from "./launchDir";
@@ -67,6 +68,9 @@ import { router } from "../router";
 import { usePubSub } from "../composables/usePubSub";
 import type { LaunchAgent } from "../../common/launchAgent";
 import type { LaunchPick } from "./launchers";
+import { isRecord } from "../../common/isRecord";
+import { isDrawnResult } from "../utils/drawnResult";
+import { fetchWithTimeout, SLOW_COMMAND_TIMEOUT_MS } from "../utils/fetchWithTimeout";
 
 // The multi-terminal grid view, shown at /terminals. Leaving the grid is just a
 // route push from the shared toolbar (Chat / Collections / a favorite), so there's
@@ -226,11 +230,11 @@ async function seedMeta(id: string, cwd: string | null) {
   latestMetaSeed.set(id, seed);
   try {
     const query = cwd ? `?cwd=${encodeURIComponent(cwd)}` : "";
-    const res = await fetch(`/api/session/${id}${query}`);
+    const res = await fetchWithTimeout(`/api/session/${id}${query}`);
     if (!res.ok || latestMetaSeed.get(id) !== seed) return;
-    const d = (await res.json()) as Partial<SessionMetaView>;
+    const d: unknown = await res.json();
     if (latestMetaSeed.get(id) !== seed) return;
-    sessionMeta.set(id, mergeSessionMeta(sessionMeta.get(id) ?? EMPTY_SESSION_META, d));
+    sessionMeta.set(id, mergeSessionMeta(sessionMeta.get(id) ?? EMPTY_SESSION_META, isRecord(d) ? d : {}));
   } catch {
     // best-effort — the next poll retries
   }
@@ -245,14 +249,15 @@ async function seedPhase(cwd: string) {
   const seed = (latestPhaseSeed.get(cwd) ?? 0) + 1;
   latestPhaseSeed.set(cwd, seed);
   try {
-    const res = await fetch(`/api/pr-phase?cwd=${encodeURIComponent(cwd)}`);
+    const res = await fetchWithTimeout(`/api/pr-phase?cwd=${encodeURIComponent(cwd)}`, undefined, SLOW_COMMAND_TIMEOUT_MS);
     if (!res.ok || latestPhaseSeed.get(cwd) !== seed) return;
-    const d = (await res.json()) as { phase?: unknown };
+    const d: unknown = await res.json();
     if (latestPhaseSeed.get(cwd) !== seed) return;
-    if (isPrPhase(d.phase)) {
+    const phase = isRecord(d) ? d.phase : undefined;
+    if (isPrPhase(phase)) {
       // Before the set, so the previous value is still the one to compare against.
-      if (becameCiFailing(phaseByCwd.get(cwd), d.phase)) notifySound("pr-ci-failed", cwd);
-      phaseByCwd.set(cwd, d.phase);
+      if (becameCiFailing(phaseByCwd.get(cwd), phase)) notifySound("pr-ci-failed", cwd);
+      phaseByCwd.set(cwd, phase);
     }
   } catch {
     // best-effort — the next poll retries
@@ -283,8 +288,11 @@ const refreshAllChrome = () => {
 // A user editing .mulmoterminal.json is announced on the dir-config channel; re-fetch that
 // directory's chrome so an open roster recolours without a reload. The unsubscribe is kept
 // and called on unmount so a remounted grid doesn't stack duplicate handlers.
-const cwdOf = (data: unknown): string | null =>
-  typeof data === "object" && data !== null && typeof (data as { cwd?: unknown }).cwd === "string" ? (data as { cwd: string }).cwd : null;
+// A cell with no PR yet. A named constant rather than a literal assertion at the call site:
+// the annotation is checked, `"none" as PrPhase` was not.
+const NO_PR_PHASE: PrPhase = "none";
+
+const cwdOf = (data: unknown): string | null => (isRecord(data) && typeof data.cwd === "string" ? data.cwd : null);
 const unsubscribeDirConfig = usePubSub().subscribe("dir-config", (data) => {
   const cwd = cwdOf(data);
   if (cwd) {
@@ -388,7 +396,7 @@ const rosterRow = (c: Cell): CockpitRow => {
     prompt: meta.lastPrompt,
     response: meta.lastResponse,
     fallback: fallbackLabel(c),
-    phase: (c.cwd ? phaseByCwd.get(c.cwd) : undefined) ?? ("none" as PrPhase),
+    phase: (c.cwd ? phaseByCwd.get(c.cwd) : undefined) ?? NO_PR_PHASE,
     workPhase: meta.workPhase,
     headerColor: chrome.headerColor,
     headerTextColor: chrome.headerTextColor,
@@ -512,6 +520,11 @@ function onShortcutKey(e: KeyboardEvent) {
   if (showSettings.value) return;
   const target = e.target instanceof HTMLElement ? e.target : null;
   if (target && isEditableTarget(target.tagName, Array.from(target.classList))) return;
+  // A key confirming an IME candidate is the IME's, not a shortcut. `gridShortcutFor` already
+  // refuses `e.isComposing` — this is the Safari case, where compositionend fires first and the
+  // flag is already false (#1353). Without it, confirming 変換 anywhere the grid can hear runs
+  // whatever that key is bound to.
+  if (isImeConfirming(e)) return;
   const shortcut = gridShortcutFor(getActiveKeymap(), e, expandedUid.value !== null);
   if (!shortcut) return;
   e.preventDefault();
@@ -651,11 +664,12 @@ async function adoptUnplacedSessions(): Promise<void> {
   }
   adoptingUnplaced = true;
   try {
-    const res = await fetch("/api/sessions/unplaced");
+    const res = await fetchWithTimeout("/api/sessions/unplaced");
     if (!res.ok) return;
-    const body = (await res.json()) as { sessions?: { id?: unknown; agent?: unknown; cwd?: unknown }[] };
-    for (const row of body.sessions ?? []) {
-      if (typeof row?.id !== "string" || !row.id) continue;
+    const body: unknown = await res.json();
+    const rows = isRecord(body) && Array.isArray(body.sessions) ? body.sessions : [];
+    for (const row of rows) {
+      if (!isRecord(row) || typeof row.id !== "string" || !row.id) continue;
       // Already here: the server clears the mark when a cell attaches, but this tab may still be
       // holding a cell whose attach has not landed yet — and adopting twice would give one session
       // two cells fighting over the same socket.
@@ -703,7 +717,7 @@ watch(
 // of them would refetch many times a turn to learn nothing; the spawn is the one moment a session
 // can become unplaced. A create that arrives while the user is elsewhere in the app needs nothing
 // extra — the watcher adopts it on the way back.
-const isSessionCreated = (data: unknown): boolean => typeof data === "object" && data !== null && (data as { event?: unknown }).event === "created";
+const isSessionCreated = (data: unknown): boolean => isRecord(data) && data.event === "created";
 const { subscribe: subscribeSessions, onReconnect } = usePubSub();
 const unsubscribeSessions = subscribeSessions("sessions", (data) => {
   if (isSessionCreated(data) && onTerminalsRoute()) void adoptUnplacedSessions();
@@ -717,6 +731,67 @@ onBeforeUnmount(() => {
   unsubscribeSessions();
   offReconnect();
 });
+
+// An agent drew something while NOTHING is enlarged: enlarge that cell and open its Canvas beside
+// it, the same reveal the unseen-canvas chip performs on click.
+//
+// The other half of this lives in TerminalGrid, which handles a drawing that lands on the cell
+// ALREADY enlarged. That one deliberately refuses to enlarge a background cell — it would take the
+// screen away from the terminal being worked in. On the tiled grid there is no such terminal: every
+// cell is a thumbnail, so the drawing is the only thing asking for attention and the answer to a
+// tool call has somewhere to be read. This side needs GridView because un-zoomed TerminalGrid is
+// handed one page of cells, and a cell on another page can draw too — `toggleExpand` already turns
+// the page for it.
+//
+// Not while the grid is behind a full-screen overlay: the user is somewhere else in the app, so
+// nothing here is being read, and rearranging the grid they left would greet them on the way back
+// with a zoom they did not ask for. That drawing keeps the chip, which is where it was already.
+const drawnUnsubscribes = new Map<string, () => void>();
+const { subscribe: subscribeDrawn } = usePubSub();
+function stopWatchingDrawing(): void {
+  for (const off of drawnUnsubscribes.values()) off();
+  drawnUnsubscribes.clear();
+}
+watch(
+  // Keyed by the session ids themselves: cells come and go, and a cell gets its session id well
+  // after it appears (onSession), so watching the cell list alone would miss the moment a fresh
+  // terminal becomes subscribable.
+  [expandedUid, () => state.value.cells.map((c) => c.session ?? "").join(",")],
+  () => {
+    // While something IS enlarged, TerminalGrid owns this. Nothing to watch for here.
+    if (expandedUid.value !== null) return stopWatchingDrawing();
+    const live = new Set(state.value.cells.map((c) => c.session).filter((s): s is string => s !== null));
+    for (const [id, off] of drawnUnsubscribes) {
+      if (live.has(id)) continue;
+      off();
+      drawnUnsubscribes.delete(id);
+    }
+    for (const id of live) {
+      if (drawnUnsubscribes.has(id)) continue;
+      drawnUnsubscribes.set(
+        id,
+        subscribeDrawn(`session:${id}`, (data) => {
+          // Re-checked at fire time, not just at subscribe time: a zoom or a route change between
+          // the two is exactly the state this must not fight.
+          if (expandedUid.value !== null || !onTerminalsRoute()) return;
+          if (!isDrawnResult(data)) return;
+          const uid = state.value.cells.find((cell) => cell.session === id)?.uid;
+          // Through the grid's own reveal (files-buffer flush included) rather than setting the
+          // zoom and the pane from here, as placeChat does above and for the same reason.
+          //
+          // The same two conditions go along as `stillWanted`, because that flush is a network save
+          // this reveal then acts on the far side of: by the time it returns, the user may have
+          // zoomed a cell by hand or left for an overlay, and the checks made above would enlarge
+          // over the top of it. Nobody clicked, so a reveal that has been overtaken is simply
+          // dropped — the unread-canvas chip still reports the drawing. (Codex, this PR.)
+          if (uid !== undefined) void gridRef.value?.openCanvasFor(uid, true, () => expandedUid.value === null && onTerminalsRoute());
+        }),
+      );
+    }
+  },
+  { immediate: true },
+);
+onBeforeUnmount(stopWatchingDrawing);
 
 // Registered for the life of the component, like the new-terminal opener above and for the same
 // reason: this is the only grid there is.

@@ -10,10 +10,20 @@ import { dragCarriesFiles } from "../components/dropPaths";
 // never an in-app element drag.
 type DragTarget = Pick<Window, "addEventListener" | "removeEventListener">;
 
+// The drag's `dataTransfer.types`, or none. Read off the Event structurally rather than declaring
+// it a DragEvent: `addEventListener` types its listener with the base `Event`, and `instanceof
+// DragEvent` is not an option — jsdom (and any non-browser host) does not define the constructor,
+// so the check would throw where the old assertion merely lied.
+const dragTypesOf = (event: Event): readonly string[] => {
+  const dataTransfer: unknown = Reflect.get(event, "dataTransfer");
+  if (!dataTransfer || typeof dataTransfer !== "object") return [];
+  const types: unknown = Reflect.get(dataTransfer, "types");
+  return Array.isArray(types) ? types.filter((type): type is string => typeof type === "string") : [];
+};
+
 export function installFileDropGuard(target: DragTarget = window): () => void {
   const guard = (event: Event) => {
-    const dt = (event as DragEvent).dataTransfer;
-    if (dt && dragCarriesFiles(dt.types)) event.preventDefault();
+    if (dragCarriesFiles(dragTypesOf(event))) event.preventDefault();
   };
   target.addEventListener("dragover", guard);
   target.addEventListener("drop", guard);

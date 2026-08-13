@@ -45,7 +45,8 @@ export function sanitizePresets(input: unknown, max = 50): CwdPreset[] {
 export function loadPresets(file: string): CwdPreset[] {
   try {
     if (!existsSync(file)) return [];
-    return sanitizePresets((readJsonFile(file) as { cwdPresets?: unknown } | null)?.cwdPresets);
+    const parsed: unknown = readJsonFile(file);
+    return sanitizePresets(isRecord(parsed) ? parsed.cwdPresets : undefined);
   } catch {
     return [];
   }
@@ -75,7 +76,8 @@ export function extractCwdFromTranscript(raw: string): string | null {
   for (const line of raw.split("\n")) {
     if (!line) continue;
     try {
-      const cwd = (JSON.parse(line) as { cwd?: unknown }).cwd;
+      const entry: unknown = JSON.parse(line);
+      const cwd = isRecord(entry) ? entry.cwd : undefined;
       if (typeof cwd === "string" && cwd) return cwd;
     } catch {
       // a partial / non-JSON line (e.g. a truncated head read) — keep scanning

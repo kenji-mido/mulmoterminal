@@ -1,3 +1,4 @@
+// @vitest-environment node
 // Windows-only: the real node-pty spawns that #794 and #798 are about. Skipped everywhere
 // else, so this runs in .github/workflows/windows-daily.yaml (which already runs `yarn test`)
 // rather than in the PR matrix — the rules themselves are covered by the pure tests in

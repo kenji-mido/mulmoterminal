@@ -14,12 +14,12 @@ import { overlayOriginState, overlayReturnPath } from "./overlayOrigin";
 
 /** Open the accounting overlay. */
 export function accountingViewOpen(): void {
-  router.push({ path: "/accounting", state: overlayOriginState() });
+  void router.push({ path: "/accounting", state: overlayOriginState() });
 }
 
 /** Close the accounting overlay → back to the view it was opened from. */
 export function accountingViewClose(): void {
-  router.push(overlayReturnPath());
+  void router.push(overlayReturnPath());
 }
 
 export function useAccountingView(): { isOpen: ComputedRef<boolean>; close: () => void } {

@@ -16,6 +16,7 @@ import { hasErrnoCode } from "../errors.js";
 import { backupCurrentFile, storeBackup } from "./backup-store.js";
 import { resolveBase, resolveContained } from "./pathContainment.js";
 import { htmlDoc, jsonHtmlDoc, tableHtmlDoc, delimiterForExtension } from "./renderedDoc.js";
+import { requestBody } from "../routes/requestBody.js";
 
 // Cap on the bytes served to the editor / accepted on write — a text editor, not a
 // blob store. Large/binary files are refused rather than streamed into a textarea.
@@ -203,8 +204,9 @@ function mountWriteRoute(app: Express, { defaultCwd, backupRoot }: BrowseDeps): 
   app.put("/api/files/browse/write", (req, res) => {
     const abs = containedFor(req, res, defaultCwd);
     if (!abs) return;
-    const text = req.body?.text;
-    const baseVersion = req.body?.baseVersion;
+    const body = requestBody(req.body);
+    const text = body.text;
+    const baseVersion = body.baseVersion;
     if (typeof text !== "string") return res.status(400).json({ error: "body.text (string) required" });
     if (baseVersion !== null && typeof baseVersion !== "string") return res.status(400).json({ error: "body.baseVersion (string|null) required" });
     if (Buffer.byteLength(text, "utf8") > MAX_EDIT_BYTES) return res.status(413).json({ error: "content too large" });
@@ -230,7 +232,7 @@ function mountBackupRoute(app: Express, { defaultCwd, backupRoot }: BrowseDeps):
   app.put("/api/files/browse/backup", (req, res) => {
     const abs = containedFor(req, res, defaultCwd);
     if (!abs) return;
-    const text = req.body?.text;
+    const { text } = requestBody(req.body);
     if (typeof text !== "string") return res.status(400).json({ error: "body.text (string) required" });
     if (Buffer.byteLength(text, "utf8") > MAX_EDIT_BYTES) return res.status(413).json({ error: "content too large" });
     res.json({ stored: storeBackup(abs, text, backupRoot) !== null });

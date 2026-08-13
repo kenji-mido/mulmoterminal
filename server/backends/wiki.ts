@@ -12,6 +12,7 @@
 import type { Express, Request, Response } from "express";
 import { readWikiIndex, readWikiPage, loadWikiGraph, collectLintIssues } from "@mulmoclaude/core/wiki/server";
 import { isSafeWikiSlug, formatLintReport } from "@mulmoclaude/core/wiki";
+import { describeValue } from "../../common/readString.js";
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -36,7 +37,7 @@ export function mountWikiRoutes(app: Express, deps: { workspace: string }): void
       // value so a crafted slug can never escape `data/wiki/pages` (containment is also
       // enforced inside the core engine, but reject early here).
       if (typeof slug !== "string" || !isSafeWikiSlug(slug)) {
-        res.status(400).json({ error: `invalid wiki slug: ${String(slug)}` });
+        res.status(400).json({ error: `invalid wiki slug: ${describeValue(slug)}` });
         return;
       }
       try {
@@ -53,7 +54,7 @@ export function mountWikiRoutes(app: Express, deps: { workspace: string }): void
       return;
     }
     try {
-      res.json(await readWikiIndex(workspace));
+      res.json(readWikiIndex(workspace));
     } catch (err) {
       log.warn("index read failed", { error: errorMessage(err) });
       res.status(500).json({ error: errorMessage(err) });

@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import { escapeHtml, htmlDoc, jsonHtmlDoc, tableHtmlDoc, parseDelimited, delimiterForExtension } from "../../../server/files/renderedDoc";
 

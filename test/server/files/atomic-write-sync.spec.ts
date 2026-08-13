@@ -1,3 +1,4 @@
+// @vitest-environment node
 // `writeFileSync` truncates the destination and then writes into it, so a crash — or a full
 // disk — in between leaves a half-written file. For the app config that means every provider,
 // launcher and header button read as corrupt on the next boot, i.e. as no configuration at

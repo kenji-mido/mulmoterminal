@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import { sendFrame, sendExitAndClose, closeWithError, isResizeFrame, type FrameSocket } from "../../../server/session/ws-frames.js";
 

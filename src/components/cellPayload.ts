@@ -1,4 +1,5 @@
 // The two payload shapes a cell believes without asking anyone: the token usage and the
+import { isRecord } from "../../common/isRecord";
 // running model/context that back its header badges.
 //
 // They arrive from /api/session/:id and the cost route, and the guards only asked whether a
@@ -25,7 +26,7 @@ export interface CellContext {
 // a string would.
 const isRenderableCount = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value);
 
-const asRecord = (value: unknown): Record<string, unknown> | null => (typeof value === "object" && value !== null ? (value as Record<string, unknown>) : null);
+const asRecord = (value: unknown): Record<string, unknown> | null => (isRecord(value) ? value : null);
 
 export function isCellUsage(value: unknown): value is CellUsage {
   const usage = asRecord(value);

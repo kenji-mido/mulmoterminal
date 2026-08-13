@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 
 import {
@@ -194,5 +195,40 @@ describe("the tool-group gate", () => {
     it("refuses the worker's tool on a group URL like it does anywhere else", () => {
       expect(routeToolCall(SUBMIT_TRANSLATION_TOOL_NAME, false, "render").kind).toBe("refused");
     });
+  });
+});
+
+// Removing `--strict-mcp-config` (#1338, #1385) is what lets a directory's own group registration
+// and our all-tools url reach the same session. Both urls are ours, so the overlap is settled here
+// rather than by a CLI flag: the group stands down, and the session keeps ONE name per action.
+describe("a group URL on a session that already carries every tool", () => {
+  it("offers nothing, so the same tool cannot arrive under two names", () => {
+    expect(names(offeredTools(false, PLUGINS, WORKER_TOOL, "render", true))).toEqual([]);
+    expect(names(offeredTools(false, PLUGINS, WORKER_TOOL, "data", true))).toEqual([]);
+  });
+
+  // The half that would break the feature instead of the duplicate: standing down is a property of
+  // the GROUP url, and the all-tools url is where those tools now live.
+  it("leaves the all-tools url offering everything", () => {
+    expect(names(offeredTools(false, PLUGINS, WORKER_TOOL, null, true))).toEqual(["manageCollection", "presentHtml", "spawnBackgroundChat"]);
+  });
+
+  // Second layer, same reason as every other gate here: not offering a tool is not a control.
+  it("refuses a tool named anyway, and says where it actually is", () => {
+    const route = routeToolCall("presentHtml", false, "render", true);
+    expect(route.kind).toBe("refused");
+    // The message has to be actionable — "not in this group" would be true and useless, since the
+    // session can call this very tool right now on its other server.
+    expect(route.kind === "refused" && route.message).toContain("all-tools");
+  });
+
+  it("still dispatches on the all-tools url", () => {
+    expect(routeToolCall("presentHtml", false, null, true)).toEqual({ kind: "dispatch" });
+  });
+
+  // The worker gate stays the narrowest one: it is a security boundary, and this is a tidiness one.
+  it("does not disturb a translation worker", () => {
+    expect(names(offeredTools(true, PLUGINS, WORKER_TOOL, "render", true))).toEqual([SUBMIT_TRANSLATION_TOOL_NAME]);
+    expect(routeToolCall(SUBMIT_TRANSLATION_TOOL_NAME, true, "render", true)).toEqual({ kind: "submit-translation" });
   });
 });

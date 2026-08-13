@@ -12,13 +12,13 @@
 // the person is the one who knows whether this second is a good time.
 import { ref, onMounted, onUnmounted, type Ref } from "vue";
 import { usePubSub } from "./usePubSub";
+import { jsonBody } from "../jsonBody";
 
 async function fetchBuildId(): Promise<string | null> {
   try {
     const res = await fetch("/api/config");
     if (!res.ok) return null;
-    const data: unknown = await res.json();
-    const id = (data as { buildId?: unknown }).buildId;
+    const id = (await jsonBody(res)).buildId;
     return typeof id === "string" && id ? id : null;
   } catch {
     return null; // offline / mid-restart — say nothing rather than guess

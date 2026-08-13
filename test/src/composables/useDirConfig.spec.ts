@@ -16,8 +16,12 @@ import { useDirConfig, useDirPriorities, useDirColors, boundDirCount, invalidate
 import { TERMINAL_FONT_SIZE_MAX } from "../../../common/terminalFontSize";
 
 let served = "first";
+// Two macrotask hops, not one: a request now resolves through fetchWithTimeout, and its extra
+// await pushed the response's own setTimeout(0) behind this helper's (#1393). One hop left the
+// assertion running before the answer arrived.
 const flush = async () => {
   await nextTick();
+  await new Promise((r) => setTimeout(r, 0));
   await new Promise((r) => setTimeout(r, 0));
 };
 

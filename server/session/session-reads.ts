@@ -20,20 +20,22 @@ import {
   timelineEventsIn,
   type SessionUsage,
   type LatestTurnContext,
+  type PromptTrail,
   type TimelineEvent,
 } from "./transcript.js";
-import { createFileCache, type FileStamp } from "./file-cache.js";
+import { createTranscriptFold, type FoldedAt } from "./transcript-fold.js";
 import { classifyWorkPhase, type WorkPhase } from "./workPhase.js";
 import { sessionListTitle } from "./sessionListTitle.js";
 import { activity, aiTitles, codexRolloutIds, isBackgroundSession, isFailedWorker, knownSessions, sessionMemos } from "./registry.js";
 import { projectSessionsDir } from "./project-dir.js";
 import { lastTurnFromClaudeParsed, lastTurnFromCodexRolloutDocs, EMPTY_TURN, type LastTurn } from "./last-turn.js";
-import { forEachJsonlRecord, readTailRecords } from "../infra/jsonl-file.js";
-import { createSummaryScan } from "./summary-scan.js";
+import { forEachJsonlRecordIn, readTailRecords } from "../infra/jsonl-file.js";
+import { copySummaryState, emptySummaryState, foldSummary, summaryPartsOf, type SummaryState } from "./summary-scan.js";
 import { partitionPending } from "./partitionPending.js";
 import { codexSessionsRoot } from "../agents/codex-session.js";
 import { codexRolloutPath } from "../agents/codex-sessions.js";
 import type { DiskStat, PendingSession, SessionMeta } from "./types.js";
+import { readString } from "../../common/readString.js";
 
 // Bytes of an assistant reply kept for the roster; the same cap the push body uses.
 export const LAST_RESPONSE_MAX = 400;
@@ -117,64 +119,110 @@ export const EMPTY_SUMMARY: SessionSummary = {
 
 // Transcripts are append-only and can be hundreds of MB; /api/session/:id is hit on every
 // window focus and by each grid cell as turns finish, so re-reading + re-parsing the whole
-// .jsonl each time blocked the event loop and janked the terminals. Memoize by (mtime,size):
-// an unchanged transcript returns instantly, and a changed one is read + parsed ONCE (the six
-// derived values share one parse pass, vs. one parse per helper before).
-const sessionSummaryCache = createFileCache<SessionSummary>();
+// .jsonl each time blocked the event loop and janked the terminals. A (mtime,size) memo fixed the
+// UNCHANGED case (#948) and left the one that hurts: a transcript being written to is changed on
+// every turn, so an active 508 MB session paid a 10.5 s full read per turn. The fold is resumed
+// instead, and kept beside a big file so a restart and the next process inherit it (#1377/#1386).
+const isSessionUsage = (value: unknown): value is SessionUsage =>
+  isRecord(value) &&
+  typeof value.inputTokens === "number" &&
+  typeof value.outputTokens === "number" &&
+  typeof value.cacheReadTokens === "number" &&
+  typeof value.cacheCreationTokens === "number";
+
+const isPromptTrail = (value: unknown): value is PromptTrail =>
+  isRecord(value) && [value.meaningful, value.latest, value.record].every((v) => v === null || typeof v === "string");
+
+const isSummaryState = (value: unknown): value is SummaryState =>
+  isRecord(value) &&
+  isSessionUsage(value.usage) &&
+  typeof value.userTurns === "number" &&
+  (value.aiTitle === null || typeof value.aiTitle === "string") &&
+  isPromptTrail(value.prompts) &&
+  (value.lastAssistantText === null || typeof value.lastAssistantText === "string") &&
+  isRecord(value.context) &&
+  (value.context.model === null || typeof value.context.model === "string") &&
+  typeof value.context.contextTokens === "number" &&
+  Array.isArray(value.turnTools) &&
+  value.turnTools.every((tool) => typeof tool === "string");
+
+const summaryFold = createTranscriptFold<SummaryState>({
+  kind: "summary",
+  version: 1,
+  isValue: isSummaryState,
+  empty: emptySummaryState,
+  fold: foldSummary,
+  copy: copySummaryState,
+});
 
 export async function readSessionSummary(cwd: string, id: string): Promise<SessionSummary> {
   const file = path.join(projectSessionsDir(cwd), `${id}.jsonl`);
-  let stamp: FileStamp;
   try {
     const st = await fs.stat(file);
-    stamp = { mtimeMs: st.mtimeMs, size: st.size };
+    const parts = summaryPartsOf(await summaryFold.read(file, { mtimeMs: st.mtimeMs, size: st.size }), LAST_RESPONSE_MAX);
+    return {
+      lastPrompt: parts.lastPrompt,
+      aiTitle: parts.aiTitle,
+      lastResponse: parts.lastResponse,
+      userTurns: parts.userTurns,
+      usage: parts.usage,
+      context: parts.context,
+      workPhase: classifyWorkPhase(parts.toolNames),
+    };
   } catch {
-    return EMPTY_SUMMARY; // no transcript on disk yet
+    return EMPTY_SUMMARY; // no transcript on disk yet, or it could not be read
   }
-  const cached = sessionSummaryCache.get(file, stamp);
-  if (cached) return cached;
-  // Streamed, never held: the transcript reaches 585 MB here, which is past what one string can
-  // be — and reading it whole is what emptied the longest sessions (#998).
-  const scan = createSummaryScan();
-  try {
-    await forEachJsonlRecord(file, (record) => scan.add(record));
-  } catch {
-    return EMPTY_SUMMARY;
-  }
-  const parts = scan.finish(LAST_RESPONSE_MAX);
-  const summary: SessionSummary = {
-    lastPrompt: parts.lastPrompt,
-    aiTitle: parts.aiTitle,
-    lastResponse: parts.lastResponse,
-    userTurns: parts.userTurns,
-    usage: parts.usage,
-    context: parts.context,
-    workPhase: classifyWorkPhase(parts.toolNames),
-  };
-  sessionSummaryCache.set(file, stamp, summary);
-  return summary;
 }
 
 // The tool-activity timeline for a session, capped to the most recent events so the
 // payload stays bounded on a long session. A missing transcript is an empty list.
 const TIMELINE_MAX_EVENTS = 300;
+
+// `total` is not the length of `events` — it counts every event the transcript ever had, which is
+// the only thing that can answer "was this truncated?" once the window has dropped the rest.
+interface TimelineScan {
+  events: TimelineEvent[];
+  total: number;
+}
+
+const isTimelineEvent = (value: unknown): value is TimelineEvent =>
+  isRecord(value) && typeof value.ts === "string" && typeof value.tool === "string" && typeof value.summary === "string";
+
+const isTimelineScan = (value: unknown): value is TimelineScan =>
+  isRecord(value) && typeof value.total === "number" && Array.isArray(value.events) && value.events.every(isTimelineEvent);
+
+function foldTimeline(into: TimelineScan, record: Record<string, unknown>): void {
+  for (const event of timelineEventsIn(record)) {
+    into.total += 1;
+    into.events.push(event);
+    if (into.events.length > TIMELINE_MAX_EVENTS) into.events.shift();
+  }
+}
+
+// Streamed since #998, and folded once since #1386: the payload was already capped, so reading the
+// whole transcript to throw most of it away was the expensive part — and doing that again on every
+// open of the overlay was the rest of it. The window is not a shortcut here: every record is still
+// folded, the newest 300 are simply the only ones kept.
+const timelineFold = createTranscriptFold<TimelineScan>({
+  kind: "timeline",
+  version: 1,
+  isValue: isTimelineScan,
+  empty: () => ({ events: [], total: 0 }),
+  fold: foldTimeline,
+  // The events ARRAY too, not just the record around it: a resumed fold pushes into it, and the
+  // value it copied from has already been handed to a caller.
+  copy: (scan) => ({ events: [...scan.events], total: scan.total }),
+});
+
 export async function sessionTimeline(cwd: string, id: string): Promise<{ events: TimelineEvent[]; truncated: boolean }> {
-  // Streamed, and only the newest TIMELINE_MAX_EVENTS are kept — the payload was already capped,
-  // so holding the whole transcript to then throw most of it away was the expensive part (#998).
-  const events: TimelineEvent[] = [];
-  let total = 0;
+  const file = path.join(projectSessionsDir(cwd), `${id}.jsonl`);
   try {
-    await forEachJsonlRecord(path.join(projectSessionsDir(cwd), `${id}.jsonl`), (record) => {
-      for (const event of timelineEventsIn(record)) {
-        total += 1;
-        events.push(event);
-        if (events.length > TIMELINE_MAX_EVENTS) events.shift();
-      }
-    });
+    const st = await fs.stat(file);
+    const scan = await timelineFold.read(file, { mtimeMs: st.mtimeMs, size: st.size });
+    return { events: scan.events, truncated: scan.total > TIMELINE_MAX_EVENTS };
   } catch {
     return { events: [], truncated: false };
   }
-  return { events, truncated: total > TIMELINE_MAX_EVENTS };
 }
 
 // A session's last COMPLETED exchange, read from whichever log its agent keeps: Claude's
@@ -214,28 +262,80 @@ export async function sessionLastTurn(cwd: string, id: string, agent: "claude" |
   }
 }
 
-// Scan a session JSONL for a human-friendly title and last activity.
+// The three fields the session list needs OFF DISK. Cached; everything else on a row (the memo, the
+// live ai-title, the activity flags) is read per request from memory, because those change while
+// the file does not — caching the finished row would freeze an edited memo behind it.
+interface TitleFields {
+  aiTitle: string | null;
+  lastPrompt: string | null;
+  firstUserMsg: string | null;
+}
+
+const NO_TITLE_FIELDS: TitleFields = { aiTitle: null, lastPrompt: null, firstUserMsg: null };
+
+// The rule, in one place, so the whole-file read and the resumed one cannot drift apart: the LAST
+// ai-title / last-prompt win, the FIRST user message does.
+function foldTitleField(into: TitleFields, o: Record<string, unknown>): void {
+  if (o.type === "ai-title" && o.aiTitle) into.aiTitle = readString(o.aiTitle);
+  else if (o.type === "last-prompt" && o.lastPrompt) into.lastPrompt = readString(o.lastPrompt);
+  else if (o.type === "user" && into.firstUserMsg === null) {
+    into.firstUserMsg = userPromptText(isRecord(o.message) ? o.message.content : undefined);
+  }
+}
+
+// Windows for the cold read, measured over the 60 largest transcripts on a working machine (5 MB to
+// 508 MB, each read end to end): the first `user` record sat at most 26.6 KB in, and the last
+// ai-title / last-prompt at most 52.8 KB from EOF. Both windows are ~10x that, and a file whose
+// fields fall outside them is not guessed at — the fold reads the whole file instead.
+const TITLE_HEAD_BYTES = 256 * 1024;
+const TITLE_TAIL_BYTES = 512 * 1024;
+
+// The same three fields, folded once per file: an unchanged transcript is not read at all, a grown
+// one costs only the bytes that arrived, and the answer is kept beside a big file so a restart and
+// the next process do not pay for it again (#1377, #1386). Bump the version when foldTitleField
+// changes what it means, or old sidecars answer for a rule that no longer exists.
+const isTitleFields = (value: unknown): value is TitleFields =>
+  isRecord(value) &&
+  (value.aiTitle === null || typeof value.aiTitle === "string") &&
+  (value.lastPrompt === null || typeof value.lastPrompt === "string") &&
+  (value.firstUserMsg === null || typeof value.firstUserMsg === "string");
+
+const titleFieldsFold = createTranscriptFold<TitleFields>({
+  kind: "title-fields",
+  version: 1,
+  isValue: isTitleFields,
+  empty: () => ({ ...NO_TITLE_FIELDS }),
+  fold: foldTitleField,
+  copy: (fields) => ({ ...fields }),
+  cold: coldTitleFields,
+});
+
+// The first read of a file: both ends when it is big enough for that to be worth it, and the whole
+// file when it is not — or when the ends did not answer. A field missing from a window is
+// indistinguishable from a field the file never had, so the windows are a fast path, never the
+// answer: only when all three are found is the fold provably the same as the whole-file one (the
+// tail runs to EOF, so an ai-title found there IS the last one).
+//
+// The offset comes back with the fields, and it is the end of the last COMPLETE line rather than
+// the file's size: a transcript caught mid-append ends in half a record, and resuming past it would
+// start the next scan inside a line — losing the record that half line becomes.
+async function coldTitleFields(full: string, size: number): Promise<FoldedAt<TitleFields> | null> {
+  if (size > TITLE_HEAD_BYTES + TITLE_TAIL_BYTES) {
+    const head: TitleFields = { ...NO_TITLE_FIELDS };
+    const tail: TitleFields = { ...NO_TITLE_FIELDS };
+    await forEachJsonlRecordIn(full, { to: TITLE_HEAD_BYTES }, (o) => foldTitleField(head, o));
+    const offset = await forEachJsonlRecordIn(full, { from: size - TITLE_TAIL_BYTES }, (o) => foldTitleField(tail, o));
+    if (head.firstUserMsg !== null && tail.aiTitle !== null && tail.lastPrompt !== null) {
+      return { value: { aiTitle: tail.aiTitle, lastPrompt: tail.lastPrompt, firstUserMsg: head.firstUserMsg }, offset };
+    }
+  }
+  return null; // the ends did not answer — the caller folds the whole file
+}
+
 export async function readSessionMeta(dir: string, file: string): Promise<SessionMeta> {
   const full = path.join(dir, file);
-
-  let aiTitle: string | null = null;
-  let lastPrompt: string | null = null;
-  let firstUserMsg: string | null = null;
-
-  // Streamed like every other transcript reader (#998). This one was missed by that issue's own
-  // table, which is a fair warning about how easy the whole-file read is to reach for: three
-  // fields out of a file that reaches 585 MB, where reading it whole throws and the session list
-  // then shows a title of "(no title)".
-  const [, stat] = await Promise.all([
-    forEachJsonlRecord(full, (o) => {
-      if (o.type === "ai-title" && o.aiTitle) aiTitle = String(o.aiTitle);
-      else if (o.type === "last-prompt" && o.lastPrompt) lastPrompt = String(o.lastPrompt);
-      else if (o.type === "user" && firstUserMsg === null) {
-        firstUserMsg = userPromptText(isRecord(o.message) ? o.message.content : undefined);
-      }
-    }),
-    fs.stat(full),
-  ]);
+  const stat = await fs.stat(full);
+  const { aiTitle, lastPrompt, firstUserMsg } = await titleFieldsFold.read(full, { mtimeMs: stat.mtimeMs, size: stat.size });
 
   const id = path.basename(file, ".jsonl");
   const title = sessionListTitle({ memo: sessionMemos.get(id), liveAiTitle: aiTitles.get(id), diskAiTitle: aiTitle, diskLastPrompt: lastPrompt, firstUserMsg });

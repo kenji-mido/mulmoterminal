@@ -1,6 +1,30 @@
 import { ref, onMounted, onUnmounted } from "vue";
 import { usePubSub } from "./usePubSub";
 import type { TerminalAgent } from "../../common/sessionAgent";
+import { isRecord } from "../../common/isRecord";
+import { isUnknownArray } from "../../common/isUnknownArray";
+import { jsonBody } from "../jsonBody";
+import { fetchWithTimeout } from "../utils/fetchWithTimeout";
+
+// The rows arrive off /api/sessions, so a row becomes a Session only after its three
+// load-bearing fields are checked: `id` routes every later request, `title` is rendered, and
+// `mtime` decides the sort. A row missing one of them would sort to the top as NaN or route
+// nowhere, so it is dropped rather than admitted.
+interface SessionRow {
+  id: string;
+  title: string;
+  mtime: number;
+}
+
+const isSessionRow = (value: unknown): value is SessionRow =>
+  isRecord(value) && typeof value.id === "string" && typeof value.title === "string" && typeof value.mtime === "number";
+
+const listOfSessionRows = (value: unknown): SessionRow[] => (isUnknownArray(value) ? value.filter(isSessionRow) : []);
+
+const isSession = (value: unknown): value is Session =>
+  isRecord(value) && isSessionRow(value) && typeof value.working === "boolean" && typeof value.waiting === "boolean";
+
+const listOfSessions = (value: unknown): Session[] => (isUnknownArray(value) ? value.filter(isSession) : []);
 
 export interface Session {
   id: string;
@@ -58,7 +82,12 @@ export function mergeStable(prev: Session[], incoming: Session[], resort: boolea
   if (resort || prev.length === 0) return incoming;
   const incomingById = new Map(incoming.map((s) => [s.id, s]));
   const prevIds = new Set(prev.map((s) => s.id));
-  const kept = prev.filter((s) => incomingById.has(s.id)).map((s) => incomingById.get(s.id) as Session);
+  // flatMap over the lookup: `filter` then `get` made the compiler re-derive that the key is
+  // present, which is what the assertion was papering over.
+  const kept = prev.flatMap((s) => {
+    const fresh = incomingById.get(s.id);
+    return fresh ? [fresh] : [];
+  });
   const added = incoming.filter((s) => !prevIds.has(s.id));
   return [...added, ...kept];
 }
@@ -75,10 +104,10 @@ export function useSessions() {
   // failure never blocks the Claude list. codex activity isn't tracked, so they read as idle.
   async function fetchCodexSessions(): Promise<Session[]> {
     try {
-      const res = await fetch("/api/codex/sessions");
+      const res = await fetchWithTimeout("/api/codex/sessions");
       if (!res.ok) return [];
-      const data = await res.json();
-      return (data.sessions ?? []).map((s: { id: string; title: string; mtime: number }): Session => ({
+      const data = await jsonBody(res);
+      return listOfSessionRows(data.sessions).map((s): Session => ({
         id: s.id,
         title: s.title,
         mtime: s.mtime,
@@ -105,12 +134,12 @@ export function useSessions() {
   async function load(resort = false) {
     const request = ++issuedRequests;
     try {
-      const [res, codex] = await Promise.all([fetch("/api/sessions"), fetchCodexSessions()]);
+      const [res, codex] = await Promise.all([fetchWithTimeout("/api/sessions"), fetchCodexSessions()]);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
+      const data = await jsonBody(res);
       if (request <= lastAppliedRequest) return; // an equal-or-newer answer is already on screen
       lastAppliedRequest = request;
-      const incoming = [...(data.sessions ?? []), ...codex].sort((a: Session, b: Session) => b.mtime - a.mtime);
+      const incoming = [...listOfSessions(data.sessions), ...codex].sort((a, b) => b.mtime - a.mtime);
       sessions.value = mergeStable(sessions.value, incoming, resort);
       error.value = null;
     } catch (e) {
@@ -137,11 +166,11 @@ export function useSessions() {
   let offReconnect: (() => void) | undefined;
 
   onMounted(() => {
-    load();
-    unsubscribe = subscribe("sessions", () => load());
+    void load();
+    unsubscribe = subscribe("sessions", () => void load());
     // pub-sub replays room membership but not events missed while disconnected, so a
     // dropped socket can leave the list stale until the next push — refetch on reconnect.
-    offReconnect = onReconnect(() => load());
+    offReconnect = onReconnect(() => void load());
   });
   onUnmounted(() => {
     unsubscribe?.();

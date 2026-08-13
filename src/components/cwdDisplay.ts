@@ -39,5 +39,5 @@ export function worktreeLabel(cwd: string | null): { repo: string; task: string 
   const task = parts[i + 2];
   if (i < 0 || !dir || !task) return null;
   const m = MANAGED_DIR.exec(dir);
-  return m ? { repo: m[1], task } : null;
+  return m?.[1] === undefined ? null : { repo: m[1], task };
 }

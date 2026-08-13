@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import { nextReadRange, takeCompleteLines, turnBoundaries, boundaryOutcome, HOOK_EVENT_FOR } from "../../../server/agents/codex-activity.js";
 

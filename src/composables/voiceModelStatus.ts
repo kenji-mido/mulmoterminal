@@ -1,4 +1,5 @@
-import type { VoiceInputStatus } from "../../common/voiceInputStatus";
+import { isVoiceInputStatus, type VoiceInputStatus } from "../../common/voiceInputStatus";
+import { fetchWithTimeout } from "../utils/fetchWithTimeout";
 
 // One reader for `GET /api/transcribe/model`. Two callers want it for different reasons —
 // the mic polls it for readiness, the settings modal asks once whether to show the voice
@@ -14,15 +15,12 @@ import type { VoiceInputStatus } from "../../common/voiceInputStatus";
 const STATUS_TIMEOUT_MS = 5000;
 
 export async function fetchVoiceInputStatus(): Promise<VoiceInputStatus | null> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), STATUS_TIMEOUT_MS);
   try {
-    const res = await fetch("/api/transcribe/model", { signal: controller.signal });
+    const res = await fetchWithTimeout("/api/transcribe/model", undefined, STATUS_TIMEOUT_MS);
     if (!res.ok) return null;
-    return (await res.json()) as VoiceInputStatus;
+    const body: unknown = await res.json();
+    return isVoiceInputStatus(body) ? body : null;
   } catch {
     return null;
-  } finally {
-    clearTimeout(timer);
   }
 }

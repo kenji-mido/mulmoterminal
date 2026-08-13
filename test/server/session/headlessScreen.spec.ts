@@ -4,14 +4,16 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
-import { renderScreen } from "../../../server/session/headlessScreen.js";
+import { renderScreen, type HeadlessScreenInput } from "../../../server/session/headlessScreen.js";
 import { rowsToScreen } from "../../../server/session/screen-rows.js";
 
 const ESC = String.fromCharCode(0x1b);
 
 // renderScreen returns rows carrying each line's dim run alongside its text (#563);
-// everything below this helper is about the text.
-const screenOf = async (input: Parameters<typeof renderScreen>[0]): Promise<string> => rowsToScreen(await renderScreen(input)).trimEnd();
+// everything below this helper is about the text. historyLines defaults to none, so each
+// case says whether it is about the visible pane or about the scrollback above it.
+const screenOf = async (input: Omit<HeadlessScreenInput, "historyLines"> & { historyLines?: number }): Promise<string> =>
+  rowsToScreen(await renderScreen({ historyLines: 0, ...input })).trimEnd();
 
 // @xterm/headless ships a UMD/CJS bundle whose `module` field points at a path that does
 // not exist, so Node's ESM loader falls back to CJS and cannot see the named export. A
@@ -56,6 +58,23 @@ describe("renderScreen", () => {
     expect(await screenOf({ buffer, cols: 20, rows: 4 })).toBe("line8\nline9\nline10\nline11");
   });
 
+  // What the phone actually reads: one pane's worth is too little on a small screen, so the
+  // window reaches above the viewport — the same history `capture-pane -S -n` returns
+  // (mulmoserver#139).
+  it("reaches above the viewport for the scrollback the phone is shown", async () => {
+    const buffer = Array.from({ length: 12 }, (_, i) => `line${i}`).join("\r\n");
+    expect(await screenOf({ buffer, cols: 20, rows: 4, historyLines: 5 })).toBe(
+      ["line3", "line4", "line5", "line6", "line7", "line8", "line9", "line10", "line11"].join("\n"),
+    );
+  });
+
+  // A session younger than the window has less history, not an error — and asking for more
+  // than the emulator ever held must not shift the window off the live rows.
+  it("yields what history there is when the session is younger than the window", async () => {
+    const buffer = Array.from({ length: 6 }, (_, i) => `line${i}`).join("\r\n");
+    expect(await screenOf({ buffer, cols: 20, rows: 4, historyLines: 300 })).toBe(["line0", "line1", "line2", "line3", "line4", "line5"].join("\n"));
+  });
+
   it("wraps at the configured width", async () => {
     expect(await screenOf({ buffer: "abcdef", cols: 3, rows: 4 })).toBe("abc\ndef");
   });
@@ -73,12 +92,12 @@ describe("renderScreen", () => {
   // Dim is what tells an agent's ghost suggestion apart from text the user typed, so a
   // tmux-less host has to carry it out of the emulator too.
   it("reads the dim run off the cells", async () => {
-    const rows = await renderScreen({ buffer: `❯ ${ESC}[2mwrite the tests${ESC}[0m`, cols: 40, rows: 2 });
+    const rows = await renderScreen({ buffer: `❯ ${ESC}[2mwrite the tests${ESC}[0m`, cols: 40, rows: 2, historyLines: 0 });
     expect(rows[0]).toEqual({ text: "❯ write the tests", dim: "write the tests" });
   });
 
   it("leaves dim empty on a plain row", async () => {
-    const rows = await renderScreen({ buffer: "❯ write the tests", cols: 40, rows: 2 });
+    const rows = await renderScreen({ buffer: "❯ write the tests", cols: 40, rows: 2, historyLines: 0 });
     expect(rows[0]).toEqual({ text: "❯ write the tests", dim: "" });
   });
 });

@@ -1,3 +1,4 @@
+// @vitest-environment node
 // Every rule in this repo that turns a blob of text into lines does it with `split("\n")` —
 // about twenty places, over `git` / `gh` / `tmux` output, JSONL transcripts and bundled
 // markdown. That is fine while the text arrives LF-terminated and silently wrong when it does

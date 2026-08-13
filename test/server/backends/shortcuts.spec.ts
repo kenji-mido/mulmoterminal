@@ -4,7 +4,7 @@ import express from "express";
 import { mkdtempSync, readFileSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { Server } from "node:http";
+import { appRequest } from "../../helpers/appRequest.js";
 import { normalizeShortcuts, mountShortcutsRoutes } from "../../../server/backends/shortcuts.js";
 
 describe("normalizeShortcuts", () => {
@@ -31,35 +31,27 @@ describe("normalizeShortcuts", () => {
 
 describe("/api/shortcuts routes", () => {
   let ws: string;
-  let server: Server;
-  let base: string;
+  let request: ReturnType<typeof appRequest>;
 
-  beforeEach(async () => {
+  beforeEach(() => {
     ws = mkdtempSync(path.join(tmpdir(), "mt-sc-"));
     const app = express();
     app.use(express.json());
     mountShortcutsRoutes(app, { workspace: ws });
-    await new Promise<void>((resolve) => {
-      server = app.listen(0, () => resolve());
-    });
-    const addr = server.address();
-    base = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`;
+    request = appRequest(app);
   });
 
-  afterEach(() => {
-    server?.close();
-    rmSync(ws, { recursive: true, force: true });
-  });
+  afterEach(() => rmSync(ws, { recursive: true, force: true }));
 
   it("GET returns [] when the file is absent", async () => {
-    const res = await fetch(`${base}/api/shortcuts`);
+    const res = await request("/api/shortcuts");
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ shortcuts: [] });
   });
 
   it("PUT persists the OBJECT-WRAPPER format and GET round-trips it", async () => {
     const shortcuts = [{ kind: "collection", slug: "watchlist", title: "映画", icon: "movie" }];
-    const put = await fetch(`${base}/api/shortcuts`, {
+    const put = await request("/api/shortcuts", {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ shortcuts }),
@@ -73,11 +65,11 @@ describe("/api/shortcuts routes", () => {
     expect(Array.isArray(onDisk)).toBe(false);
     expect(onDisk).toEqual({ shortcuts });
 
-    expect(await (await fetch(`${base}/api/shortcuts`)).json()).toEqual({ shortcuts });
+    expect(await (await request("/api/shortcuts")).json()).toEqual({ shortcuts });
   });
 
   it("PUT normalises (drops junk, dedupes) before persisting", async () => {
-    const res = await fetch(`${base}/api/shortcuts`, {
+    const res = await request("/api/shortcuts", {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -92,7 +84,7 @@ describe("/api/shortcuts routes", () => {
   });
 
   it("PUT 400s when the body is not { shortcuts: [...] }", async () => {
-    const res = await fetch(`${base}/api/shortcuts`, {
+    const res = await request("/api/shortcuts", {
       method: "PUT",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ nope: true }),
@@ -102,7 +94,7 @@ describe("/api/shortcuts routes", () => {
 
   it("handles concurrent PUTs without ENOENT/500 (unique temp files)", async () => {
     const put = (slug: string) =>
-      fetch(`${base}/api/shortcuts`, {
+      request("/api/shortcuts", {
         method: "PUT",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ shortcuts: [{ kind: "collection", slug }] }),
@@ -118,7 +110,7 @@ describe("/api/shortcuts routes", () => {
   it("reads an existing MulmoClaude-written file (wrapper format)", async () => {
     mkdirSync(path.join(ws, "config"), { recursive: true });
     writeFileSync(path.join(ws, "config", "shortcuts.json"), JSON.stringify({ shortcuts: [{ kind: "feed", slug: "news", title: "News", icon: "rss_feed" }] }));
-    const res = await fetch(`${base}/api/shortcuts`);
+    const res = await request("/api/shortcuts");
     expect(await res.json()).toEqual({ shortcuts: [{ kind: "feed", slug: "news", title: "News", icon: "rss_feed" }] });
   });
 });

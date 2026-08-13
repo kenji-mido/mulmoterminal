@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 import { nextTick } from "vue";
 import TerminalCell from "../../../src/components/TerminalCell.vue";
+import { CELL_CHIP_BTN, CELL_CHIP_ICON } from "../../../src/components/cellChromeClasses";
 import { TOOL_GROUPS } from "../../../common/toolGroups";
 
 // Capture the "sessions" pub/sub callback and the reconnect handler so tests can push
@@ -28,10 +29,10 @@ vi.mock("../../../src/components/Terminal.vue", () => ({
     name: "TerminalView",
     props: ["sessionId", "connectKey", "cwd", "hideHeader"],
     emits: ["session", "cwd"],
-    // Render the header-actions slot so the cell's icon buttons (moved onto the
-    // terminal's header row) are present in the test DOM — but only when the header
-    // is shown, mirroring Terminal.vue's `v-if="!hideHeader"`.
-    template: '<div class="stub-term"><slot v-if="!hideHeader" name="header-actions" /></div>',
+    // Render both of the header's slots so the cell's path menu (header-lead) and its icon
+    // buttons (header-actions) are present in the test DOM — but only when the header is
+    // shown, mirroring Terminal.vue's `v-if="!hideHeader"`.
+    template: '<div class="stub-term"><slot v-if="!hideHeader" name="header-lead" /><slot v-if="!hideHeader" name="header-actions" /></div>',
     methods: {
       terminate() {},
       submitText() {
@@ -82,6 +83,7 @@ function mountCell(
     openCwds?: string[];
     expanded?: boolean;
     zoomed?: boolean;
+    reorderable?: boolean;
   } = {},
 ) {
   return mount(TerminalCell, {
@@ -89,6 +91,7 @@ function mountCell(
       uid: 1,
       expanded: opts.expanded ?? false,
       zoomed: opts.zoomed ?? false,
+      reorderable: opts.reorderable ?? false,
       initialSessionId,
       initialCwd: opts.initialCwd ?? null,
       defaultCwd: opts.defaultCwd ?? "/home/me/my-project",
@@ -100,6 +103,31 @@ function mountCell(
     },
   });
 }
+
+// The chip pointing at a given directory. The workspace chip always leads the list (launchChips),
+// so selecting a chip by position picks the wrong one — and it is matched on the PATH rather than
+// the label because the demo workspace is `my-project`, which a substring match on "proj" finds
+// first. Throws when nothing matches, so a stale selector fails as a selector rather than as a
+// puzzling assertion about `undefined`.
+function chipForPath(w: ReturnType<typeof mountCell>, path: string) {
+  // A WHOLE-path match: the title is the path, optionally followed by " — " and a reason, so
+  // `startsWith(path)` alone would let a request for `/repo` select `/repo-backup` (CodeRabbit).
+  const chip = w.findAll('[data-testid="cell-chip"]').find((c) => {
+    const title = c.find('[data-testid="cell-chip-main"]').attributes("title") ?? "";
+    return title === path || title.startsWith(`${path} —`);
+  });
+  if (!chip) throw new Error(`no chip for ${path}`);
+  return chip;
+}
+
+// An empty cell pointed at a PROJECT directory — deliberately NOT the workspace. Two parts of the
+// launcher are absent there: the per-directory tool-group switches (the workspace is TOLD it has
+// every tool, since it is handed the whole GUI MCP at spawn whatever agent runs there) and the
+// worktree section (a worktree isolates work on one codebase; the workspace is what a session
+// works FROM). So a test about either has to stand somewhere else — `mountCell` with no initialCwd
+// points the field at defaultCwd, which IS the workspace.
+const WORKSPACE = "/home/me/ws";
+const mountProjectCell = (dir: string) => mountCell(null, { initialCwd: dir, defaultCwd: WORKSPACE });
 
 describe("TerminalCell", () => {
   // #965: the whole cell — header included — sits in one wrapper, so the focus zoom can be
@@ -114,10 +142,10 @@ describe("TerminalCell", () => {
   it("shows the ~-anchored workspace path in the header", async () => {
     const w = mountCell("11111111-1111-1111-1111-111111111111", { initialCwd: "/home/me/ss/my-project" });
     await flushPromises();
-    expect(w.find(".cell-dir").text()).toBe("~/ss/my-project");
+    expect(w.find(".cell-dir-path").text()).toBe("~/ss/my-project");
   });
 
-  it("clicking the header dir asks the server to open that folder", async () => {
+  it("revealing from the path menu asks the server to open that folder", async () => {
     const urls: string[] = [];
     const bodies: string[] = [];
     globalThis.fetch = vi.fn((url: string, init?: { body?: string }) => {
@@ -129,7 +157,8 @@ describe("TerminalCell", () => {
 
     const w = mountCell("11111111-1111-1111-1111-111111111111", { initialCwd: "/home/me/ss/proj" });
     await flushPromises();
-    await w.find(".cell-dir").trigger("click");
+    await w.find(".cell-dir").trigger("click"); // opens the menu…
+    await w.findAll('[data-testid="cell-path-item"]')[0].trigger("click"); // …Reveal is first
 
     expect(urls).toContain("/api/open-dir");
     expect(bodies.some((b) => b.includes("/home/me/ss/proj"))).toBe(true);
@@ -138,13 +167,13 @@ describe("TerminalCell", () => {
   it("shows a non-home path in full", async () => {
     const w = mountCell("55555555-5555-5555-5555-555555555555", { initialCwd: "/var/data/proj" });
     await flushPromises();
-    expect(w.find(".cell-dir").text()).toBe("/var/data/proj");
+    expect(w.find(".cell-dir-path").text()).toBe("/var/data/proj");
   });
 
   it("shows '⎇ <repo> (<task>)' instead of the managed path for a worktree cell", async () => {
     const w = mountCell("66666666-6666-6666-6666-666666666666", { initialCwd: "/home/me/.mulmoterminal/worktrees/myrepo-1a2b3c4d/fix-login" });
     await flushPromises();
-    expect(w.find(".cell-dir").text()).toBe("⎇ myrepo (fix-login)");
+    expect(w.find(".cell-dir-path").text()).toBe("⎇ myrepo (fix-login)");
   });
 
   it("launches in the dir typed in the form and sends it to the terminal", async () => {
@@ -597,7 +626,7 @@ describe("TerminalCell", () => {
     await nextTick();
     // The cell persists + displays the effective cwd, not the typed one.
     expect(w.emitted("cwd")?.at(-1)).toEqual(["/home/me/default"]);
-    expect(w.find(".cell-dir").text()).toBe("~/default");
+    expect(w.find(".cell-dir-path").text()).toBe("~/default");
   });
 
   it("reflects working / blocked / done pushed for its own session", async () => {
@@ -969,34 +998,53 @@ describe("TerminalCell", () => {
     }) as unknown as typeof fetch;
   }
 
-  it("shows the GitHub button when the dir is a GitHub repo", async () => {
+  // The GitHub items live in the PATH MENU now — the separate GitHub button is gone, along with
+  // the `gh` default header button. `openPathMenu` returns the menu's item labels so a test can
+  // assert on what the menu offers rather than on which button rendered.
+  // Each item leads with a Material Symbols ligature, which renders as its own text node — so the
+  // icon name is stripped to leave the label a reader would see.
+  const itemLabel = (text: string) => text.replace(/^\S+\s+/, "");
+  const openPathMenu = async (w: ReturnType<typeof mountCell>) => {
+    await w.find(".cell-dir").trigger("click");
+    return w.findAll('[data-testid="cell-path-item"]').map((b) => itemLabel(b.text()));
+  };
+
+  it("offers the GitHub destinations in the path menu when the dir is a GitHub repo", async () => {
     mockFetchWithGithub("https://github.com/owner/repo");
     const w = mountCell("33333333-3333-3333-3333-333333333333", { initialCwd: "/home/me/repo" });
     await flushPromises();
-    expect(w.find('[data-testid="cell-gh"]').exists()).toBe(true);
+    expect(await openPathMenu(w)).toEqual([
+      "Reveal in the file manager",
+      "Browse files in the app",
+      "New terminal here",
+      "Repository",
+      "Issues",
+      "Pull requests",
+    ]);
   });
 
-  it("hides the GitHub button for a non-GitHub repo (null) and on lookup failure", async () => {
+  it("keeps the GitHub destinations out of the menu for a non-GitHub repo (null) and on lookup failure", async () => {
+    const local = ["Reveal in the file manager", "Browse files in the app", "New terminal here"];
     mockFetchWithGithub(null);
     const a = mountCell("33333333-3333-3333-3333-333333333333", { initialCwd: "/home/me/repo" });
     await flushPromises();
-    expect(a.find('[data-testid="cell-gh"]').exists()).toBe(false);
+    expect(await openPathMenu(a)).toEqual(local);
 
     mockFetchWithGithub("https://github.com/owner/repo", false); // res.ok = false
     const b = mountCell("33333333-3333-3333-3333-333333333333", { initialCwd: "/home/me/repo" });
     await flushPromises();
-    expect(b.find('[data-testid="cell-gh"]').exists()).toBe(false);
+    expect(await openPathMenu(b)).toEqual(local);
   });
 
-  it("opens repository / issues / pull requests from the popover", async () => {
+  it("opens repository / issues / pull requests from the path menu", async () => {
     mockFetchWithGithub("https://github.com/owner/repo");
     const openSpy = vi.spyOn(window, "open").mockReturnValue(null);
     const w = mountCell("33333333-3333-3333-3333-333333333333", { initialCwd: "/home/me/repo" });
     await flushPromises();
 
     const openItem = async (label: string) => {
-      await w.find('[data-testid="cell-gh"]').trigger("click");
-      const item = w.findAll('[data-testid="cell-gh-item"]').find((b) => b.text() === label);
+      await w.find(".cell-dir").trigger("click");
+      const item = w.findAll('[data-testid="cell-path-item"]').find((b) => itemLabel(b.text()) === label);
       await item?.trigger("click");
     };
     await openItem("Repository");
@@ -1011,15 +1059,18 @@ describe("TerminalCell", () => {
     openSpy.mockRestore();
   });
 
-  it("toggles the popover and closes it on Escape", async () => {
+  it("toggles the path menu and closes it on Escape", async () => {
     mockFetchWithGithub("https://github.com/owner/repo");
     const w = mountCell("33333333-3333-3333-3333-333333333333", { initialCwd: "/home/me/repo" });
     await flushPromises();
-    expect(w.find('[data-testid="cell-gh-menu"]').exists()).toBe(false);
-    await w.find('[data-testid="cell-gh"]').trigger("click");
-    expect(w.find('[data-testid="cell-gh-menu"]').exists()).toBe(true);
-    await w.find('[data-testid="cell-gh-menu"]').trigger("keydown", { key: "Escape" });
-    expect(w.find('[data-testid="cell-gh-menu"]').exists()).toBe(false);
+    expect(w.find('[data-testid="cell-path-menu"]').exists()).toBe(false);
+    await w.find(".cell-dir").trigger("click");
+    expect(w.find('[data-testid="cell-path-menu"]').exists()).toBe(true);
+    // Escape is pressed ON THE TRIGGER, which is where focus actually is after opening the menu
+    // with the mouse or the keyboard. A handler bound to the menu itself passes a test that
+    // dispatches the key at the menu and does nothing at all for a real user (codex review, #1382).
+    await w.find(".cell-dir").trigger("keydown", { key: "Escape" });
+    expect(w.find('[data-testid="cell-path-menu"]').exists()).toBe(false);
   });
 
   it("ignores an out-of-order /api/git-remote response after a fast cwd change", async () => {
@@ -1044,10 +1095,10 @@ describe("TerminalCell", () => {
     await flushPromises();
 
     const openSpy = vi.spyOn(window, "open").mockReturnValue(null);
-    await w.find('[data-testid="cell-gh"]').trigger("click");
+    await w.find(".cell-dir").trigger("click");
     await w
-      .findAll('[data-testid="cell-gh-item"]')
-      .find((b) => b.text() === "Repository")
+      .findAll('[data-testid="cell-path-item"]')
+      .find((b) => itemLabel(b.text()) === "Repository")
       ?.trigger("click");
     expect(openSpy.mock.calls.at(-1)?.[0]).toBe("https://github.com/owner/repoB");
     openSpy.mockRestore();
@@ -1078,7 +1129,7 @@ describe("TerminalCell", () => {
 
   it("shows the worktree section and lists existing worktrees when the dir is a git repo", async () => {
     mockFetchWithWorktrees([{ path: "/wt/fix-login", branch: "agent/fix-login", task: "fix-login", dirty: false }]);
-    const w = mountCell(null, { defaultCwd: "/home/me/repo" });
+    const w = mountProjectCell("/home/me/repo");
     await flushPromises();
     expect(w.find('[data-testid="cell-worktrees"]').exists()).toBe(true);
     const rows = w.findAll('[data-testid="worktree-reuse"]');
@@ -1095,7 +1146,7 @@ describe("TerminalCell", () => {
 
   it("creates a worktree for the typed task and launches claude in it", async () => {
     const posts = mockFetchWithWorktrees([], { path: "/wt/fix-login", branch: "agent/fix-login" });
-    const w = mountCell(null, { defaultCwd: "/home/me/repo" });
+    const w = mountProjectCell("/home/me/repo");
     await flushPromises();
     await w.find('[data-testid="wt-task"]').setValue("fix login");
     await w.find('[data-testid="wt-start"]').trigger("click");
@@ -1110,7 +1161,7 @@ describe("TerminalCell", () => {
 
   it("reuses an existing worktree by launching claude in its path", async () => {
     mockFetchWithWorktrees([{ path: "/wt/old-task", branch: "agent/old-task", task: "old-task", dirty: false }]);
-    const w = mountCell(null, { defaultCwd: "/home/me/repo" });
+    const w = mountProjectCell("/home/me/repo");
     await flushPromises();
     await w.find('[data-testid="worktree-reuse"]').trigger("click");
     // The launch waits on the tool-group sync — one read of the worktree's registrations, plus a
@@ -1123,7 +1174,7 @@ describe("TerminalCell", () => {
 
   it("removes a clean worktree (deleteBranch, no force) without confirming", async () => {
     const posts = mockFetchWithWorktrees([{ path: "/wt/done", branch: "agent/done", task: "done", dirty: false }]);
-    const w = mountCell(null, { defaultCwd: "/home/me/repo" });
+    const w = mountProjectCell("/home/me/repo");
     await flushPromises();
     await w.find('[data-testid="wt-del"]').trigger("click");
     await flushPromises();
@@ -1135,7 +1186,7 @@ describe("TerminalCell", () => {
   it("confirms before removing a DIRTY worktree, and forces when confirmed", async () => {
     const posts = mockFetchWithWorktrees([{ path: "/wt/wip", branch: "agent/wip", task: "wip", dirty: true }]);
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(true);
-    const w = mountCell(null, { defaultCwd: "/home/me/repo" });
+    const w = mountProjectCell("/home/me/repo");
     await flushPromises();
     expect(w.find('[data-testid="wt-dirty"]').exists()).toBe(true); // the ● uncommitted-changes marker
     await w.find('[data-testid="wt-del"]').trigger("click");
@@ -1150,7 +1201,7 @@ describe("TerminalCell", () => {
   it("does NOT remove a dirty worktree when the user cancels the confirm", async () => {
     const posts = mockFetchWithWorktrees([{ path: "/wt/wip", branch: "agent/wip", task: "wip", dirty: true }]);
     const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
-    const w = mountCell(null, { defaultCwd: "/home/me/repo" });
+    const w = mountProjectCell("/home/me/repo");
     await flushPromises();
     await w.find('[data-testid="wt-del"]').trigger("click");
     await flushPromises();
@@ -1386,7 +1437,7 @@ describe("TerminalCell", () => {
   });
 
   it("Open PR opens the returned url in a new tab", async () => {
-    mockFetchWithPr(aheadDiff(2), { body: { ok: true, url: "https://github.com/owner/repo/pull/9", via: "gh" } });
+    mockFetchWithPr(aheadDiff(2), { body: { ok: true, url: "https://github.com/owner/repo/pull/9", via: "cli" } });
     const openSpy = vi.spyOn(window, "open").mockReturnValue(null);
     const w = mountCell("66666666-6666-6666-6666-666666666666", { initialCwd: WT_CWD });
     await flushPromises();
@@ -1664,25 +1715,58 @@ describe("TerminalCell", () => {
     expect(w.find('[data-testid="ccx-remove"]').text()).toContain("Discard");
   });
 
-  it("keeps expand + close on row 1 (cell-header); the other icons live on row 2", async () => {
-    const w = mountCell("11111111-1111-1111-1111-111111111111", { initialCwd: "/home/me/proj" });
+  it("keeps the CELL's own controls on row 1 (cell-header); the SESSION's actions live on row 2", async () => {
+    const w = mountCell("11111111-1111-1111-1111-111111111111", { initialCwd: "/home/me/proj", reorderable: true });
     await flushPromises();
-    // Row 1 (cell-header): dir + prompt + expand/close.
+    // Row 1 (cell-header): dir + prompt, and the controls that act on the cell itself — reorder,
+    // expand, close. They have to be here rather than on row 2: row 2 is the session's header and
+    // is hidden entirely on a filmstrip thumbnail.
     const header = w.find(".cell-header");
-    expect(header.find("button.cell-dir").exists()).toBe(true);
     expect(header.find(".cell-close").exists()).toBe(true);
     expect(header.find('[aria-label="Expand terminal"]').exists()).toBe(true);
-    // The timeline / reorder / GitHub icons stay on row 2 (the TerminalView slot).
+    expect(header.find('[aria-label="Move terminal left"]').exists()).toBe(true);
+    expect(header.find('[aria-label="Move terminal right"]').exists()).toBe(true);
+    // The timeline / GitHub icons act on the running session, so they stay on row 2 (the
+    // TerminalView slot).
     expect(header.find('[aria-label="Show activity timeline"]').exists()).toBe(false);
     expect(w.find('[aria-label="Show activity timeline"]').exists()).toBe(true);
+  });
+
+  it("puts reorder with the other cell controls, before expand", async () => {
+    const w = mountCell("11111111-1111-1111-1111-111111111111", { initialCwd: "/home/me/proj", reorderable: true });
+    await flushPromises();
+    const labels = w.findAll(".cell-header > .cell-actions button").map((b) => b.attributes("aria-label"));
+    expect(labels).toEqual(["Move terminal left", "Move terminal right", "Expand terminal", "Set aside (stays open, keeps its history)", "Close terminal"]);
+  });
+
+  it("drops reorder when the grid is not reorderable", async () => {
+    const w = mountCell("11111111-1111-1111-1111-111111111111", { initialCwd: "/home/me/proj" });
+    await flushPromises();
+    expect(w.find('[aria-label="Move terminal left"]').exists()).toBe(false);
+  });
+
+  // The note pencil, the unread-canvas count and the diff badge are one family: pressable chips
+  // that sit INSIDE the info track. They must stay chip-sized rather than CELL_BTN-sized, or the
+  // header's height would depend on whether a cell happens to have a note. The three drifted apart
+  // when each wrote its own class string, which read as the pencil being styled by mistake.
+  it("styles the info track's pressable chips as one family", async () => {
+    const w = mountCell("11111111-1111-1111-1111-111111111111", { initialCwd: "/home/me/proj" });
+    await flushPromises();
+    const pencil = w.find('[data-testid="cell-memo-edit"]');
+    expect(pencil.exists()).toBe(true);
+    for (const cls of CELL_CHIP_BTN.split(" ")) expect(pencil.classes()).toContain(cls);
+    // Chip-sized, not CELL_BTN-sized: the fixed box is what would change the header's height.
+    expect(pencil.classes()).not.toContain("h-[26px]");
+    // Its ink is the one thing it does NOT share — the pencil says whether a note exists.
+    expect(pencil.classes()).toContain("text-dim");
+    expect(pencil.find("span").classes().join(" ")).toBe(CELL_CHIP_ICON);
   });
 
   it("pins expand + close outside the info track so crowded header info can't push them off", async () => {
     const w = mountCell("11111111-1111-1111-1111-111111111111", { initialCwd: "/home/me/proj" });
     await flushPromises();
-    // The info (dot / dir / chips / prompt) lives in the shrinkable, clipping track…
+    // The info (dot / chips / prompt) lives in the shrinkable, clipping track…
     expect(w.find('.cell-header > [data-testid="cell-header-main"]').exists()).toBe(true);
-    expect(w.find('[data-testid="cell-header-main"] .cell-dir').exists()).toBe(true);
     expect(w.find('[data-testid="cell-header-main"] [data-testid="cell-prompt"]').exists()).toBe(true);
     // …while the actions are a SIBLING of it, so they can never be pushed out of the cell.
     expect(w.find(".cell-header > .cell-actions").exists()).toBe(true);
@@ -1695,7 +1779,7 @@ describe("TerminalCell", () => {
     const w = mountCell("11111111-1111-1111-1111-111111111111", { initialCwd: "/home/me/proj", expanded: true });
     await flushPromises();
     expect(w.find('[aria-label="Restore terminal"]').exists()).toBe(true);
-    expect(w.find("button.cell-dir").exists()).toBe(true); // dir stays clickable
+    expect(w.find("button.cell-dir").exists()).toBe(true); // the path menu stays reachable
   });
 
   it("a filmstrip thumbnail (another cell zoomed) uses the shared roster header, chips stripped", async () => {
@@ -1837,7 +1921,9 @@ describe("TerminalCell", () => {
       ],
     });
     await flushPromises();
-    expect(w.findAll('[data-testid="cell-chip-main"]').map((b) => b.text())).toEqual(["c", "b", "a", "d"]);
+    // The workspace leads, outside the ranking — it is not one of the directories being ranked
+    // against each other (see launchChips). Its label carries the icon's ligature text.
+    expect(w.findAll('[data-testid="cell-chip-main"]').map((b) => b.text())).toEqual(["workspacesWORKSPACE", "c", "b", "a", "d"]);
   });
 
   it("tints a preset chip whose dir already has a running session elsewhere", () => {
@@ -1874,7 +1960,7 @@ describe("TerminalCell", () => {
     const w = mountCell(null, { presets: [{ label: "busy", path: "/chip/busy" }], openCwds: ["/chip/busy"] });
     await flushPromises();
 
-    const chip = w.find('[data-testid="cell-chip"]');
+    const chip = chipForPath(w, "/chip/busy");
     expect(chip.classes()).toContain("is-running");
     expect(chip.attributes("style") ?? "").not.toContain("#aa1122"); // the blue keeps the background
     expect(chip.find('[data-testid="cell-chip-color"]').attributes("style")).toContain("rgb(170, 17, 34)");
@@ -1932,7 +2018,7 @@ describe("TerminalCell", () => {
       return { ok: true, json: async () => ({ working: false, waiting: false, lastPrompt: null }) };
     }) as unknown as typeof fetch;
 
-    const w = mountCell(null);
+    const w = mountProjectCell("/home/me/my-project");
     await flushPromises();
 
     const box = w.find('[data-testid="cell-mcp-toggle-render"]');
@@ -1962,7 +2048,7 @@ describe("TerminalCell", () => {
       return { ok: true, json: async () => ({ working: false, waiting: false, lastPrompt: null }) };
     }) as unknown as typeof fetch;
 
-    const w = mountCell(null);
+    const w = mountProjectCell("/home/me/my-project");
     await flushPromises();
     const box = w.find('[data-testid="cell-mcp-toggle-render"]');
     await box.setValue(true);
@@ -1996,7 +2082,7 @@ describe("TerminalCell", () => {
       return { ok: true, json: async () => ({ working: false, waiting: false, lastPrompt: null }) };
     }) as unknown as typeof fetch;
 
-    const w = mountCell(null, { defaultCwd: "/home/me/alpha" });
+    const w = mountProjectCell("/home/me/alpha");
     await flushPromises();
 
     // media goes first and hangs; render queues behind it, both flipped in alpha.
@@ -2037,7 +2123,7 @@ describe("TerminalCell", () => {
       return { ok: true, json: async () => ({ working: false, waiting: false, lastPrompt: null }) };
     }) as unknown as typeof fetch;
 
-    const w = mountCell(null);
+    const w = mountProjectCell("/home/me/my-project");
     await flushPromises();
     const codexButton = w.findAll('[role="radio"]').find((b) => b.text() === "Codex");
     expect(codexButton).toBeDefined();
@@ -2071,7 +2157,7 @@ describe("TerminalCell", () => {
       return { ok: true, json: async () => ({ working: false, waiting: false, lastPrompt: null }) };
     }) as unknown as typeof fetch;
 
-    const w = mountCell(null, { defaultCwd: "/home/me/alpha" });
+    const w = mountProjectCell("/home/me/alpha");
     await flushPromises();
 
     for (const group of TOOL_GROUPS) expect(w.find(`[data-testid="cell-mcp-toggle-${group}"]`).exists()).toBe(true);
@@ -2114,7 +2200,7 @@ describe("TerminalCell", () => {
       return { ok: true, json: async () => ({ working: false, waiting: false, lastPrompt: null }) };
     }) as unknown as typeof fetch;
 
-    const w = mountCell(null, { defaultCwd: "/home/me/repo" });
+    const w = mountProjectCell("/home/me/repo");
     await flushPromises();
     await w.find('[data-testid="worktree-reuse"]').trigger("click");
     await flushPromises();
@@ -2136,7 +2222,7 @@ describe("TerminalCell", () => {
       return { ok: true, json: async () => ({ working: false, waiting: false, lastPrompt: null }) };
     }) as unknown as typeof fetch;
 
-    const w = mountCell(null, { defaultCwd: "/home/me/alpha" });
+    const w = mountProjectCell("/home/me/alpha");
     await flushPromises();
     expect(w.find('[data-testid="cell-mcp-toggle-render"]').exists()).toBe(true);
 
@@ -2175,7 +2261,7 @@ describe("TerminalCell", () => {
       return { ok: true, json: async () => ({ working: false, waiting: false, lastPrompt: null }) };
     }) as unknown as typeof fetch;
 
-    const w = mountCell(null, { defaultCwd: "/home/me/proj" });
+    const w = mountProjectCell("/home/me/proj");
     await flushPromises();
     await w.find('[data-testid="cell-mcp-toggle-render"]').setValue(true);
     await w.find('[data-testid="cell-dir-input"]').trigger("keydown.enter");
@@ -2336,7 +2422,7 @@ describe("TerminalCell launch target — the OS default shell (#1114)", () => {
     const w = mountCell(null, { presets: [{ label: "proj", path: "/home/me/proj" }] });
     await flushPromises();
     await pick(w, "shell");
-    await w.find('[data-testid="cell-chip-launch"]').trigger("click");
+    await chipForPath(w, "/home/me/proj").find('[data-testid="cell-chip-launch"]').trigger("click");
     expect(w.emitted("launch")).toEqual([[SHELL_PICK]]);
     expect(w.emitted("agent")).toBeUndefined();
   });
@@ -2352,7 +2438,7 @@ describe("TerminalCell launch target — the OS default shell (#1114)", () => {
 
   it("hides the model / MCP / worktree options for a shell and brings them back for an agent", async () => {
     mockFetchWithAgentOptions();
-    const w = mountCell(null);
+    const w = mountProjectCell("/home/me/my-project");
     await flushPromises();
     expect(w.find('[data-testid="cell-model-help"]').exists()).toBe(true);
     expect(w.find('[data-testid="cell-mcp-toggle-render"]').exists()).toBe(true);

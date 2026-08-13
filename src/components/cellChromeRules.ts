@@ -5,7 +5,7 @@ const REASON_MESSAGES = new Map<string, string>([
   ["not-worktree", "Not a worktree"],
   ["no-branch", "No branch to push"],
   ["no-remote", "No git remote (origin) configured"],
-  ["no-github", "Not a GitHub repo — push succeeded; open the PR manually"],
+  ["no-forge", "Push succeeded — this remote is on a forge MulmoTerminal cannot open a request on; do it there"],
   ["push-failed", "Push failed"],
   ["failed", "Failed"],
 ]);

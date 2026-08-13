@@ -54,8 +54,8 @@ export const MANAGE_ACCOUNTING: ToolDefinition = {
       },
       fiscalYearEnd: {
         type: "integer",
-        minimum: FISCAL_YEAR_END_MONTHS[0],
-        maximum: FISCAL_YEAR_END_MONTHS[FISCAL_YEAR_END_MONTHS.length - 1],
+        minimum: FISCAL_YEAR_END_MONTHS[0] ?? 1,
+        maximum: FISCAL_YEAR_END_MONTHS[FISCAL_YEAR_END_MONTHS.length - 1] ?? 12,
         description:
           "For 'createBook' / 'updateBook': the calendar month (1-12) on whose LAST DAY this book's fiscal year closes — e.g. 3 = March 31, 8 = August 31, 12 = December 31 (calendar year, the default). Any month is allowed. Drives the date-range shortcuts in the UI ('current quarter', 'current year', etc.). Pure metadata: changing it does not move existing entries.",
       },

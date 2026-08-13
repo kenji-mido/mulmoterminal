@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect, afterEach } from "vitest";
 import { getAgentAdapter } from "../../../server/agents/registry.js";
 import { claudeAdapter } from "../../../server/agents/claude.js";

@@ -30,7 +30,11 @@ export function stripFrontmatter(content: string): string {
 export function renderWikiHtml(content: string): string {
   // renderWikiLinks first (it escapes the text), then marked — see the file header.
   const linked = renderWikiLinks(stripFrontmatter(content));
-  const html = marked.parse(linked, { async: false }) as string;
+  // `{ async: false }` makes marked return synchronously, but its declared return type is still
+  // `string | Promise<string>`; check rather than assert so a future default flip cannot hand
+  // DOMPurify a Promise (which sanitizes to the string "[object Promise]").
+  const parsed = marked.parse(linked, { async: false });
+  const html = typeof parsed === "string" ? parsed : "";
   // DOMPurify keeps class + data-* by default (so the data-page hook survives).
   const clean = DOMPurify.sanitize(html, { ADD_ATTR: ["target"] });
   const doc = new DOMParser().parseFromString(clean, "text/html");

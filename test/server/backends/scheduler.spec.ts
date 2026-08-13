@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { SCHEDULE_TYPES } from "@receptron/task-scheduler";
-import type { Server } from "node:http";
+import { appRequest } from "../../helpers/appRequest.js";
 import type { TaskDefinition } from "@mulmoclaude/core/scheduler";
 import { buildUserTaskDefinitions, loadUserTasks, mountSchedulerRoutes, initUserTaskScheduler } from "../../../server/backends/scheduler.js";
 
@@ -108,23 +108,13 @@ describe("loadUserTasks", () => {
 });
 
 describe("mountSchedulerRoutes", () => {
-  let server: Server;
-  let base: string;
-
-  afterEach(() => server?.close());
-
   it("GET /api/scheduler/tasks lists the persisted tasks", async () => {
     const tasks = [{ id: "a", schedule: { type: "daily", time: "11:00" }, enabled: true, prompt: "go" }];
     const workspace = makeWorkspace(tasks);
     const app = express();
     mountSchedulerRoutes(app, { workspace });
-    await new Promise<void>((resolve) => {
-      server = app.listen(0, () => resolve());
-    });
-    const addr = server.address();
-    base = `http://127.0.0.1:${typeof addr === "object" && addr ? addr.port : 0}`;
 
-    const res = await fetch(`${base}/api/scheduler/tasks`);
+    const res = await appRequest(app)("/api/scheduler/tasks");
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ tasks });
   });

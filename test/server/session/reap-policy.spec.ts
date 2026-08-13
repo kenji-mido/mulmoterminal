@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 import { reapDecisionFor, reapTimerDelay, parseWaitGraceMs, MAX_TIMER_MS, shouldForgetActivity } from "../../../server/session/reap-policy.js";
 

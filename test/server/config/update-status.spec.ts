@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
 // vi.mock is hoisted above imports, so the doubles it returns must be created inside a

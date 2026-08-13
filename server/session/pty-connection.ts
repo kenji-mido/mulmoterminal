@@ -9,6 +9,7 @@ import type { IPty } from "node-pty";
 import type { WebSocket } from "ws";
 import { messageOf } from "../errors.js";
 import { isResizeFrame } from "./ws-frames.js";
+import { isRecord } from "../../common/isRecord.js";
 import { stripTerminalQueries, terminalModePrefix } from "./terminal-replay.js";
 import type { PtyEntry } from "./types.js";
 
@@ -43,15 +44,23 @@ export interface ConnectionDeps {
   cancelTerminalSizeCheck: (id: string) => void;
 }
 
+// The one place a browser's bytes become data. Answers a plain record so every field below is
+// read through a check — `JSON.parse` alone hands back `any`, which would put the whole frame,
+// including whatever gets written to the PTY, outside the type checker.
+function parseClientFrame(raw: WireFrame): Record<string, unknown> | null {
+  try {
+    const msg: unknown = JSON.parse(raw.toString());
+    return isRecord(msg) ? msg : null; // not an object — never write arbitrary payloads to the PTY
+  } catch {
+    return null; // not JSON at all
+  }
+}
+
 // browser -> command PTY. Like handleClientFrame but for the session-less command
 // terminal: only input/resize (no terminate/session machinery).
 export function handleCommandFrame(term: IPty, raw: WireFrame) {
-  let msg;
-  try {
-    msg = JSON.parse(raw.toString());
-  } catch {
-    return; // not JSON — never write arbitrary payloads to the PTY
-  }
+  const msg = parseClientFrame(raw);
+  if (!msg) return;
   try {
     if (msg.type === "input" && typeof msg.data === "string") {
       term.write(msg.data);
@@ -118,12 +127,8 @@ export function createConnectionHandlers(deps: ConnectionDeps) {
   function handleClientFrame(entry: PtyEntry, ws: WebSocket, raw: WireFrame, sessionId: string) {
     // Ignore frames from a socket that a newer client has already superseded.
     if (entry.ws !== ws) return;
-    let msg;
-    try {
-      msg = JSON.parse(raw.toString());
-    } catch {
-      return; // not JSON — never write arbitrary payloads to the PTY
-    }
+    const msg = parseClientFrame(raw);
+    if (!msg) return;
     try {
       if (msg.type === "terminate") {
         // Explicit close (the cell's close button) — reap now instead of waiting out the

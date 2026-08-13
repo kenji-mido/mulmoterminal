@@ -22,6 +22,7 @@ import { promises as fs } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { Express, Request, Response } from "express";
 import { stripBom } from "../infra/read-text-file.js";
+import { isRecord } from "../../common/isRecord.js";
 
 // ── On-disk cache schema (SHARED with MulmoClaude — do not diverge) ───────────
 
@@ -39,12 +40,12 @@ function emptyDictionary(): DictionaryFile {
 // dictionary on anything unrecognized, so a `{}` / `{ sentences: null }` file can't
 // turn every request for the namespace into a 500.
 function isValidDictionary(value: unknown): value is DictionaryFile {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const { sentences } = value as { sentences?: unknown };
-  if (typeof sentences !== "object" || sentences === null || Array.isArray(sentences)) return false;
+  if (!isRecord(value)) return false;
+  const { sentences } = value;
+  if (!isRecord(sentences)) return false;
   for (const inner of Object.values(sentences)) {
-    if (typeof inner !== "object" || inner === null || Array.isArray(inner)) return false;
-    for (const translated of Object.values(inner as Record<string, unknown>)) {
+    if (!isRecord(inner)) return false;
+    for (const translated of Object.values(inner)) {
       if (typeof translated !== "string") return false;
     }
   }
@@ -115,7 +116,7 @@ export function mergeTranslations(dict: DictionaryFile, lang: string, fresh: Rea
     safeAssign(next, source, { ...langs });
   }
   for (const [source, translated] of fresh) {
-    const existing = Object.hasOwn(next, source) ? next[source] : {};
+    const existing = (Object.hasOwn(next, source) ? next[source] : undefined) ?? {};
     // `lang` is regex-validated upstream so it can't be a dangerous key; the only
     // unsafe site is the user-supplied `source`, handled by safeAssign.
     existing[lang] = translated;
@@ -164,7 +165,7 @@ interface TranslateRequest {
 
 /** Validate + narrow the request body. Throws TranslationInputError on bad input. */
 export function validateRequest(body: unknown): TranslateRequest {
-  const req = (body ?? {}) as Record<string, unknown>;
+  const req: Record<string, unknown> = isRecord(body) ? body : {};
   if (typeof req.namespace !== "string" || !NAMESPACE_RE.test(req.namespace)) {
     throw new TranslationInputError(`invalid namespace: ${JSON.stringify(req.namespace)}`);
   }
@@ -178,10 +179,14 @@ export function validateRequest(body: unknown): TranslateRequest {
     throw new TranslationInputError(`sentences exceeds ${MAX_SENTENCES} entries`);
   }
   let totalChars = 0;
+  // Collected as they are checked, so the validated strings ARE the returned array — asserting
+  // `req.sentences as string[]` afterwards would re-state what this loop already proved.
+  const sentences: string[] = [];
   for (const sentence of req.sentences) {
     if (typeof sentence !== "string" || sentence.length === 0) {
       throw new TranslationInputError("sentences must contain non-empty strings");
     }
+    sentences.push(sentence);
     if (sentence.length > MAX_SENTENCE_CHARS) {
       throw new TranslationInputError(`sentence exceeds ${MAX_SENTENCE_CHARS} characters`);
     }
@@ -190,7 +195,7 @@ export function validateRequest(body: unknown): TranslateRequest {
       throw new TranslationInputError(`total sentence length exceeds ${MAX_TOTAL_CHARS} characters`);
     }
   }
-  return { namespace: req.namespace, targetLanguage: req.targetLanguage, sentences: req.sentences as string[] };
+  return { namespace: req.namespace, targetLanguage: req.targetLanguage, sentences };
 }
 
 // ── LLM step (injected) ───────────────────────────────────────────────────────
@@ -228,7 +233,7 @@ export function mountTranslationRoutes(app: Express, deps: TranslationDeps): voi
     const next = prev.catch(() => undefined).then(runner);
     const tracked = next.catch(() => undefined);
     chains.set(namespace, tracked);
-    tracked.then(() => {
+    void tracked.then(() => {
       if (chains.get(namespace) === tracked) chains.delete(namespace);
     });
     return next;
@@ -245,7 +250,11 @@ export function mountTranslationRoutes(app: Express, deps: TranslationDeps): voi
       throw new Error(`[translation] LLM returned ${translated.length} translations for ${misses.length} sentences`);
     }
     const fresh = new Map<string, string>();
-    misses.forEach((sentence, index) => fresh.set(sentence, translated[index]));
+    // Length equality was checked immediately above, so every index is present.
+    misses.forEach((sentence, index) => {
+      const line = translated[index];
+      if (line !== undefined) fresh.set(sentence, line);
+    });
     await saveDictionary(deps.workspace, req.namespace, mergeTranslations(dict, req.targetLanguage, fresh));
     return assembleResult(req.sentences, cached, fresh);
   }

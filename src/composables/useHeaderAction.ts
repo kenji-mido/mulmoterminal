@@ -13,6 +13,7 @@ import { toInsertText } from "../components/dropPaths";
 import { openFilePicker } from "./useFilePicker";
 import { isTouchDevice } from "./touchDevice";
 import type { HeaderButton, OpenTarget } from "./useHeaderButtons";
+import { fetchWithTimeout } from "../utils/fetchWithTimeout";
 
 const OPEN_URL_SCHEMES: ReadonlySet<string> = new Set(["http:", "https:"]);
 
@@ -23,6 +24,9 @@ const OPEN_URL_SCHEMES: ReadonlySet<string> = new Set(["http:", "https:"]);
 // terminal; `cwd` seeds where the picker opens (the session's working dir).
 function pickFileInto(slotKey: string | null, cwd: string | null): void {
   if (!slotKey) return;
+  // The fork's in-browser picker, not upstream's /api/pick-file. That route opens the native
+  // dialog on the SERVER's display — fine when the browser and the server are the same machine,
+  // useless from a phone or any other tab on the tailnet, which is where this fork is used.
   openFilePicker({ start: cwd, onSelect: (paths) => insertText(slotKey, toInsertText(paths)) });
 }
 
@@ -35,7 +39,9 @@ function openUrl(url: string): void {
 }
 
 function revealDir(dirPath: string): void {
-  fetch("/api/open-dir", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: dirPath }) }).catch(() => {});
+  fetchWithTimeout("/api/open-dir", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ path: dirPath }) }).catch(
+    () => {},
+  );
 }
 
 function openView(view: string, cwd: string | null): void {

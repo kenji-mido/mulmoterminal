@@ -10,6 +10,17 @@
 import type { CiState } from "../../common/ghItems.js";
 import { EMPTY_WORK_ITEM, issueCandidateFromBranch, issueRefFromPrBody, type PrPhase, type WorkItem } from "../../common/prPhase.js";
 import { runGh } from "./gh.js";
+import { runGlab, glabMrForBranchArgs, glabMrViewArgs, glabTarget, type GlabTarget } from "./glab.js";
+import { firstGlabMr, glabMrPhase } from "./glab-items.js";
+import { forgeFromRepoEntry } from "./forge-host.js";
+
+const safeJson = (raw: string): unknown => {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+};
 import { rollupCiState } from "./prs.js";
 import { createTtlCache } from "./ttl-cache.js";
 import { branchQuery, type BranchQueryDeps } from "./branch-query.js";
@@ -128,6 +139,33 @@ function issueTitleFrom(stdout: string): string | null {
 
 const issueUrl = (repo: string, number: number): string => `https://github.com/${repo}/issues/${number}`;
 
+// A cell watches ONE branch, so it can afford the per-request call the cross-repo list cannot:
+// `mr list` carries no pipeline at all, and `mr view` is where `head_pipeline` lives (#981 step 4a
+// took the cheaper answer for the list, and said so). Two calls, once per cache window.
+async function gitlabPhase(target: GlabTarget, branch: string): Promise<PrPhaseResult | null> {
+  const listed = await runGlab(glabMrForBranchArgs(branch, target));
+  if (!listed.ok) return null;
+  const first = firstGlabMr(safeJson(listed.stdout));
+  if (!first) return { ...EMPTY_WORK_ITEM };
+  const viewed = await runGlab(glabMrViewArgs(String(first.iid), target));
+  // The list answer already has everything but the pipeline, so a failed view degrades to it
+  // rather than losing the whole row.
+  const detail = viewed.ok ? (safeJson(viewed.stdout) ?? first.raw) : first.raw;
+  const { phase, blockedReason } = glabMrPhase(detail);
+  return {
+    phase,
+    blockedReason,
+    pr: first.iid,
+    prUrl: first.url,
+    prTitle: first.title || null,
+    // The issue a merge request closes is not read here: GitLab has no `closes` field on the MR,
+    // and the branch name is what this app anchors to anyway (#1171).
+    issue: issueCandidateFromBranch(branch),
+    issueUrl: null,
+    issueTitle: null,
+  };
+}
+
 // The PR phase for `branch`. An OPEN PR (there's at most one per head branch) is the current
 // state, queried first so it can't be masked by stale merged/closed PRs from a reused head —
 // only when the open query genuinely returns none do we look at `--state all`. A failed query
@@ -138,16 +176,34 @@ export async function phaseForRepoBranch(repo: string, branch: string, deps: PrP
   const hit = cache.get(key, now, ttlMs);
   if (hit !== undefined) return hit;
 
+  const forge = forgeFromRepoEntry(repo);
+  if (forge?.kind === "gitlab") {
+    const result = await gitlabPhase(glabTarget(forge), branch);
+    if (result) cache.set(key, result, now);
+    return result ?? NONE;
+  }
+
+  const result = await githubPhase(run, repo, branch);
+  if (!result) return NONE;
+  cache.set(key, result, now);
+  return result;
+}
+
+// An OPEN PR (there is at most one per head branch) is the current state, queried first so it
+// cannot be masked by stale merged/closed PRs from a reused head — only when the open query
+// genuinely returns none do we look at `--state all`. Null means the query FAILED, which the
+// caller turns into an uncached `none` so the next poll retries.
+async function githubPhase(run: typeof runGh, repo: string, branch: string): Promise<PrPhaseResult | null> {
   const open = await listPr(run, repo, branch, "open");
-  if (!open.ok) return NONE;
+  if (!open.ok) return null;
   let pr = open.pr;
   if (!pr) {
     const all = await listPr(run, repo, branch, "all");
-    if (!all.ok) return NONE;
+    if (!all.ok) return null;
     pr = all.pr;
   }
   const issue = await resolveIssue(run, repo, branch, pr);
-  const result: PrPhaseResult = {
+  return {
     phase: derivePrPhase(pr),
     pr: pr?.number ?? null,
     prUrl: pr?.url ?? null,
@@ -155,9 +211,9 @@ export async function phaseForRepoBranch(repo: string, branch: string, deps: PrP
     issueUrl: issue?.url ?? null,
     prTitle: pr?.title ? pr.title : null,
     issueTitle: issue?.title ?? null,
+    // Always null here: GitHub's phases already say everything its API says (#981).
+    blockedReason: null,
   };
-  cache.set(key, result, now);
-  return result;
 }
 
 // Test-only: drop the cache so cases don't leak across each other.

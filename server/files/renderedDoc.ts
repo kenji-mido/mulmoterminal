@@ -144,6 +144,7 @@ export function tableHtmlDoc(text: string, title: string, delimiter: string): st
   const rows = parseDelimited(text, delimiter);
   if (rows.length === 0) return htmlDoc(`<p>${escapeHtml(title)} is empty.</p>`, title, TABLE_STYLE);
   const [header, ...body] = rows;
+  if (!header) return htmlDoc(`<p>${escapeHtml(title)} is empty.</p>`, title, TABLE_STYLE);
   const cells = (values: string[], tag: "th" | "td") => values.map((v) => `<${tag}>${escapeHtml(v)}</${tag}>`).join("");
   const bodyRows = body.map((r) => `<tr>${cells(r, "td")}</tr>`).join("");
   const table = `<table><thead><tr>${cells(header, "th")}</tr></thead><tbody>${bodyRows}</tbody></table>`;

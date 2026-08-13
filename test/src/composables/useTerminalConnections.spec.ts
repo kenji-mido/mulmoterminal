@@ -397,6 +397,253 @@ describe("setFont — a font change must reach the PTY, not just the canvas", ()
   });
 });
 
+// The #846 recovery only runs when something calls it, and until now that was a fit or an incoming
+// output frame. A cell that is idle gets neither — nothing writes to it, nothing resizes it — so a
+// terminal whose write queue is stuck stayed stuck, and the user in front of it read "I type and
+// nothing happens" as broken input. The keystroke itself is the missing trigger.
+describe("a keystroke into a dead terminal triggers the #846 recovery", () => {
+  const KEY = "cell-dead";
+
+  beforeEach(() => {
+    FakeWebSocket.instances.length = 0;
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+  });
+  afterEach(() => {
+    conn.release(KEY);
+    // Shared double state: leave the buffer healthy for whatever runs next.
+    mockTermState.bufferLength = 24;
+  });
+
+  // One task, because guardBufferHealth deliberately re-reads the shape after one: mid-parse a
+  // healthy terminal can look short, and a rebuild costs the client-side scrollback.
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  it("rebuilds the terminal and reconnects when the user types into a short buffer", async () => {
+    conn.attach(KEY, target(null), {}, document.createElement("div"));
+    FakeWebSocket.instances.at(-1)?.onopen?.();
+    const built = mockTermState.constructed;
+    const sockets = FakeWebSocket.instances.length;
+
+    mockTermState.bufferLength = 10; // fewer lines than the 24 rows the viewport addresses
+    mockTermState.emitData("a");
+    await settle();
+
+    expect(mockTermState.constructed).toBe(built + 1);
+    expect(FakeWebSocket.instances).toHaveLength(sockets + 1); // the rebuild re-attaches the session
+  });
+
+  it("leaves a healthy terminal alone — a rebuild costs the scrollback, so typing must not cause one", async () => {
+    conn.attach(KEY, target(null), {}, document.createElement("div"));
+    FakeWebSocket.instances.at(-1)?.onopen?.();
+    const built = mockTermState.constructed;
+
+    mockTermState.emitData("a");
+    await settle();
+
+    expect(mockTermState.constructed).toBe(built);
+  });
+
+  // A pointer report is the app talking to itself, not someone typing — and a click on a parked
+  // cell must stay as free of side effects as it is of waking it (#992).
+  it("does not run the probe for a pointer report", async () => {
+    conn.attach(KEY, target(null), {}, document.createElement("div"));
+    FakeWebSocket.instances.at(-1)?.onopen?.();
+    const built = mockTermState.constructed;
+
+    mockTermState.bufferLength = 10;
+    mockTermState.emitData(clickReportSequences(1, 1)[0]);
+    await settle();
+
+    expect(mockTermState.constructed).toBe(built);
+  });
+});
+
+// A keystroke that reaches a closed socket is dropped, and nothing about the terminal changes when
+// it is — the same silence a working terminal produces for a key it chose not to echo. The view
+// gets told so it can say so; the rate limit is what keeps a held-down key from becoming a stream
+// of notices.
+describe("a keystroke with nowhere to go tells the view", () => {
+  const KEY = "cell-dropped";
+  let warn: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    FakeWebSocket.instances.length = 0;
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    warn.mockRestore();
+    conn.release(KEY);
+  });
+
+  function attachClosedSlot(onInputDropped: (willReconnect: boolean) => void, over: Partial<conn.ConnTarget> = {}) {
+    conn.attach(KEY, { ...target(null), ...over }, { onInputDropped }, document.createElement("div"));
+    const ws = FakeWebSocket.instances.at(-1);
+    if (!ws) throw new Error("no socket created");
+    ws.onopen?.();
+    ws.close(); // the drop / reconnect state the reconnect backoff leaves a cell in
+    return ws;
+  }
+
+  const droppedInputLines = () => warn.mock.calls.filter((args: unknown[]) => String(args[0]).includes("dropped input"));
+
+  it("reports once while the notice is still on screen, however much the user types", () => {
+    const onInputDropped = vi.fn();
+    attachClosedSlot(onInputDropped);
+
+    mockTermState.emitData("h");
+    mockTermState.emitData("i");
+
+    expect(onInputDropped).toHaveBeenCalledOnce();
+  });
+
+  // A stretch has no upper bound — the backoff retries forever at a 5s cap — so "once per stretch"
+  // meant a server left down said it once and never again, and whoever came back and typed got the
+  // silence this notice exists to break (#1316). The log line is the one that stays single: it is
+  // read afterwards, where a repeat adds nothing.
+  it("reports again once the notice has left the screen, though the stretch is the same", () => {
+    const now = vi.spyOn(Date, "now");
+    try {
+      now.mockReturnValue(1_000_000);
+      const onInputDropped = vi.fn();
+      attachClosedSlot(onInputDropped);
+      mockTermState.emitData("h");
+
+      now.mockReturnValue(1_006_000); // the banner's six seconds are up
+      mockTermState.emitData("h");
+
+      expect(onInputDropped).toHaveBeenCalledTimes(2);
+      expect(droppedInputLines()).toHaveLength(1);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("reports again after a reconnect, because that is a new stretch", () => {
+    const onInputDropped = vi.fn();
+    const ws = attachClosedSlot(onInputDropped);
+    mockTermState.emitData("h");
+
+    ws.readyState = FakeWebSocket.OPEN;
+    ws.onopen?.(); // reconnected: whatever is typed now lands
+    ws.close(); // …and dropped again
+    mockTermState.emitData("h");
+
+    expect(onInputDropped).toHaveBeenCalledTimes(2);
+  });
+
+  it("says a reconnect is coming for an ordinary drop", () => {
+    const onInputDropped = vi.fn();
+    attachClosedSlot(onInputDropped);
+
+    mockTermState.emitData("h");
+
+    expect(onInputDropped).toHaveBeenCalledWith(true);
+  });
+
+  // The banner promises "Reconnecting…" off this flag, and an exited session gets no reconnect —
+  // shouldReconnect refuses one for sawExit. Telling the user to wait for something that is never
+  // coming swaps one misleading silence for another, which is what this notice exists to prevent.
+  it("says no reconnect is coming once the session has exited", () => {
+    const onInputDropped = vi.fn();
+    const ws = attachClosedSlot(onInputDropped);
+    ws.onmessage?.({ data: JSON.stringify({ type: "exit", exitCode: 0 }) } as MessageEvent);
+
+    mockTermState.emitData("h");
+
+    expect(onInputDropped).toHaveBeenCalledWith(false);
+  });
+
+  // A Run cell's process is unresumable, so the same promise would be just as empty.
+  it("says no reconnect is coming for a Run cell", () => {
+    const onInputDropped = vi.fn();
+    attachClosedSlot(onInputDropped, { command: { source: "script", index: 0, label: "echo", cwd: null } });
+
+    mockTermState.emitData("h");
+
+    expect(onInputDropped).toHaveBeenCalledWith(false);
+  });
+
+  // Same reason the probe skips them: a click on a parked cell is the app talking, not a person
+  // typing, and it must not raise a notice about input nobody gave (#992).
+  it("says nothing for a pointer report", () => {
+    const onInputDropped = vi.fn();
+    attachClosedSlot(onInputDropped);
+
+    mockTermState.emitData(clickReportSequences(1, 1)[0]);
+
+    expect(onInputDropped).not.toHaveBeenCalled();
+  });
+
+  // The GUI reaches the same socket without going through the keyboard: a header button's text, a
+  // skill picked from the menu, a pasted block. Those returned `false` and told nobody, and the one
+  // caller that read the result was the exception (#1315) — so the report belongs in the manager,
+  // where every host gets it, rather than in each caller that remembers to ask.
+  describe("input the GUI sends", () => {
+    it("tells the view when a button's text hits a closed socket", () => {
+      const onInputDropped = vi.fn();
+      attachClosedSlot(onInputDropped);
+
+      expect(conn.submitText(KEY, "/commit")).toBe(false);
+
+      expect(onInputDropped).toHaveBeenCalledWith(true);
+    });
+
+    it("tells the view when a paste hits a closed socket", () => {
+      const onInputDropped = vi.fn();
+      attachClosedSlot(onInputDropped);
+
+      expect(conn.pasteText(KEY, "a block")).toBe(false);
+
+      expect(onInputDropped).toHaveBeenCalledWith(true);
+    });
+
+    it("tells the view when a paste-and-submit hits a closed socket", () => {
+      const onInputDropped = vi.fn();
+      attachClosedSlot(onInputDropped);
+
+      expect(conn.pasteAndSubmit(KEY, "a block")).toBe(false);
+
+      expect(onInputDropped).toHaveBeenCalledWith(true);
+    });
+
+    // The quietest one: a dictated sentence, a dropped path, a pasted screenshot's path. The user
+    // is watching the input box for text to appear, so nothing about the terminal changes at all.
+    it("tells the view when inserted text hits a closed socket", () => {
+      const onInputDropped = vi.fn();
+      attachClosedSlot(onInputDropped);
+
+      conn.insertText(KEY, "~/shots/pasted.png ");
+
+      expect(onInputDropped).toHaveBeenCalledWith(true);
+    });
+
+    // Empty text never had anything to deliver, so its `false` is not a drop — reporting it would
+    // put a "not connected" banner on a paste of nothing.
+    it("says nothing for empty text", () => {
+      const onInputDropped = vi.fn();
+      attachClosedSlot(onInputDropped);
+
+      expect(conn.pasteText(KEY, "")).toBe(false);
+      expect(conn.pasteAndSubmit(KEY, "")).toBe(false);
+      conn.insertText(KEY, "");
+
+      expect(onInputDropped).not.toHaveBeenCalled();
+    });
+
+    // The same "nothing is coming" the keyboard gets, since the wording follows the flag: a Run
+    // cell's button must not be told to wait for a reconnect that would re-run its command.
+    it("says no reconnect is coming for a Run cell", () => {
+      const onInputDropped = vi.fn();
+      attachClosedSlot(onInputDropped, { command: { source: "script", index: 0, label: "echo", cwd: null } });
+
+      expect(conn.submitText(KEY, "/commit")).toBe(false);
+
+      expect(onInputDropped).toHaveBeenCalledWith(false);
+    });
+  });
+});
+
 // A hidden document must not TAKE a session. The grid is shared, so a cell opened on the desktop
 // appears in the phone's grid too — and if that phone connects it, the server hands the session
 // over and the desktop the user is working on says "detached". Nobody did anything on the phone;

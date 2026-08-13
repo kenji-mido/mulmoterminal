@@ -15,6 +15,8 @@ import {
   activity,
   activityStateHydrated,
   aiTitles,
+  antigravityConversations,
+  antigravityConversationsHydrated,
   backgroundSessionsHydrated,
   failedWorkersHydrated,
   unplacedSessionsHydrated,
@@ -46,10 +48,13 @@ import { sessionAttached } from "../session/dir-session.js";
 import { tmuxAttachedCounts } from "../infra/tmux.js";
 import { codexSessionsRoot } from "../agents/codex-session.js";
 import { listCodexSessions } from "../agents/codex-sessions.js";
+import { antigravityBrainRoot } from "../agents/antigravity-session.js";
+import { listAntigravitySessions } from "../agents/antigravity-sessions.js";
 import type { SessionMeta } from "../session/types.js";
 import { parseActivityIds, selectSessionRows } from "../session/session-list.js";
 import { sessionDetailView } from "../session/session-detail-view.js";
 import { clearedTranscripts } from "../session/cleared-transcripts.js";
+import { requestBody } from "./requestBody.js";
 
 // Only the most-recent N sessions are listed in the sidebar; older ones aren't
 // read or parsed, keeping /api/sessions cheap for projects with many sessions.
@@ -98,7 +103,7 @@ async function sessionDetail(req: Request<{ id: string }>, res: Response, freshe
 async function setMemo(req: Request<{ id: string }>, res: Response, publishActivity: SessionRouteDeps["publishActivity"]) {
   const { id } = req.params;
   if (!SESSION_ID_RE.test(id)) return res.status(400).json({ error: "invalid session id" });
-  const { text } = req.body ?? {};
+  const { text } = requestBody(req.body);
   if (typeof text !== "string") return res.status(400).json({ error: "text must be a string" });
   await sessionMemosHydrated; // or a write during startup is undone by the file it raced
   try {
@@ -214,7 +219,18 @@ async function sessionList(req: Request, res: Response) {
       await Promise.all(
         top.map((s) =>
           s.kind === "pending"
-            ? { id: s.id, title: s.title, mtime: s.mtime, working: s.working, waiting: s.waiting, event: s.event, hidden: s.hidden, failed: s.failed }
+            ? // Wrapped rather than handed to Promise.all bare: a pending row is already the whole
+              // answer, and spelling it as a promise says the two branches meet at the same type.
+              Promise.resolve({
+                id: s.id,
+                title: s.title,
+                mtime: s.mtime,
+                working: s.working,
+                waiting: s.waiting,
+                event: s.event,
+                hidden: s.hidden,
+                failed: s.failed,
+              })
             : readSessionMeta(dir, s.file).catch(() => null),
         ),
       )
@@ -245,6 +261,23 @@ async function codexSessionList(req: Request, res: Response) {
     res.json({ cwd, sessions });
   } catch (err) {
     console.error("[api] /api/codex/sessions failed:", err);
+    res.status(500).json({ error: String(err) });
+  }
+}
+
+// agy's own conversations for a workspace (?cwd=, default CLAUDE_CWD). Mirrors the codex route
+// above, with one difference that is not cosmetic: the cwd comes from OUR log rather than from
+// agy, so the answer is empty until that log has been read off disk. codex needs no such wait —
+// it re-reads its rollouts on every request.
+async function antigravitySessionList(req: Request, res: Response) {
+  try {
+    const cwd = workspaceForRoute(req.query.cwd, res);
+    if (cwd === null) return;
+    await antigravityConversationsHydrated;
+    const sessions = await listAntigravitySessions(antigravityBrainRoot(), antigravityConversations.values(), cwd, SESSION_LIST_LIMIT);
+    res.json({ cwd, sessions });
+  } catch (err) {
+    console.error("[api] /api/antigravity/sessions failed:", err);
     res.status(500).json({ error: String(err) });
   }
 }
@@ -280,4 +313,5 @@ export function mountSessionRoutes(app: Express, deps: SessionRouteDeps): void {
     res.json({ sessions });
   });
   app.get("/api/codex/sessions", codexSessionList);
+  app.get("/api/antigravity/sessions", antigravitySessionList);
 }

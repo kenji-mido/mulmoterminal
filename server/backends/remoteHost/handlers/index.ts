@@ -16,6 +16,7 @@ import { googleCalendarColors, googleCalendarCreateEvent, googleCalendarListCale
 import { getCollection } from "./getCollection.js";
 import { createGetFeed } from "./getFeed.js";
 import { getRemoteView } from "./getRemoteView.js";
+import { createIssueWorkHandlers } from "./issueWork.js";
 import { getRemoteViewItems } from "./getRemoteViewItems.js";
 import { createListAccountingBooks } from "./listAccountingBooks.js";
 import { listCollections } from "./listCollections.js";
@@ -56,6 +57,10 @@ export function createRemoteHostHandlers(deps: RemoteHostHandlerDeps): CommandHa
     listSkills: createListSkills(workspace),
     listAccountingBooks: createListAccountingBooks(workspace),
     startChat: createStartChat(deps),
+
+    // Starting work on a GitHub issue from the phone (#1184). Reads the configured repos, and
+    // starts in the clone recorded for one — never in a directory the phone named.
+    ...createIssueWorkHandlers(deps),
 
     ...createTerminalSessionHandlers(deps),
   };

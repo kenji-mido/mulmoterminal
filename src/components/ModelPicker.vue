@@ -30,7 +30,7 @@ const selected = computed({
   set: (value: string) => {
     if (!value) return emit("update:modelValue", null);
     const [provider, model] = value.split(SEPARATOR);
-    emit("update:modelValue", { provider: provider || null, model });
+    emit("update:modelValue", { provider: provider || null, ...(model === undefined ? {} : { model }) });
   },
 });
 </script>

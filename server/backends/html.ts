@@ -17,7 +17,7 @@
 //      from a second, uncontained mount — `/htmlfile` (mountHtmlFileRoute below).
 import path from "node:path";
 import type { Express, Request, Response, NextFunction } from "express";
-import { executeHtmlDispatch, HTML_FILE_MOUNT } from "@mulmoclaude/html-plugin";
+import { executeHtmlDispatch, isHtmlDispatchArgs, HTML_FILE_MOUNT } from "@mulmoclaude/html-plugin";
 import { SANDBOXED_VIEW_CDN_ALLOWLIST } from "@mulmoclaude/core/remote-view";
 import { artifactsFileOps } from "./artifacts.js";
 import { htmlByPath, resolveHtmlRequest } from "./openPath.js";
@@ -25,6 +25,7 @@ import { publishFileChange } from "./fileChange.js";
 import { statFileOr404 } from "./statFileOr404.js";
 import { streamFileToResponse } from "./streamFile.js";
 import { isWithin } from "../infra/path-within.js";
+import { isRecord } from "../../common/isRecord.js";
 
 // Curated CDN allowlist for an LLM-authored page that may pull a charting/util lib or font
 // from a CDN. Core owns the list so this policy and the remote-view CSP can't drift — widen
@@ -73,14 +74,21 @@ function sendHtmlDocument(res: Response, abs: string): void {
  *  registered BEFORE mountAllRoutes. */
 export function mountHtmlDispatchRoute(app: Express): void {
   app.post("/api/plugin/presentHtml", async (req: Request, res: Response, next: NextFunction) => {
-    const args = (req.body ?? {}) as { kind?: unknown; path?: unknown };
+    const args: Record<string, unknown> = isRecord(req.body) ? req.body : {};
     // A tool-call (no `kind`) is left to the package execute via the catch-all.
     if (args.kind !== "loadHtml" && args.kind !== "saveHtml") return next();
+    // The package's OWN guard, rather than an assertion here: it exists because `saveHtml` with a
+    // non-string `html` would reach `files.artifacts.write` and BLANK the artifact (its contract
+    // says so). Asserting the shape skipped exactly that check.
+    if (!isHtmlDispatchArgs(args)) {
+      res.status(400).json({ error: "invalid presentHtml dispatch args" });
+      return;
+    }
     try {
       // `byPath` is what lets the source editor load/save a page OUTSIDE
       // artifacts/html — presentHtml's `path` form takes any .html on disk. Without
       // it the package degrades to its old artifacts-only behaviour.
-      const result = await executeHtmlDispatch({ files: { artifacts: artifactsFileOps, byPath: htmlByPath } }, args as never);
+      const result = await executeHtmlDispatch({ files: { artifacts: artifactsFileOps, byPath: htmlByPath } }, args);
       if (args.kind === "saveHtml" && typeof args.path === "string") {
         // Live-refresh via the shared publisher: the "html" scope forwards to
         // plugin:html:file:<path>, the channel the open View subscribes to.

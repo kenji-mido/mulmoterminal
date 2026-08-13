@@ -31,10 +31,10 @@ export function createPubSub(server: HttpServer, isAllowedOrigin: (origin: strin
 
   io.on("connection", (socket) => {
     socket.on("subscribe", (channel) => {
-      if (typeof channel === "string") socket.join(channel);
+      if (typeof channel === "string") void socket.join(channel);
     });
     socket.on("unsubscribe", (channel) => {
-      if (typeof channel === "string") socket.leave(channel);
+      if (typeof channel === "string") void socket.leave(channel);
     });
   });
 

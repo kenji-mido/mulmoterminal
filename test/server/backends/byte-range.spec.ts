@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect } from "vitest";
 
 import { parseByteRange } from "../../../server/backends/byte-range.js";

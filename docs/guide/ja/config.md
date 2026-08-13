@@ -1,8 +1,9 @@
 ---
-title: 設定方法
+title: 設定 — 色・音・ランチャ・プロジェクト別の設定
+nav_title: 設定
 layout: default
 parent: 日本語
-nav_order: 5
+nav_order: 6
 description: MulmoTerminal の設定方法。設定モーダル、プロジェクトごとの色と名前、Enter の挙動、通知音、フォント、キーボードショートカット、環境変数まで、症状から引ける形で。
 ---
 
@@ -19,6 +20,8 @@ description: MulmoTerminal の設定方法。設定モーダル、プロジェ�
 | キーボードで**拡大するターミナルを切り替えたい** | [キーボードショートカット](#keymap) |
 | ロスターの1行が**長すぎる / 短すぎる** | [ロスターの行数](#cockpit-lines) |
 | セッションに**別のフォルダも見せたい** | [複数フォルダ](#add-dirs) |
+| **worktree だけ別プロジェクトに見える** | [worktree はこのファイルを引き継ぐ](#worktree-inherit) |
+| 拡大しても **Canvas が出ない** / GUI ツールが使えない | [どのディレクトリで起動するか](basics.html#launch-dir) |
 | **Claude 以外のモデル**で動かしたい | [プロバイダ](#providers) |
 | ヘッダーに**自分のボタン**を足したい | [ヘッダーのカスタマイズ](#header) |
 | **自分の配色**でアプリ全体を染めたい | [自分の配色を作る](#custom-themes) |
@@ -86,7 +89,7 @@ description: MulmoTerminal の設定方法。設定モーダル、プロジェ�
 | **Pull request repos** | 横断 PR/Issue ビューが集約するリポ（`owner/repo`） |
 | **Launch commands** | グリッドセルでエージェント以外に起動できるコマンド（`{ label, command }`）。素のシェルは登録不要 — ランチャの **Shell** トグルが無設定で `$SHELL` を開く |
 | **Phone quick commands** | **スマホ**のターミナル表示にチップとして並ぶ定型文。タップで入力欄に入るだけで、送信は送信ボタンを押したとき（`quickCommands`） |
-| **MCP servers** | 自分の HTTP MCP サーバ（`userMcpServers`）。GUI MCP をフルで持つセッション — 作業ディレクトリが**ワークスペース**のセル、およびサーバ自身が起こしたセッション（スマホ・スケジュールタスク）— にマージされます。プロジェクトディレクトリのセルは自前の MCP 設定を読みます |
+| **MCP servers** | 自分の HTTP MCP サーバ（`userMcpServers`）。GUI MCP をフルで持つセッション — 作業ディレクトリが**ワークスペース**のセル、およびサーバ自身が起こしたセッション（スマホ・スケジュールタスク）— にマージされます。プロジェクトディレクトリのセルは自前の MCP 設定を読みます（→ [どのディレクトリで起動するか](basics.html#launch-dir)） |
 | **Cost (estimated)** | Session / Today / Month の推定コスト表示 |
 | **Keyboard shortcuts** | 今どのキーに何が割り当たっているかの一覧（読み取り専用）。**既定は全部 Not set** — 「Set up shortcuts…」で `mulmoterminal-keys` スキルが `keymap` に書きます（→ [キーボードショートカット](#keymap)） |
 | **Help & user guide** | このガイドへのリンク集 |
@@ -228,19 +231,51 @@ auto（注目度順）と manual（移動ボタンで手動）と並びます。
 変わってしまうので、順位を宣言するのが固定する方法になります。宣言していないディレクトリは、順位を持つ
 ものの後ろに、その起動順のまま残ります。
 
+### worktree はこのファイルを引き継ぐ {#worktree-inherit}
+
+`.mulmoterminal.json` は通常 gitignore されているので、プロジェクトから切った
+[worktree](glossary.html#git-worktree) には何も入っていませんでした。色も名前もモデルも順位も無く、
+グリッドの末尾に灰色のセルが1つ増えるだけ — 無関係なプロジェクトに見えていました。
+
+いまは新しい worktree に、プロジェクトの設定から作った専用のコピーが置かれます。
+
+- **同一性はそのままコピー** — `name` / `theme` / `colors` / `fontSize` / `fontFamily` /
+  `provider` / `model`。同じプロジェクト、同じターミナル、同じモデルです
+- **セルの色は色相を少しずつ回す** — `badgeColor` / `headerColor` / `headerTextColor` /
+  `cellColor` / `cellBorderColor` / `dotColor` / `buttonColor`。1本ごとに 12 度ずつ進むので、
+  並べるとグラデーションになります。「このプロジェクトだ」と分かり、かつ「どの worktree か」も分かる状態です。
+  彩度と明度は触らないので、`headerTextColor` の `#ffffff` は白のままです（無彩色には回す色相がありません）
+- **`orderPriority` はプロジェクトの順位 +1**。末尾に落ちるのではなく、切り出し元のすぐ後ろに並びます。
+  プロジェクトが順位を宣言しているときだけで、未設定なら worktree も未設定のままです
+- **`sound` / `sounds` / `addDirs` は引き継ぎません**。これらはプロジェクトのディレクトリ内のパスを指しており、
+  worktree にその実体はありません。`addDirs` にいたっては worktree 基準で解決され、黙って別のフォルダを許可してしまいます
+
+書き込まないケースが2つあります。どちらも意図的です。
+
+- **プロジェクトの config が gitignore されていない場合。** worktree の `git status` に未追跡ファイルとして出てしまいます。
+  これは単に汚いだけではありません。MulmoTerminal は未コミットの変更がある worktree の削除を拒否するので、
+  掃除できない worktree になります。リポジトリの `.gitignore` に `.mulmoterminal.json` を足せば、次の worktree から色が付きます
+- **worktree に既にファイルがある場合**（リポジトリにコミットされている、または自分で書いた）。そのファイルが答えなので、
+  MulmoTerminal が上書きすることはありません
+
+コピーは作成時に1度だけ取られ、以後は worktree のものです。あとからプロジェクト側の色を変えても、
+既存の worktree は与えられた色のままです。変えたいときは worktree 側のファイルを編集するか削除してください。
+
 ### ヘッダーのカスタマイズ（ボタン / チップ） {#header}
 
 MulmoTerminal の「**拡張**」の柱がここ。稼働中ターミナルのヘッダーを、**小さな DSL** で自分のワークフローに合わせて成形できます。
 どんな開発者でも、よく使う操作をワンクリックにし、見たい情報だけを出せる——それがこの仕組みの狙いです。
 
 **ボタン**（`buttons`）— 稼働中セッションに効く操作ボタン。表示は `icon`（Material Symbol 名）＋ `label`、`order` で並び順を指定できます。
-未設定なら**組み込みの既定セット**が表示されます: **Insert a file path**・**Reveal in the file manager**・**Browse files in the app**・**New terminal here**・**Open this branch's PR**（git リポかつ PR がある時のみ）・**Open on GitHub**（git リポ）。`buttons` をどこかで書くと既定セットは**丸ごと置き換え**られます（マージ**されません**）。つまり自分のリストを書けば——**短い**リストでも——並べ替え・削減・差し替えができます。
+未設定なら**組み込みの既定セット**が表示されます: **Insert a file path**・**Open this branch's PR**（git リポかつ PR がある時のみ）。`buttons` をどこかで書くと既定セットは**丸ごと置き換え**られます（マージ**されません**）。つまり自分のリストを書けば——**短い**リストでも——並べ替え・削減・差し替えができます。
+
+*Reveal in the file manager*・*Browse files in the app*・*New terminal here*・*Open on GitHub* も以前は既定ボタンでした。今は**パスメニューの項目**です（ターミナルのヘッダー行にあるディレクトリのパスをクリック）。どれも「このディレクトリに対して何かする」で、それはパス自身が表していることなので、常設アイコン4つ分の場所に見合いませんでした。設定としては何も変わっていません。自分で書けば従来どおりボタンとして動きます——メニューは固定なので、その場合は両方に出ます。
 
 ```json
 {
   "buttons": [
     { "id": "compact", "icon": "compress", "label": "Compact", "run": "input", "text": "/compact", "when": "agent == claude" },
-    { "id": "gh",      "icon": "public",   "label": "Open on GitHub", "run": "open", "open": { "url": "https://github.com/${repo}" }, "when": "isGitRepo" },
+    { "id": "gh",      "icon": "public",   "label": "Open on GitHub", "run": "open", "open": { "url": "https://github.com/${repo}" }, "when": "repo != " },
     { "id": "reveal",  "icon": "folder",   "label": "Reveal folder", "run": "open", "open": { "reveal": "${dir}" } },
     { "id": "build",   "icon": "build",    "label": "Build", "run": "shell", "cmd": "yarn build" }
   ]
@@ -1107,24 +1142,56 @@ MulmoTerminal は起動する Claude セッション全部に、**返信の最�
 { "issueWorkComments": true }
 ```
 
-有効にすると、1 つの issue につき最大 2 つのコメントを残します。
+有効にすると、1 つの issue につき**コメントは 1 つ**で、それを更新し続けます。着手すると投稿されます。
 
 ```
-Working on this in `mulmoterminal5`.
+Working on this in `1234-fix-login`.
+
+- started — 2026-08-04 14:20 UTC
+
+posted by MulmoTerminal
 ```
 
+PR を開いたときとマージしたときは、**同じコメントを編集**します。新しいコメントは足しません。
+
 ```
-Merged in #983. Work done in `mulmoterminal5`.
+Merged in #1240. Work done in `1234-fix-login`.
+
+- started — 2026-08-04 14:20 UTC
+- PR #1240 — 2026-08-04 15:05 UTC
+- merged in #1240 — 2026-08-04 16:40 UTC
+
+posted by MulmoTerminal
 ```
 
+- **節目は 3 つだけ**です。着手・PR・マージ。CI の赤緑は PR を見れば分かるうえ往復するので、
+  書きません。全部書けば issue が読めなくなります。
 - ディレクトリは**フォルダ名だけ**で、その上の階層は出しません。「自分のどのクローンか」に答える
-  ためのもので、公開 issue に載るからです。
+  ためのもので、公開 issue に載るからです。issue ごとに worktree を切る使い方では、
+  **2 つのターミナルが — あるいは 2 人が — 同じ issue を二重に始めるのを止める**のもこれです。
+- **時刻は UTC** で、この一覧の要点はそこです。3 週間前に書かれて以後動いていない claim と、
+  今朝動いた claim は、読み手にとって別物です。
+- コメントには **MulmoTerminal が書いたと明記**します。他人が立てた issue に載るので、
+  何が claim しているのか読み手に推測させないためです。
 - マージ時、issue が**まだ open なら閉じます**。PR 本文に `Fixes #966` があれば GitHub が既に
   閉じているので、たいていは何もしません。
 - **それぞれ 1 回だけ。** 開いている全タブがポーリングのたびに聞きますし、リロードでも聞き直します。
-  コメントには不可視のマーカーが入っていて、MulmoTerminal がそれを読み返すので、2 回目以降は
-  何も書きません。別のクローンで同じ issue を触れば 2 行目が付きますが、それは事実どおりです。
-- `gh` のインストールとログインが要ります。無ければ何も書かれず、何も壊れません。
+  コメントには不可視のマーカーが入っていて、MulmoTerminal がそれを読み返しますし、節目もコメント
+  本文から読み出すので、2 回目以降は何も書きません。別のクローンで同じ issue を触れば 2 件目が
+  付きますが、それは事実どおりです。
+- 書くのは、そのセルが**実際に見た**節目だけです。先月出した PR のブランチをリロードで開いても
+  行は増えません。こちら側が知っているのは「気づいた時刻」であって、起きた時刻ではないからです。
+- コメントの編集では**通知が飛びません**。これは意図的で、最初の 1 件は知らせるべきこと、
+  以降は状態だからです。
+- **ログインだけでなく、書き込み権限が要ります。** issue へのコメントは書き込みなので、
+  読み取り専用に設定した `gh` では書けません。その repository への書き込み権限が無い
+  アカウントでも同じです。
+- 書けなかったときは、**セルが理由を出します。** work chip の隣に小さく
+  `issue not updated` と出て、直し方（`gh` のインストール / `gh auth login` / 書き込み権限）
+  を名指しします。閉じれば、リロードするまでどのセルも同じ理由を再度出しません。
+  **作業そのものには影響しません** — コメントを飛ばすだけで、次の節目でまた試します。
+- `gh` のインストールとログインが要ります（GitLab なら `glab`）。無ければ何も書かれず、
+  何も壊れません。
 
 **既定は off** です。あなたの名前で GitHub に書き込み、しかも多くは他人が立てた issue だからです。
 グローバル設定なので、プロジェクト単位ではなくマシン単位で決めます。
@@ -1198,6 +1265,7 @@ Merged in #983. Work done in `mulmoterminal5`.
 | `launchers` | グリッドセルの「OR LAUNCH」に並ぶ起動コマンド。自分で足したものだけ — 素のシェルはランチャの **Shell** トグルが担当 |
 | `quickCommands` | **スマホ**のターミナル表示にチップとして並ぶ定型文（`{ label, text, agents? }`）。タップすると `text` が入力欄に入るだけで、**送信されるのは送信ボタンを押したとき**。`agents` で `"claude"` / `"codex"` / `"shell"` に絞れる（省略＝全種別）。設定画面の **Phone quick commands** で編集 |
 | `prRepos` | 横断 PR/Issue ビューの対象リポ |
+| `gitlabHosts` | 自前ホスティングの GitLab のホスト名（例 `["gitlab.example.com"]`）。URL からは forge の種類が分からないので、宣言してはじめて `prRepos` のそのホストのエントリが `glab` で読まれる。`glab auth login --hostname <host>` が前提。設定画面は無く config.json のみなので、手で書いたら再起動（→ [自前ホスティングの GitLab](github.html#自前ホスティングの-gitlab)） |
 | `repoDirs` | 同じリポのクローンを複数並べているとき、そのリポの作業をどれで始めるか: `{ "acme/web": "/Users/you/src/web" }`。保存されるのは**選択だけ**で、どのクローンがあるかは `cwdPresets` から毎回導出するのでクローンを増やしても二重管理にならない。そのリポのクローンでなくなったエントリは無視される |
 | `buttons` / `chips` | ヘッダーのボタン/チップ（プロジェクト設定とマージ。→ [ヘッダーのカスタマイズ](#header)） |
 | `providers` | Anthropic 互換の接続先（→ [OpenRouter で別のモデルを使う](providers.html)） |
@@ -1227,11 +1295,11 @@ Merged in #983. Work done in `mulmoterminal5`.
 同じ理由でタイプミスも残ります（`copyOnSlect` は黙って捨てられずファイルに残る）。これは意図した
 選択です——「設定したのに効かない」ときに、行が残っている方が気づけます。
 
-## 環境変数 — ポート・バインド先・バイナリ
+## 環境変数 — ポート・バインド先・バイナリ {#env}
 
 | 変数 | 既定 | 役割 |
 |---|---|---|
-| `CLAUDE_CWD` / `--cwd` | 実行したディレクトリ（`npx mulmoterminal@latest`。サーバを直接起動した場合のみ `~/mulmoclaude`） | 既定の作業ディレクトリ（PTY の cwd）。`--cwd` でも指定可 |
+| `CLAUDE_CWD` / `--cwd` | 実行したディレクトリ（`npx mulmoterminal@latest`。サーバを直接起動した場合のみ `~/mulmoclaude`） | 既定の作業ディレクトリ（PTY の cwd）。決まり方は `--cwd` > 環境変数 `CLAUDE_CWD` > 実行したディレクトリ の順。**ここと同じディレクトリで起動した Claude のセルだけが GUI MCP をフルで持ちます**（→ [どのディレクトリで起動するか](basics.html#launch-dir)） |
 | `PORT` | `34567` | サーバのポート |
 | `MULMOTERMINAL_HOST` | `127.0.0.1` | サーバが待ち受けるインターフェース（→ [下記](#bind-host)） |
 | `MULMOTERMINAL_ALLOWED_ORIGINS` | *(なし)* | ターミナルに接続してよいブラウザのオリジンを追加（カンマ区切り）。`MULMOTERMINAL_HOST` を広げたときにだけ必要（→ [下記](#bind-host)） |

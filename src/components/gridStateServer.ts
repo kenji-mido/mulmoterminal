@@ -7,6 +7,7 @@
 // a grid; the server is consulted only to seed a fresh client (see GridView), and is kept
 // current by a debounced mirror of every change.
 import { parseGridState, type GridState } from "./gridTabs";
+import { jsonBody } from "../jsonBody";
 
 // Validate a raw grid blob (a fetch response's `state`, or a pub/sub payload) through the SAME
 // validator the localStorage path uses — the client owns the schema. Null when absent/invalid.
@@ -61,8 +62,11 @@ export async function fetchServerGridState(): Promise<GridStateFetch> {
   try {
     const res = await fetch("/api/grid-state");
     if (!res.ok) return { ok: false };
-    const body = await res.json();
-    return { ok: true, state: parseServerGridState(body?.state) };
+    // jsonBody, not res.json(): the latter is typed `any`, so `body.state` would reach
+    // parseServerGridState unchecked. Here it arrives as `unknown`, which is what that parser
+    // already assumes it is being handed.
+    const body = await jsonBody(res);
+    return { ok: true, state: parseServerGridState(body.state) };
   } catch {
     return { ok: false };
   }

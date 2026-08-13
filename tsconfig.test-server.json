@@ -1,8 +1,19 @@
 {
   "extends": "./tsconfig.server.json",
   "compilerOptions": {
-    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.test-server.tsbuildinfo"
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.test-server.tsbuildinfo",
+    /* The flag stays OFF for specs (#1301). A spec indexes fixtures it just built — `rows[0]` on an
+       array it wrote two lines above — so `T | undefined` there is noise about a value the test
+       itself guarantees. The value of the flag is in shipped code, which has it on. */
+    "noUncheckedIndexedAccess": false
   },
-  "include": ["test/server/**/*.ts", "test/bin/**/*.ts", "test/scripts/**/*.ts", "server/**/*.spec.ts"],
-  "exclude": []
+  /* `test/helpers/**` is here because `appRequest.spec.ts` belonged to no project at all — a spec
+     that nothing type-checked, and it had four findings waiting once something did (#1348). Claimed
+     as a directory rather than by filename so the next server-side helper is covered the day it is
+     written; a hand-maintained list is what orphaned this one.
+     `xtermDouble.ts` is the browser half of the same directory — it names HTMLElement and document,
+     which do not exist under `types: ["node"]`. It is reached through the `test/src` specs that
+     import it, so tsconfig.test.json checks it with the DOM lib it needs. */
+  "include": ["test/server/**/*.ts", "test/bin/**/*.ts", "test/scripts/**/*.ts", "test/support/**/*.ts", "test/helpers/**/*.ts", "server/**/*.spec.ts"],
+  "exclude": ["test/helpers/xtermDouble.ts"]
 }

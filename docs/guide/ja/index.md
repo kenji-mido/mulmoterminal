@@ -8,6 +8,24 @@ description: 複数の AI コーディングエージェント（Claude Code / C
 
 # MulmoTerminal ガイド（日本語）
 
+**はじめての方へ。** ターミナルの開き方から、Node.js・Claude Code・git / gh の入れ方
+（mac / Windows）、起動コマンド、つまずいたときの対処まで、**インストールと起動は 1 ページ**に
+まとめてあります。プログラミングが専門でなくても、そこだけ読めば起動までたどり着けます。
+環境がすでに揃っている方は `npx mulmoterminal@latest` だけです。
+
+[はじめに — 起動するまで](getting-started.html){: .btn .btn-purple .fs-5 .mb-4 .mb-md-0 .mr-2 }
+[基本編 — 画面の読み方](basics.html){: .btn .fs-5 .mb-4 .mb-md-0 }
+
+> **[4.4.0 で変わったこと](v4.4.0.html)** — **右ペインをセルごとに覚える**ようになり、Files ペインから**エージェント抜きでドキュメントやストーリーを Canvas に開ける**ようになった。ワークスペースで **claude.ai のコネクタが使える**ようになり、セッション一覧が transcript を毎回全部読むのをやめた（2.1 GB のプロジェクトで 8.7 秒 → 1 ミリ秒）。セルヘッダーの**パスがメニューになり**、常設アイコンが 6 つそこへ入った（2026-08-04 時点）
+>
+> **[4.3.1 で変わったこと](v4.3.1.html)** — ランチャーのワークスペースチップが、フォルダ名ではなく役割名 **`WORKSPACE`** で名乗るようになった。**git チップがタブに戻った時点で更新される**（最大 10 秒遅れていたのが解消）。設定は不要（2026-08-04 時点）
+>
+> **[4.3.0 で変わったこと](v4.3.0.html)** — **ワークスペース**なら起動方法によらず同じ GUI ツールに届くようになり、ランチャーが**常にワークスペースを先頭のチップとして出す**。単一ビューの GUI MCP サーバー ID が **`mt`** になり、エージェントに見えるツール名が短くなった。**IME の変換確定 Enter** はセッションメモでもターミナルでも IME のものになる。設定は不要（2026-08-04 時点）
+>
+> **[4.2.0 で変わったこと](v4.2.0.html)** — **セルフホストの GitLab** が `gitlabHosts` に書くだけで使えるようになり、**Canvas と Tools のペイン**を端末領域いっぱいに広げられるようになった。新しい **worktree はプロジェクトの設定を色相 1 段ずらして引き継ぎ**、入力を受け付けなくなった端末は**打鍵で自分で直る**か、直せない理由を言う。設定が要るのは 1 キーだけ（2026-08-03 時点）
+>
+> **[4.1.1 で変わったこと](v4.1.1.html)** — ヘッダーの **usage** が TUI の起動が遅いマシンで `n/a` に張り付かなくなり、スマホのターミナルが1画面ぶんではなく**スクロールバック300行**を返し、GitLab の worktree でも **PR フェーズ pill** と **⧉ Open PR** が GitHub と同じように動く。設定は不要（2026-08-02 時点）
+>
 > **[4.0.0 で変わったこと](v4.0.0.html)** — **単一ターミナルビューを廃止**。グリッドがアプリそのものになり、1 体に集中するのは「セルを拡大する」こと。コンテンツ系の画面にはツールバーの **Collections** という入口ができた。**worktree は 1 セッションだけ**を持ち、2 つ目の起動を断る。Docker サンドボックスも削除（2026-08-01 時点）
 >
 > **X で最新情報を発信しています** — 新バージョンや新機能のお知らせは X の [Singularity Society（@SingularitySoci）](https://x.com/SingularitySoci) で流していきます。ここが一番早いので、[**@SingularitySoci をフォローしてください！**](https://x.com/SingularitySoci)
@@ -33,7 +51,7 @@ MulmoTerminal はそのためのコックピットです。ブラウザのター
 
 ![並行するエージェント端末のボード](../images/grid-2x2.png)
 
-セルごとに独立したエージェント。**状態の色**（作業中＝青／入力・許可待ち＝琥珀／完了・レビュー待ち＝青リング）と
+セルごとに独立したエージェント。**状態の色**（作業中＝青／入力・許可待ち＝琥珀／完了・レビュー待ち＝緑リング）と
 **通知音**で、見張らずに「呼ばれたセルだけ」拾えます。→ [基本編](basics.html)
 
 ### コックピット・ロスター — 全員の進捗を 1 行ずつ
@@ -127,10 +145,10 @@ AI エージェントは 1 タスクに数分かかります。1 体を見張る
 
 | こんなとき | MulmoTerminal では |
 |---|---|
-| 複数ターミナルの**状態**が分からない | グリッドに並べ、**状態の色**（作業中＝青／入力待ち＝琥珀／完了・レビュー待ち＝青リング）＋通知音で一目（→ [基本編](basics.html)） |
+| 複数ターミナルの**状態**が分からない | グリッドに並べ、**状態の色**（作業中＝青／入力待ち＝琥珀／完了・レビュー待ち＝緑リング）＋通知音で一目（→ [基本編](basics.html)） |
 | **どのディレクトリ**か分からない | 各セルに dir・**プロジェクト名バッジ・色**を表示。色分けで即区別（→ [設定](config.html#per-dir)） |
 | **元の指示**を忘れる | セルヘッダーに**直近の指示／今やっていること**を常時表示、**Activity timeline** で**ツール履歴**（→ [可視化](features.html)） |
-| **完了**に気づきたい | 入力待ちは**琥珀色**、ターン完了は**青のリング**、どちらも**通知音**。さらに**スマホへ Web Push**（→ [スマホ通知](notifications.html)） |
+| **完了**に気づきたい | 入力待ちは**琥珀色**、ターン完了は**緑のリング**、どちらも**通知音**。さらに**スマホへ Web Push**（→ [スマホ通知](notifications.html)） |
 | **セッションを継続**したい | **tmux 永続化**で、リロード・再接続・サーバ再起動を跨いで生き続ける |
 | **git / dir をサッと**開きたい | git ステータスチップ、ワンクリックで **OSのファイルマネージャ(Finder/Explorer等) / アプリ内ファイル / PR** を開く |
 | **ターミナル基軸**で効率化 | 上記すべてを端末の上に載せ、**DSL で自分のワークフローに拡張**（→ [設定](config.html#header)） |
@@ -142,7 +160,7 @@ AI エージェントは 1 タスクに数分かかります。1 体を見張る
 3. **自動化 & エラー調査** — スクリプトをワンクリックで走らせ（稼働中セルの**隣の空きセル**で）、失敗したら**大量のログを AI が短く診断**。
 4. **拡張（DSL）** — ヘッダーのボタン／チップ、ランチャ、プロジェクト設定を**小さな DSL で拡張**。どんな開発者にも合う。
 
-## まずは起動
+## まずは起動 {#cli-tools}
 
 [`claude`](https://claude.com/claude-code)（Claude Code）が動く環境 + **Node ≥ 22.9** があれば、コマンド 1 つで始められます。
 
@@ -150,37 +168,26 @@ AI エージェントは 1 タスクに数分かかります。1 体を見張る
 npx mulmoterminal@latest    # → http://localhost:34567 が開く
 ```
 
-### 一緒に入れておくコマンド {#cli-tools}
-
-MulmoTerminal は普段の開発ツールを操縦するコックピットなので、`PATH` に何があるかで
-使える範囲が決まります。`claude` / `git` / `gh` がグリッドの土台で、残りは 1 行につき
-1 機能ぶんです。
-
-| | コマンド | 効いてくる機能 | インストール |
-| --- | --- | --- | --- |
-| **必須** | `claude` | Claude セッションそのもの | `npm i -g @anthropic-ai/claude-code` のあと `claude` を 1 回起動してログイン |
-| **必須** | `git` | [worktree 分離](features.html)、セルのブランチ / 未保存ドット / 差分表示、PR フッター | `brew install git` · `sudo apt install git` · Windows は [git-scm.com](https://git-scm.com/download/win) |
-| **必須** | `gh` | [PR / Issue 横断ビュー](github.html)とワンクリック PR 作成 | [cli.github.com](https://cli.github.com) のあと `gh auth login` |
-| 推奨 | `tmux` | [セッション永続化](features.html) — サーバ再起動でもターミナルが生き残る | `brew install tmux` · `sudo apt install tmux` · Windows ネイティブ版は無し（通常ターミナルにフォールバック） |
-| 任意 | `codex` | セルで [Codex セッション](basics.html#claude-and-codex)を Claude と並べて動かす | `npm i -g @openai/codex` |
-| 任意 | `ffmpeg` | [GUI パネル](features.html)の mulmo-script プラグインからの動画生成 | `brew install ffmpeg` · `sudo apt install ffmpeg` |
-| 任意 | `ollama` | [claude-ollama](claude-ollama.html) — 完全ローカルのモデルで Claude Code を動かす | [ollama.com/download](https://ollama.com/download) |
-
-必須以外が無くてもサーバは起動します（その行の機能が使えないだけ）。今のマシンに何が
-足りないかは **`npx mulmoterminal@latest init`** で確認できます。上の全コマンドをチェックしたうえで、
-Claude Code の履歴からランチャのディレクトリプリセットを作ってくれます。
+これで動かなかった方・そもそも何を入れればいいのか分からない方は、
+**[はじめに — 起動するまで](getting-started.html)** に全部書いてあります。
+ターミナルの開き方、Node.js / Claude Code / git / gh の入れ方（mac・Windows 別）、
+[一緒に入れておくコマンドの一覧](getting-started.html#cli-tools)、
+[つまずいたときの対処](getting-started.html#troubleshooting)まで 1 ページです。
 
 ## このガイドの読み方
 
-1. [基本編 — グリッドで今できること](basics.html)
-2. [応用編 — シナリオ別の使い方](scenarios.html)
-3. [機能一覧](features.html)（4 本柱で整理）
-4. [設定方法](config.html)（設定モーダル・`config.json`・`.mulmoterminal.json`・**DSL 拡張**）
-5. [スマホ通知（Web Push）](notifications.html)（iPhone / Android の設定）
-6. [スマホから使う](phone.html)（閲覧・自分のチップで返信・ターミナル起動）
-7. [GitHub — PR / Issue 横断ビュー](github.html)（登録リポの未マージ PR と Issue を 1 画面で）
-8. [OpenRouter で別のモデルを使う](providers.html)（Kimi / DeepSeek / Gemini などを実測データつきで選ぶ）
-9. [claude-ollama でローカルモデルを動かす](claude-ollama.html)（Ollama で完全ローカル・オフライン）
-10. [常時起動](always-on.html)（サーバをサービスとして常駐させ、ログアウト・再起動をまたぐ）
+1. [はじめに — 起動するまで](getting-started.html)（**インストールと起動はここだけで完結**）
+2. [基本編 — グリッドで今できること](basics.html)
+3. [よくある質問（FAQ）](faq.html)（既存セッション・Windows・トークン代・他ツールとの違い）
+4. [応用編 — シナリオ別の使い方](scenarios.html)
+5. [機能一覧](features.html)（4 本柱で整理）
+6. [設定方法](config.html)（設定モーダル・`config.json`・`.mulmoterminal.json`・**DSL 拡張**）
+7. [スマホ通知（Web Push）](notifications.html)（iPhone / Android の設定）
+8. [スマホから使う](phone.html)（閲覧・自分のチップで返信・ターミナル起動）
+9. [GitHub — PR / Issue 横断ビュー](github.html)（登録リポの未マージ PR と Issue を 1 画面で）
+10. [OpenRouter で別のモデルを使う](providers.html)（Kimi / DeepSeek / Gemini などを実測データつきで選ぶ）
+11. [claude-ollama でローカルモデルを動かす](claude-ollama.html)（Ollama で完全ローカル・オフライン）
+12. [常時起動](always-on.html)（サーバをサービスとして常駐させ、ログアウト・再起動をまたぐ）
+13. [用語集](glossary.html)
 
 > 英語版は [English guide](../en/) にあります。

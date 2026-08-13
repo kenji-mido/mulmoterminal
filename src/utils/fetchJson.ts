@@ -1,4 +1,5 @@
 import { isRecord } from "../../common/isRecord";
+import { fetchWithTimeout } from "./fetchWithTimeout";
 
 export type FetchResult<T> = { ok: true; data: T } | { ok: false; error: string; status: number };
 
@@ -13,12 +14,25 @@ export function errorMessage(body: unknown, status: number): string {
   return isRecord(body) && typeof body.error === "string" && body.error !== "" ? body.error : `HTTP ${status}`;
 }
 
-export async function fetchJson<T>(input: RequestInfo | URL, init?: RequestInit): Promise<FetchResult<T>> {
+/** Reads a response body into the caller's shape. See `fetchJson` for why it is not optional. */
+export type JsonReader<T> = (raw: unknown) => T;
+
+/**
+ * `read` is required, and that is the point: `Response.json()` answers `any`, so a bare
+ * `fetchJson<T>(url)` used to hand back whatever the server sent under the name the CALLER chose —
+ * a claim about the server rather than a question asked of it. Taking the reader from the caller
+ * is the same fix wikiApi's `getJson` already uses.
+ */
+export async function fetchJson<T>(input: RequestInfo | URL, read: JsonReader<T>, init?: RequestInit, timeout_ms?: number): Promise<FetchResult<T>> {
   try {
-    const res = await fetch(input, init);
+    // Bounded here so every caller of this helper is, without each one remembering to ask.
+    // A request with no deadline reports nothing at all rather than an error, and this function's
+    // whole contract is to turn a request into an answer the caller can act on.
+    const res = await fetchWithTimeout(input, init, timeout_ms);
     // `status` is the HTTP status on an HTTP failure, or 0 on a transport failure (no response).
     if (!res.ok) return { ok: false, error: errorMessage(await readErrorBody(res), res.status), status: res.status };
-    return { ok: true, data: await res.json() };
+    const body: unknown = await res.json();
+    return { ok: true, data: read(body) };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err), status: 0 };
   }

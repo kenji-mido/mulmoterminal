@@ -7,6 +7,22 @@
 // cell offers to re-run a session that is alive in another tab — and if it were treated as
 // retryable, the two tabs would evict each other forever. This is exactly why it wants a test.
 
+import { isRecord } from "../../common/isRecord";
+
+// The one place a server frame becomes data — the mirror of the server's own parseClientFrame.
+// `JSON.parse` answers `any`, which would put everything read off the frame outside the type
+// checker, including the bytes written into the terminal. A frame that is not a JSON object is
+// dropped rather than thrown: the caller runs inside `sock.onmessage`, where nothing catches it.
+export function parseServerFrame(data: unknown): Record<string, unknown> | null {
+  if (typeof data !== "string") return null;
+  try {
+    const msg: unknown = JSON.parse(data);
+    return isRecord(msg) ? msg : null;
+  } catch {
+    return null;
+  }
+}
+
 // The non-output effects of a message. `output` is handled directly (a hot path, just a
 // write) and is not modelled here.
 export interface MessageEffect {

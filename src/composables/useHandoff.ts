@@ -12,6 +12,7 @@ import type { SlotInfo } from "./readableSlot";
 import { formatCwd } from "../components/cwdDisplay";
 import { isRecord } from "../../common/isRecord";
 import type { TerminalAgent } from "../../common/sessionAgent";
+import { fetchWithTimeout } from "../utils/fetchWithTimeout";
 
 // A terminal whose last exchange can be pulled: how to name it in the menu, and what
 // the server needs to find its log.
@@ -59,18 +60,14 @@ export async function fetchLastTurn(source: HandoffSource, shape: "exchange" | "
   const params = new URLSearchParams({ session: source.sessionId, agent: source.agent });
   if (shape === "reply") params.set("as", "reply");
   if (source.cwd) params.set("cwd", source.cwd);
-  const abort = new AbortController();
-  const timer = setTimeout(() => abort.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    const res = await fetch(`/api/transcript/last-turn?${params.toString()}`, { signal: abort.signal });
-    if (!res.ok) throw new Error(`last-turn request failed (${res.status})`);
-    const data: unknown = await res.json();
-    if (!isRecord(data)) return { prompt: null, reply: null, text: "" };
-    const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
-    return { prompt: str(data.prompt), reply: str(data.reply), text: str(data.text) ?? "" };
-  } finally {
-    clearTimeout(timer);
-  }
+  // No try/catch: the caller decides what a failed handoff means, and it always did — the block
+  // that used to be here existed only to clear the timer.
+  const res = await fetchWithTimeout(`/api/transcript/last-turn?${params.toString()}`, undefined, REQUEST_TIMEOUT_MS);
+  if (!res.ok) throw new Error(`last-turn request failed (${res.status})`);
+  const data: unknown = await res.json();
+  if (!isRecord(data)) return { prompt: null, reply: null, text: "" };
+  const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
+  return { prompt: str(data.prompt), reply: str(data.reply), text: str(data.text) ?? "" };
 }
 
 const fetchHandoffText = async (source: HandoffSource): Promise<string> => (await fetchLastTurn(source)).text;

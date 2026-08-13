@@ -5,8 +5,9 @@
 import path from "node:path";
 import fs from "node:fs/promises";
 import type { Express, Response } from "express";
-import { forEachJsonlRecord } from "../infra/jsonl-file.js";
 import { parseJsonl } from "./transcript.js";
+import { createTranscriptFold } from "./transcript-fold.js";
+import type { FileStamp } from "./file-cache.js";
 import { isRecord } from "../../common/isRecord.js";
 import { projectSessionsDir } from "./project-dir.js";
 
@@ -103,22 +104,46 @@ export function costFromJsonl(raw: string): JsonlCost {
   return scan.total();
 }
 
+// One record's contribution, folded into a running total. The rule lives here rather than inside
+// the scan below because a RESUMED read folds into a total it did not start (#1386): both paths
+// have to add a turn the same way or a resumed cost drifts from a fresh one.
+function foldCost(into: JsonlCost, record: Record<string, unknown>): void {
+  const turn = assistantUsageTurn(record);
+  if (!turn) return;
+  const priced = costForUsage(turn.usage, turn.model);
+  if (priced.priced) into.usd += priced.usd;
+  else into.unpricedTurns += 1;
+}
+
+// A template to copy, never a target to fold into — foldCost MUTATES what it is given.
+const EMPTY_COST: JsonlCost = { usd: 0, unpricedTurns: 0 };
+
 /** The same accumulation, fed one record at a time — for a caller streaming a transcript too
  *  large to hold as a string (#998). The pricing rule stays in costForUsage either way. */
 export function createCostScan() {
-  let usd = 0;
-  let unpricedTurns = 0;
+  const total: JsonlCost = { ...EMPTY_COST };
   return {
     add(record: Record<string, unknown>) {
-      const turn = assistantUsageTurn(record);
-      if (!turn) return;
-      const priced = costForUsage(turn.usage, turn.model);
-      if (priced.priced) usd += priced.usd;
-      else unpricedTurns += 1;
+      foldCost(total, record);
     },
-    total: (): JsonlCost => ({ usd, unpricedTurns }),
+    total: (): JsonlCost => ({ ...total }),
   };
 }
+
+// A transcript's cost, folded once: an unchanged file is not read again, a grown one costs only the
+// bytes that arrived, and a big one keeps its total beside it. /api/cost reads up to 200 files per
+// request and had no cache at all — 2.5-3.1 s every time the cost panel was opened on a 1.1 GB
+// project (#1386).
+const isJsonlCost = (value: unknown): value is JsonlCost => isRecord(value) && typeof value.usd === "number" && typeof value.unpricedTurns === "number";
+
+const costFold = createTranscriptFold<JsonlCost>({
+  kind: "cost",
+  version: 1,
+  isValue: isJsonlCost,
+  empty: () => ({ ...EMPTY_COST }),
+  fold: foldCost,
+  copy: (cost) => ({ ...cost }),
+});
 
 // ── project-scoped aggregation (today / month) ─────────────────────────────────
 
@@ -133,6 +158,8 @@ const startOfMonth_ms = (now: Date): number => new Date(now.getFullYear(), now.g
 interface FileStat {
   file: string;
   mtime_ms: number;
+  /** Carried alongside the mtime because the fold needs the same stat, not a second one. */
+  size: number;
 }
 
 // Cheap stat-only pass: every *.jsonl's mtime, so files can be bucketed by day
@@ -143,7 +170,7 @@ async function statJsonlFiles(dir: string): Promise<FileStat[]> {
     names.map(async (file): Promise<FileStat | null> => {
       try {
         const st = await fs.stat(path.join(dir, file));
-        return { file, mtime_ms: st.mtimeMs };
+        return { file, mtime_ms: st.mtimeMs, size: st.size };
       } catch {
         return null;
       }
@@ -152,14 +179,26 @@ async function statJsonlFiles(dir: string): Promise<FileStat[]> {
   return stats.filter((s): s is FileStat => s !== null);
 }
 
-async function readFileCost(dir: string, file: string): Promise<JsonlCost> {
+async function readFileCost(dir: string, file: string, stamp?: FileStamp): Promise<JsonlCost> {
+  const full = path.join(dir, file);
   try {
-    const scan = createCostScan();
-    await forEachJsonlRecord(path.join(dir, file), (record) => scan.add(record));
-    return scan.total();
+    // The roll-up has already stat'ed every file to bucket it by day, so it hands its stamp down
+    // rather than making this stat 200 files a second time.
+    return await costFold.read(full, stamp ?? (await fileStamp(full)));
   } catch {
-    return { usd: 0, unpricedTurns: 0 };
+    return { ...EMPTY_COST };
   }
+}
+
+/** One session's cost. Exported so the route does not build the transcript path itself — and so the
+ *  fold underneath it can be tested without an HTTP request. */
+export async function sessionCost(cwd: string, id: string): Promise<JsonlCost> {
+  return readFileCost(projectSessionsDir(cwd), `${id}.jsonl`);
+}
+
+async function fileStamp(full: string): Promise<FileStamp> {
+  const st = await fs.stat(full);
+  return { mtimeMs: st.mtimeMs, size: st.size };
 }
 
 export interface CostRollup {
@@ -183,7 +222,9 @@ async function rollupProjectCost(cwd: string): Promise<CostRollup> {
   if (inMonth.length > capped.length) {
     console.log(`[api] /api/cost: capped at ${MAX_COST_FILES} of ${inMonth.length} session files for ${dir}`);
   }
-  const perFile = await Promise.all(capped.map(async (s) => ({ mtime_ms: s.mtime_ms, cost: await readFileCost(dir, s.file) })));
+  const perFile = await Promise.all(
+    capped.map(async (s) => ({ mtime_ms: s.mtime_ms, cost: await readFileCost(dir, s.file, { mtimeMs: s.mtime_ms, size: s.size }) })),
+  );
   return perFile.reduce<CostRollup>(
     (acc, f) => ({
       today: acc.today + (f.mtime_ms >= todayStart_ms ? f.cost.usd : 0),
@@ -208,10 +249,10 @@ export function mountCostRoute(app: Express, deps: { resolveCwd: (cwd: unknown, 
     const sessionParam = typeof req.query.session === "string" ? req.query.session : null;
     try {
       const rollup = await rollupProjectCost(cwd);
-      const sessionCost = sessionParam && SESSION_ID_RE.test(sessionParam) ? await readFileCost(projectSessionsDir(cwd), `${sessionParam}.jsonl`) : null;
+      const thisSession = sessionParam && SESSION_ID_RE.test(sessionParam) ? await sessionCost(cwd, sessionParam) : null;
       res.json({
-        session: sessionCost?.usd,
-        sessionUnpricedTurns: sessionCost?.unpricedTurns ?? 0,
+        session: thisSession?.usd,
+        sessionUnpricedTurns: thisSession?.unpricedTurns ?? 0,
         today: rollup.today,
         month: rollup.month,
         currency: "USD",

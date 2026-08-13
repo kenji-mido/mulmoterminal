@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { makeTempDir } from "../../support/tempDir.js";
 import { writeFileSync } from "node:fs";
@@ -95,7 +96,7 @@ describe("push / PR actions", () => {
   );
 
   it.skipIf(!hasGit)(
-    "createOrOpenPR pushes, then reports no-github for a non-GitHub remote",
+    "createOrOpenPR pushes, then reports no-forge for a remote on no forge it knows",
     async () => {
       g(repo, "remote", "add", "origin", remote); // a local bare remote, not github.com
       const wt = await createWorktree(repo, "feature");
@@ -105,9 +106,9 @@ describe("push / PR actions", () => {
       g(wt.path, "commit", "-m", "work");
 
       const res = await createOrOpenPR(wt.path);
-      // gh can't make a PR (no GitHub) and the remote isn't github.com → no compare url
+      // No CLI can make a request here and the remote is on no forge we know → no page to fall back to
       expect(res.ok).toBe(false);
-      expect(res.reason).toBe("no-github");
+      expect(res.reason).toBe("no-forge");
       // but the push half still landed the branch on the remote
       const refs = execFileSync("git", ["-C", remote, "branch", "--list", "agent/feature"], { encoding: "utf8" }); // eslint-disable-line sonarjs/no-os-command-from-path
       expect(refs).toContain("agent/feature");

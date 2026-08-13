@@ -19,6 +19,18 @@
        Without this, `{ work: undefined }` type-checks against `work?: Summary` and
        reaches Firestore, which rejects undefined at any depth (#1042). */
     "exactOptionalPropertyTypes": true,
+    "noUncheckedIndexedAccess": true,
+    /* Added in #1301, both measured at 0 across app / server / test before going in. */
+    "useUnknownInCatchVariables": true,
+    "noImplicitOverride": true,
+    /* `noImplicitReturns` is deliberately ABSENT here, and this note exists so it is not added by
+       someone matching this file to tsconfig.app.json (where it IS on, along with node — both 0).
+       Measured twice, #1301 and again for #1348: 31 findings here plus 27 in test-server, which is
+       the same server files re-checked — 33 distinct Express handlers. Every one is
+       `if (bad) return res.status(400).json(…)`, which is how an Express handler is supposed to be
+       written; TS7030 fires because one path yields `res` and the fallthrough yields nothing. That
+       is a report about a house style, not about a defect, and rewriting 33 route handlers to
+       silence it buys no safety. Decided in #1348 rather than deferred again. */
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
