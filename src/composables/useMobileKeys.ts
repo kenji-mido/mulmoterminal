@@ -3,7 +3,8 @@ import { isTouchDevice } from "./touchDevice";
 
 // Whether the on-screen key bar + text field show below the terminal. App-wide and persisted:
 // touch auto-detect is only the DEFAULT — a device where it misreads (some mobile browsers) can
-// still summon the bar from the terminal header's ⌨ toggle, and the choice sticks across reloads.
+// still summon the bar from the terminal header's `keyboard` toggle, and the choice sticks across
+// reloads.
 const KEY = "mobileKeys";
 
 function initial(): boolean {

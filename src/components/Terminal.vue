@@ -321,7 +321,7 @@ function sendContinue() {
 // On-screen input aids (key bar + text field) for a device with no physical keyboard, where
 // xterm's own hidden textarea can't reliably raise the soft keyboard or send Esc/Ctrl/arrows.
 // Only meaningful for the PRIMARY terminal — the chat single view, or an expanded grid cell —
-// never a grid thumbnail or a one-off command cell; the ⌨ toggle lives there too. `mobileKeys`
+// never a grid thumbnail or a one-off command cell; the `keyboard` toggle lives there too. `mobileKeys`
 // (persisted, default = touch-detected) decides whether they are actually shown, so a device
 // whose touch auto-detect misreads can still summon them by hand.
 const mobileKeys = useMobileKeys();

@@ -38,9 +38,14 @@ export function useSessionHideDelete(onChanged: () => Promise<void> | void) {
       // Nothing to tell the user that the refreshed list will not: if it failed, the row is still
       // there with its buttons.
       console.warn(`[session-${action}] failed:`, err);
+    }
+    // The buttons stay disabled THROUGH the refetch, not just through the request. Clearing first
+    // re-enables them while the list is still the old one, and a second click then passes the guard
+    // and posts again at a session the first call already removed.
+    try {
+      await onChanged();
     } finally {
       busyId.value = null;
-      await onChanged();
     }
   }
 

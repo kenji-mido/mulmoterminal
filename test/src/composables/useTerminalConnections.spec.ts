@@ -663,6 +663,32 @@ describe("useTerminalConnections — a hidden document does not take sessions", 
     hide(false);
   });
 
+  // The reclaim only reaches slots something is RENDERING, so a deferral recorded while the slot
+  // was detached has nobody to clear it — and reattaching for the SAME session is neither a fresh
+  // slot nor an inherited one, so nothing else would connect either. That slot stayed dead with no
+  // retry armed, which on a phone is the whole session gone.
+  it("connects a slot whose deferred connect is still owed after it was DETACHED", () => {
+    const el = document.createElement("div");
+    const id = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+
+    // Deferred while hidden, then the view goes away before anyone looks at the document again.
+    hide(true);
+    conn.attach("cell-hidden", target(id), { onSession: vi.fn(), onCwd: vi.fn() }, el);
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    conn.detach("cell-hidden", el);
+
+    // Looking at the document cannot pay it: the reclaim only reaches slots something is
+    // RENDERING, and this one is attached to nothing.
+    hide(false);
+    expect(FakeWebSocket.instances).toHaveLength(0);
+
+    // So coming back to the cell has to. Same session id, so this is neither a fresh slot nor an
+    // inherited one — without the deferral being consulted here, nothing would ever connect it.
+    conn.attach("cell-hidden", target(id), { onSession: vi.fn(), onCwd: vi.fn() }, document.createElement("div"));
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(FakeWebSocket.instances[0].url).toContain(id);
+  });
+
   it("opens no socket while hidden, and opens it when the document is looked at", () => {
     hide(true);
     conn.attach("cell-hidden", target("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"), { onSession: vi.fn(), onCwd: vi.fn() }, document.createElement("div"));

@@ -1,5 +1,5 @@
-// A single app-wide in-browser file picker, so a non-component caller (useHeaderAction's 📎
-// button dispatch) can open it and get the chosen path back. The native OS file dialog opens
+// A single app-wide in-browser file picker, so a non-component caller (useHeaderAction's
+// attach-file button dispatch) can open it and get the chosen path back. The native OS dialog opens
 // on the SERVER's display — unreachable from a remote browser — so this replaces it.
 //
 // FilePickerHost (mounted once in App) renders the modal when a request is active; openFilePicker

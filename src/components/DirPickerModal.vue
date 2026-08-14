@@ -70,7 +70,7 @@ onMounted(() => load(props.start));
           aria-label="Close"
           @click="emit('close')"
         >
-          ✕
+          <span class="material-symbols-outlined" aria-hidden="true">close</span>
         </button>
       </div>
 
@@ -80,16 +80,18 @@ onMounted(() => load(props.start));
           class="cursor-pointer rounded-md border border-border bg-elevated px-2 py-1 text-[13px] text-muted hover:bg-hover hover:text-fg disabled:cursor-default disabled:opacity-40"
           :disabled="!parent"
           title="Up one level"
+          aria-label="Up one level"
           @click="load(parent)"
         >
-          ↑
+          <span class="material-symbols-outlined" aria-hidden="true">arrow_upward</span>
         </button>
         <button
           class="cursor-pointer rounded-md border border-border bg-elevated px-2 py-1 text-[13px] text-muted hover:bg-hover hover:text-fg"
           title="Home"
+          aria-label="Home"
           @click="load(home)"
         >
-          🏠
+          <span class="material-symbols-outlined" aria-hidden="true">home</span>
         </button>
         <div class="min-w-0 flex-auto truncate rounded-md border border-border bg-elevated px-2 py-1 font-mono text-[12px] text-dim" :title="path">
           {{ path || "…" }}
@@ -111,7 +113,7 @@ onMounted(() => load(props.start));
               :data-testid="e.dir ? 'dir-pick-dir' : 'dir-pick-file'"
               @click="onEntry(e)"
             >
-              <span class="text-muted">{{ e.dir ? "📁" : "📄" }}</span>
+              <span class="material-symbols-outlined text-muted" aria-hidden="true">{{ e.dir ? "folder" : "description" }}</span>
               <span class="min-w-0 truncate">{{ e.name }}</span>
             </button>
           </li>

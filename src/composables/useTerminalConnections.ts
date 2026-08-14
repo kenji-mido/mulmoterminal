@@ -684,17 +684,17 @@ export function attach(key: string, target: ConnTarget, handlers: ConnHandlers, 
   // session unrestorable on reload. Only the new-vs-known case actually fires a
   // useful update; the parent's setters are idempotent for already-known values.
   //
-  // UNLESS the target names a DIFFERENT session: grid live-sync can renumber cells while
-  // this view is detached, so a slot can be reattached FOR another session. Replaying the
-  // old identity then overwrites the new cell's session upward (the grid persists what
-  // onSession reports), duplicating one session across two cells — which fight over it
-  // (mutual supersede) and show the same roster meta. Reconnect at the named session
-  // instead of replaying the stale one.
-  const staleIdentity = target.sessionId !== null && c.knownSessionId !== null && target.sessionId !== c.knownSessionId;
-  if (!staleIdentity) {
-    if (c.knownSessionId) handlers.onSession?.(c.knownSessionId);
-    if (c.knownCwd) handlers.onCwd?.(c.knownCwd);
-  }
+  // Replaying a STALE identity is what the `inherited` branch above exists to prevent, and it is
+  // why nothing guards this replay any more. Grid live-sync can renumber cells while this view is
+  // detached, so a slot can be reattached FOR another session; replaying the old id then overwrites
+  // the new cell's session upward (the grid persists what onSession reports), duplicating one
+  // session across two cells — which fight over it (mutual supersede) and show the same roster
+  // meta. The fork carried its own guard here for exactly that (#1534 in this fork's history);
+  // upstream's `inherited` reaches the same case EARLIER and wider — it also catches a slot with no
+  // id yet — and rewrites knownSessionId to the target before this line runs. By here the id is
+  // always the one the view asked for.
+  if (c.knownSessionId) handlers.onSession?.(c.knownSessionId);
+  if (c.knownCwd) handlers.onCwd?.(c.knownCwd);
   el.appendChild(c.host);
   if (theme) {
     c.theme = theme;
@@ -708,10 +708,14 @@ export function attach(key: string, target: ConnTarget, handlers: ConnHandlers, 
   // Fit BEFORE connecting, not after: connect() puts the terminal's geometry on the URL so the pty
   // is spawned at it, and an unfitted terminal would send xterm's 80x24 default there (#1178). For
   // an already-live slot this is the same sync it always was — the send is a no-op until OPEN.
-  // retarget() opens a socket the same way connect() does, so it sits on this side of the fit too.
   fitAndSyncSize(c);
-  if (created || inherited) connect(c);
-  else if (staleIdentity) retarget(key, target);
+  // `deferredConnect` is the third case, and without it a slot can be left permanently dead. A
+  // connect deferred while the document was hidden is only ever cleared by reclaimVisibleSlots,
+  // which skips slots nothing is rendering — so a slot that was DETACHED when its reconnect timer
+  // fired (navigate away, background the tab, the server drops the socket) is not reached by the
+  // reclaim, and coming back here with the same session id is neither `created` nor `inherited`.
+  // Nothing would arm a retry. connect() re-defers by itself if the document is still hidden.
+  if (created || inherited || c.deferredConnect) connect(c);
   c.term.focus();
   // The persisted xterm was just re-parented into a new host. The sync fit() above can no-op (same size)
   // or run before layout, leaving the canvas renderer blank until a scroll. Re-fit + force a repaint next
