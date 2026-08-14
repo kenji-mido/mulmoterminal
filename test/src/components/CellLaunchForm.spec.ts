@@ -299,6 +299,71 @@ describe("a resume row", () => {
 // A session left running by a restart: alive, nobody attached, and until #1467 invisible — the
 // launcher offered its conversation with nothing to say that a process was still holding it, and
 // no way to end it short of `tmux kill-session` by hand.
+// The fork's hide/delete, back on a surface after #1201 deleted the sidebar they lived on. The
+// routes and the server side never went anywhere; what is pinned here is that a row can reach
+// them again, and that neither is offered for a session another terminal is holding.
+describe("setting a resume row aside, or deleting it", () => {
+  const row = (over: Partial<SessionRow> = {}): SessionRow => ({ id: "s-9", title: "fix the parser", mtime: 1, ...over });
+  const postsTo = (call: unknown[]): string => String(call[0]);
+
+  beforeEach(() => vi.restoreAllMocks());
+
+  it("offers both on a row nobody is holding", async () => {
+    mockFetch([], [row()]);
+    const w = mountForm();
+    await flushPromises();
+    expect(w.find('[data-testid="ri-hide"]').exists()).toBe(true);
+    expect(w.find('[data-testid="ri-delete"]').exists()).toBe(true);
+  });
+
+  // Same rule as the stop button: a session open elsewhere belongs to that terminal, and removing
+  // it from here would take it out from under a tab the user cannot see.
+  it("offers neither for a session another terminal is holding", async () => {
+    mockFetch([], [row({ attached: true })]);
+    const w = mountForm();
+    await flushPromises();
+    expect(w.find('[data-testid="ri-hide"]').exists()).toBe(false);
+    expect(w.find('[data-testid="ri-delete"]').exists()).toBe(false);
+  });
+
+  it("hides without asking, and re-reads the list", async () => {
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    mockFetch([], [row()]);
+    const w = mountForm();
+    await flushPromises();
+    const before = vi.mocked(globalThis.fetch).mock.calls.length;
+    await w.find('[data-testid="ri-hide"]').trigger("click");
+    await flushPromises();
+    const after = vi.mocked(globalThis.fetch).mock.calls.slice(before).map(postsTo);
+    expect(confirm).not.toHaveBeenCalled();
+    expect(after[0]).toContain("/api/session/s-9/hide");
+    expect(after.some((u) => u.includes("/api/sessions"))).toBe(true); // the list is re-read
+  });
+
+  it("asks before deleting, and posts the delete when confirmed", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    mockFetch([], [row()]);
+    const w = mountForm();
+    await flushPromises();
+    const before = vi.mocked(globalThis.fetch).mock.calls.length;
+    await w.find('[data-testid="ri-delete"]').trigger("click");
+    await flushPromises();
+    const after = vi.mocked(globalThis.fetch).mock.calls.slice(before).map(postsTo);
+    expect(after[0]).toContain("/api/session/s-9/delete");
+  });
+
+  it("deletes nothing when the confirmation is declined", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+    mockFetch([], [row()]);
+    const w = mountForm();
+    await flushPromises();
+    const before = vi.mocked(globalThis.fetch).mock.calls.length;
+    await w.find('[data-testid="ri-delete"]').trigger("click");
+    await flushPromises();
+    expect(vi.mocked(globalThis.fetch).mock.calls.slice(before)).toEqual([]);
+  });
+});
+
 describe("a resume row whose session is still running", () => {
   const running = (over: Partial<SessionRow> = {}): SessionRow => ({ id: "s-9", title: "fix the parser", mtime: 1, runningKey: "s-9", ...over });
   const postsTo = (call: unknown[]): string => String(call[0]);

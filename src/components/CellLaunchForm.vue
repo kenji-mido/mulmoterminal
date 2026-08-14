@@ -30,6 +30,7 @@ import { isRecord } from "../../common/isRecord";
 import { filePickerOpen } from "../composables/pickPaths";
 import { useBusyAction } from "../composables/useBusyAction";
 import { useSessionStop } from "../composables/useSessionStop";
+import { useSessionHideDelete } from "../composables/useSessionHideDelete";
 import { worktreeRequestFailure } from "./cellChromeRules";
 import { fetchWithTimeout, SLOW_COMMAND_TIMEOUT_MS } from "../utils/fetchWithTimeout";
 
@@ -410,7 +411,15 @@ function resume(s: ResumableSession): void {
 // cell's launch form is an accident with no undo.
 const stoppable = (s: ResumableSession): boolean => !sessionBusy(s) && typeof s.runningKey === "string";
 
-const { stopping, stopSession } = useSessionStop(() => loadResumable(resumable.value.cwd ?? targetDir.value, listAgent.value ?? "claude"));
+const reloadResumable = () => loadResumable(resumable.value.cwd ?? targetDir.value, listAgent.value ?? "claude");
+
+const { stopping, stopSession } = useSessionStop(reloadResumable);
+
+// Setting a row aside, or removing it for good. Offered only for a session NOBODY is holding, on
+// the same rule the stop button follows: a session open in another terminal belongs to that
+// terminal, and reaching it from another cell's launch form is an accident with no undo.
+const { busyId: hideDeleteBusy, hideSession, deleteSession } = useSessionHideDelete(reloadResumable);
+const removable = (s: ResumableSession): boolean => !sessionBusy(s);
 
 const relativeTime = (ms: number): string => relativeTimeFrom(ms, Date.now());
 
@@ -971,6 +980,32 @@ async function requestRemove(repoDir: string | null, w: Worktree): Promise<void>
             @click="stopSession(s)"
           >
             <span class="material-symbols-outlined" aria-hidden="true">stop_circle</span>
+          </button>
+          <!-- Done with it, in the two senses that differ. Hiding stops OFFERING the session and
+               keeps everything (`claude --resume` still finds it); deleting removes the transcript
+               and cannot be undone, which is why only that one asks first. Neither is offered for a
+               row somebody is holding — the same rule the stop button follows. -->
+          <button
+            v-if="removable(s)"
+            data-testid="ri-hide"
+            class="flex-none cursor-pointer rounded-md border-none bg-transparent px-1.5 py-1 text-[13px] text-dim hover:bg-hover hover:text-fg disabled:cursor-progress"
+            :disabled="hideDeleteBusy === s.id"
+            title="Set aside — stop listing it here. The conversation is kept and stays resumable from the CLI."
+            :aria-label="`Set aside ${s.title}`"
+            @click="hideSession(s)"
+          >
+            <span class="material-symbols-outlined" aria-hidden="true">visibility_off</span>
+          </button>
+          <button
+            v-if="removable(s)"
+            data-testid="ri-delete"
+            class="flex-none cursor-pointer rounded-md border-none bg-transparent px-1.5 py-1 text-[13px] text-dim hover:bg-[var(--err-hover-bg)] hover:text-err-text disabled:cursor-progress"
+            :disabled="hideDeleteBusy === s.id"
+            title="Delete permanently — removes the conversation transcript from disk"
+            :aria-label="`Delete ${s.title} permanently`"
+            @click="deleteSession(s)"
+          >
+            <span class="material-symbols-outlined" aria-hidden="true">delete</span>
           </button>
         </div>
       </div>
