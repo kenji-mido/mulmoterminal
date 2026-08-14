@@ -11,7 +11,7 @@ import type { PushKind } from "../../common/pushKinds.js";
 import { asTerminalAgent } from "../../common/sessionAgent.js";
 import { aiTitles, lastPrompts, lastResponses, ptys, pushClassification, translationWorkerIds } from "./registry.js";
 import { clearedTranscripts } from "./cleared-transcripts.js";
-import { sessionLastTurn, LAST_RESPONSE_MAX } from "./session-reads.js";
+import { claudeCurrentTurnReply, sessionLastTurn, LAST_RESPONSE_MAX } from "./session-reads.js";
 import { buildPushDetail, pushWhere, shouldSuppressPush, wantsPushKind } from "./taskPushRules.js";
 
 const PUSH_TITLE_MAX = 80;
@@ -23,10 +23,16 @@ const PUSH_BODY_MAX = 160;
 // session (no `waiting` flag) while the push still fires, and the cache deliberately
 // survives a failed read — either way the map can hold the previous turn's reply, which
 // is worse than saying nothing. Which log to read depends on the agent, so it goes
-// through sessionLastTurn rather than assuming a claude transcript.
+// through session-reads rather than assuming a claude transcript.
+//
+// Claude is asked for THIS turn's reply rather than the last complete exchange: a turn the user
+// interrupted, or one that ended on a tool call, has no reply, and sessionLastTurn answers such a
+// turn with the PREVIOUS one's (#1650). Every other agent keeps that read, for the reason given at
+// claudeCurrentTurnReply.
 async function latestReply(sessionId: string, cwd: string): Promise<string | null> {
-  const turn = await sessionLastTurn(cwd, sessionId, asTerminalAgent(ptys.get(sessionId)?.agent));
-  const reply = turn.reply?.trim();
+  const agent = asTerminalAgent(ptys.get(sessionId)?.agent);
+  const turnReply = agent === "claude" ? await claudeCurrentTurnReply(cwd, sessionId) : (await sessionLastTurn(cwd, sessionId, agent)).reply;
+  const reply = turnReply?.trim();
   // Capped like every other writer of lastResponses — the map is declared as holding
   // truncated text, and it is served in the roster payload for every listed session.
   return reply ? reply.slice(0, LAST_RESPONSE_MAX) : null;

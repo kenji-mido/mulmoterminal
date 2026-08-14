@@ -12,6 +12,8 @@ import {
   isTreeDirtyForUpdate,
   gitUpdateNotice,
   computeUpdateNotice,
+  computeUpdateInfo,
+  readInstallInfo,
 } from "../../bin/update-check.js";
 
 describe("isNewerVersion", () => {
@@ -281,6 +283,19 @@ describe("isTreeDirtyForUpdate", () => {
   });
 });
 
+// A clean checkout at 0123456, as the probes see it. `lsRemote` is what the remote answers, which
+// is what each case actually varies.
+const cleanCheckoutGit =
+  (lsRemote: string) =>
+  async (args: string[]): Promise<string | null> => {
+    if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") return "true";
+    if (args[0] === "status") return "";
+    if (args[0] === "rev-parse" && args[1] === "HEAD") return "0123456789abcdef";
+    if (args[0] === "rev-parse" && args[1] === "--short") return "0123456";
+    if (args[0] === "ls-remote") return lsRemote;
+    return null;
+  };
+
 describe("computeUpdateNotice", () => {
   // A checkout under node_modules is an npm install: it must NOT run git, and the answer
   // comes from the registry vs the bundled version.
@@ -307,14 +322,7 @@ describe("computeUpdateNotice", () => {
 
   // A bare checkout is a git install: local HEAD vs the remote's, read via ls-remote.
   it("takes the git path for a checkout and reports behind", async () => {
-    const git = async (args: string[]): Promise<string | null> => {
-      if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") return "true";
-      if (args[0] === "status") return ""; // clean
-      if (args[0] === "rev-parse" && args[1] === "HEAD") return "0123456789abcdef";
-      if (args[0] === "rev-parse" && args[1] === "--short") return "0123456";
-      if (args[0] === "ls-remote") return "ref: refs/heads/main\tHEAD\nfedcba9876543210\tHEAD";
-      return null;
-    };
+    const git = cleanCheckoutGit("ref: refs/heads/main\tHEAD\nfedcba9876543210\tHEAD");
     const notice = await computeUpdateNotice("/home/dev/mulmoterminal", "0.7.0", { runGit: git, fetchLatest: async () => null });
     expect(notice).toBe("Update available: 0123456 → origin  ·  run: git pull origin main");
   });
@@ -322,14 +330,7 @@ describe("computeUpdateNotice", () => {
   // End to end: a hostile remote whose default branch carries a shell metachar must not reach
   // the pasteable command — the notice falls back to a bare git pull.
   it("does not inject an unsafe remote default branch into the command", async () => {
-    const git = async (args: string[]): Promise<string | null> => {
-      if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") return "true";
-      if (args[0] === "status") return "";
-      if (args[0] === "rev-parse" && args[1] === "HEAD") return "0123456789abcdef";
-      if (args[0] === "rev-parse" && args[1] === "--short") return "0123456";
-      if (args[0] === "ls-remote") return "ref: refs/heads/main;rm$IFS-rf\tHEAD\nfedcba9876543210\tHEAD";
-      return null;
-    };
+    const git = cleanCheckoutGit("ref: refs/heads/main;rm$IFS-rf\tHEAD\nfedcba9876543210\tHEAD");
     const notice = await computeUpdateNotice("/home/dev/mulmoterminal", "0.7.0", { runGit: git, fetchLatest: async () => null });
     expect(notice).toBe("Update available: 0123456 → origin  ·  run: git pull");
   });
@@ -341,5 +342,114 @@ describe("computeUpdateNotice", () => {
       return "whatever";
     };
     expect(await computeUpdateNotice("/home/dev/mulmoterminal", "0.7.0", { runGit: git, fetchLatest: async () => null })).toBeNull();
+  });
+});
+
+// The install as the Settings version line reads it: local probes only, no registry call.
+describe("readInstallInfo", () => {
+  it("reports an npm install by its package.json version, without touching git", async () => {
+    let gitCalls = 0;
+    const info = await readInstallInfo("/proj/node_modules/mulmoterminal", "0.7.0", {
+      runGit: async () => {
+        gitCalls++;
+        return null;
+      },
+    });
+    expect(info).toEqual({ install: "npm", version: "0.7.0", commit: null });
+    expect(gitCalls).toBe(0);
+  });
+
+  // A checkout's package.json version is only whatever was last released, so the commit is the
+  // part that says which build is running.
+  it("reports a checkout by its short HEAD sha", async () => {
+    const git = async (args: string[]): Promise<string | null> => {
+      if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") return "true";
+      if (args[0] === "rev-parse" && args[1] === "--short") return "0123456";
+      return null;
+    };
+    expect(await readInstallInfo("/home/dev/mulmoterminal", "0.7.0", { runGit: git })).toEqual({
+      install: "git",
+      version: "0.7.0",
+      commit: "0123456",
+    });
+  });
+
+  // git absent, or a directory that stopped being a checkout: the version still stands.
+  it("answers a null commit when git cannot be read", async () => {
+    expect(await readInstallInfo("/home/dev/mulmoterminal", "0.7.0", { runGit: async () => null })).toEqual({
+      install: "npm",
+      version: "0.7.0",
+      commit: null,
+    });
+  });
+
+  it("does not reach the network", async () => {
+    let fetched = 0;
+    await readInstallInfo("/proj/node_modules/mulmoterminal", "0.7.0", {
+      runGit: async () => null,
+      fetchLatest: async () => {
+        fetched++;
+        return "0.8.0";
+      },
+    });
+    expect(fetched).toBe(0);
+  });
+});
+
+describe("computeUpdateInfo", () => {
+  it("offers the registry version on the npm path when it is newer", async () => {
+    expect(
+      await computeUpdateInfo("/proj/node_modules/mulmoterminal", "0.7.0", {
+        runGit: async () => null,
+        fetchLatest: async () => "0.8.0",
+      }),
+    ).toEqual({
+      install: "npm",
+      version: "0.7.0",
+      commit: null,
+      latest: "0.8.0",
+      notice: "Update available: 0.7.0 → 0.8.0  ·  run: npm i -g mulmoterminal",
+    });
+  });
+
+  // `latest` is what the UI OFFERS to move to, so the registry answering with the version already
+  // installed must not render as an upgrade.
+  it("leaves latest unset when the npm install is already current", async () => {
+    const info = await computeUpdateInfo("/proj/node_modules/mulmoterminal", "0.8.0", {
+      runGit: async () => null,
+      fetchLatest: async () => "0.8.0",
+    });
+    expect(info.latest).toBeNull();
+    expect(info.notice).toBeNull();
+  });
+
+  it("carries the commit and the notice on the git path", async () => {
+    const git = cleanCheckoutGit("ref: refs/heads/main\tHEAD\nfedcba9876543210\tHEAD");
+    expect(await computeUpdateInfo("/home/dev/mulmoterminal", "0.7.0", { runGit: git, fetchLatest: async () => null })).toEqual({
+      install: "git",
+      version: "0.7.0",
+      commit: "0123456",
+      latest: null,
+      notice: "Update available: 0123456 → origin  ·  run: git pull origin main",
+    });
+  });
+
+  // A dirty tree gets no notice — it cannot fast-forward — but it is still running a commit, and
+  // that is the answer the version line was added for. The network probe stays skipped.
+  it("still reports the commit of a dirty checkout, without an ls-remote", async () => {
+    let lsRemotes = 0;
+    const git = async (args: string[]): Promise<string | null> => {
+      if (args[0] === "rev-parse" && args[1] === "--is-inside-work-tree") return "true";
+      if (args[0] === "status") return " M src/app.ts";
+      if (args[0] === "rev-parse" && args[1] === "--short") return "0123456";
+      if (args[0] === "ls-remote") {
+        lsRemotes++;
+        return null;
+      }
+      return null;
+    };
+    const info = await computeUpdateInfo("/home/dev/mulmoterminal", "0.7.0", { runGit: git, fetchLatest: async () => null });
+    expect(info).toEqual({ install: "git", version: "0.7.0", commit: "0123456", latest: null, notice: null });
+    expect(lsRemotes).toBe(0);
   });
 });

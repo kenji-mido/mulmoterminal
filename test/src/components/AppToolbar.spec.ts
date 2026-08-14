@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 import AppToolbar from "../../../src/components/AppToolbar.vue";
 import { router } from "../../../src/router/index";
-import { prsGotoIndex } from "../../../src/composables/usePrsView";
+import { githubGotoIndex } from "../../../src/composables/useGithubView";
 
 // The toolbar is ONE component rendered by both views (GridView and App), so which buttons
 // it offers is decided by the route, not by a prop (#886).
@@ -94,7 +94,7 @@ describe("AppToolbar per-view buttons", () => {
   it("shows neither the content siblings nor the grid controls while PRs is open", async () => {
     await router.push("/terminals");
     await settle();
-    prsGotoIndex();
+    githubGotoIndex();
     await settle();
 
     const labels = labelsOf(mount(AppToolbar, { global: { plugins: [router], stubs: { NotificationBell: true, RemoteHostControl: true } } }));
@@ -155,7 +155,7 @@ describe("AppToolbar per-view buttons", () => {
 
     // PRs is the one place with NO highlight: its own button hides with the grid controls, so
     // nothing in the nav is lit. A consequence of hiding them, recorded rather than discovered.
-    prsGotoIndex();
+    githubGotoIndex();
     await settle();
     const onPrs = mount(AppToolbar, { global: { plugins: [router], stubs: { NotificationBell: true, RemoteHostControl: true } } });
     expect(activeLabels(onPrs)).toEqual([]);

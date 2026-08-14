@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 
-import { flipTargetUid, shouldFlipZoom, worktreeFailureMessage } from "../../../src/components/cellChromeRules";
+import { flipTargetUid, shouldFlipZoom, worktreeFailureMessage, worktreeRequestFailure } from "../../../src/components/cellChromeRules";
 
 describe("worktreeFailureMessage", () => {
   it.each([
@@ -29,6 +29,25 @@ describe("worktreeFailureMessage", () => {
   // "function Object() { [native code] }" where a sentence belongs.
   it.each([["constructor"], ["toString"], ["__proto__"], ["hasOwnProperty"]])("does not resolve %s through the prototype chain", (reason) => {
     expect(worktreeFailureMessage(reason)).toBe("Failed");
+  });
+});
+
+// The worktree routes refuse in two shapes and the sentence naming the cause lives in a different
+// key in each. Reading only one of them is how #1549's create failure showed nothing at all.
+describe("worktreeRequestFailure", () => {
+  it("prefers the server's own sentence", () => {
+    expect(worktreeRequestFailure({ error: "fatal: Not a valid object name: 'main'." }, 500)).toBe("fatal: Not a valid object name: 'main'.");
+  });
+
+  it("explains a `reason` refusal in words", () => {
+    expect(worktreeRequestFailure({ ok: false, reason: "dirty" }, 409)).toContain("uncommitted changes");
+    expect(worktreeRequestFailure({ ok: false, reason: "not-managed" }, 409)).toContain("MulmoTerminal created");
+  });
+
+  // A body absorbed into `{}` (a 403 from the origin guard, a truncated response) still has to say
+  // that the click FAILED — the whole point is that silence is indistinguishable from doing nothing.
+  it.each([[{}], [{ error: "" }], [{ reason: 42 }]])("names the status when the body says nothing usable: %j", (body) => {
+    expect(worktreeRequestFailure(body, 403)).toContain("403");
   });
 });
 

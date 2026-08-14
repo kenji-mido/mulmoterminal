@@ -7,6 +7,8 @@
 // made a parameter: no caller would set it, and a one-valued flag is the weld waiting to be
 // re-made. `rate-limit-probe.ts` still passes it, for a different and measured reason.
 
+import type { AppendedPromptArgument } from "../session/session-settings.js";
+
 export interface ClaudeArgsInput {
   sessionId: string;
   resume: string | null;
@@ -36,23 +38,34 @@ export interface ClaudeArgsInput {
   // Extra directories the session may read/edit (#908). Absolute, existing, deduped by the
   // config layer — this builder only places them.
   addDirs?: string[] | null | undefined;
-  // What `--append-system-prompt` carries, already assembled (see appended-prompt.ts), or null
-  // when every section of it is switched off — the flag is then left out entirely. Resolved by
-  // the caller: which sections apply is a config decision, and this builder only places argv.
+  // What `--append-system-prompt` carries, already assembled (see appended-prompt.ts) AND already
+  // placed — inline, or in a file whose path this passes instead (see appendedPromptArgument).
+  // Null when every section of it is switched off, and the flag is then left out entirely.
+  // Resolved by the caller: which sections apply is a config decision, where the text may travel
+  // is a platform one, and this builder only places argv.
   //
   // Required, unlike the other optional fields: they default to adding nothing, while forgetting
   // this one would silently drop an instruction every session used to carry. A new spawn path has
   // to answer for it, and `null` is how it says no. `undefined` is in the type but the KEY is
   // still mandatory — a value that was never resolved can arrive, but a caller cannot omit it.
-  appendedPrompt: string | null | undefined;
+  appendedPrompt: AppendedPromptArgument | null | undefined;
 }
 
 export function buildClaudeArgs(input: ClaudeArgsInput): string[] {
   const guiArgs = ["--permission-mode", input.permissionMode];
-  // Inline, not --append-system-prompt-file: the sandbox spawn runs in a container that cannot
-  // read a host path, which is why --settings is already passed inline too. A prompt this size
-  // is nowhere near the tmux arg limit that forced the seed prompt out of the argv (#942).
-  if (input.appendedPrompt) guiArgs.push("--append-system-prompt", input.appendedPrompt);
+  // Two flags for one setting, because Claude Code names the file form separately. Which one is
+  // not this builder's call — a Windows command line cannot carry the newlines this text has, so
+  // there the caller writes a file and sends its path (#1516, session-settings.ts).
+  //
+  // The inline form was once the only one, on the grounds that the Docker sandbox could not read
+  // a host path. That sandbox is gone (#1195), so the file form costs nothing anywhere.
+  if (input.appendedPrompt) {
+    const { kind } = input.appendedPrompt;
+    guiArgs.push(
+      kind === "file" ? "--append-system-prompt-file" : "--append-system-prompt",
+      kind === "file" ? input.appendedPrompt.path : input.appendedPrompt.text,
+    );
+  }
   if (input.model) guiArgs.push("--model", input.model);
   // --mcp-config ADDS our broker; it does not replace anything. `--strict-mcp-config` used to
   // ride along on this same line, and that is what made "give this session the GUI panel" also

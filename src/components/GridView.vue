@@ -6,6 +6,7 @@ import AppToolbar from "./AppToolbar.vue";
 import GuideLinks from "./GuideLinks.vue";
 import { startCollectionChat } from "../composables/useChatLauncher";
 import { skillSeed } from "./skillSeed";
+import { rosterAgent } from "./rosterAgent";
 import type { BundledSkillName } from "../../common/bundledSkills";
 import {
   initialState,
@@ -20,6 +21,7 @@ import {
   runCommand,
   runScriptInNewCell,
   insertCellAfter,
+  revealCell,
   shellCell,
   sessionCell,
   launchInCell,
@@ -268,7 +270,7 @@ async function seedPhase(cwd: string) {
 // The directory chrome each roster row is tinted with — its configured header colour, so
 // a row reads as the same directory as its terminal's header. Keyed by cwd (the config is
 // the directory's, like the phase), fetched through the shared dir-config cache.
-type RowChrome = { headerColor: string | null; headerTextColor: string | null };
+type RowChrome = { headerColor: string | null; headerTextColor: string | null; iconUrl: string | null };
 const chromeByCwd = reactive(new Map<string, RowChrome>());
 // A freshness token per cwd, exactly like latestPhaseSeed: two rapid dir-config edits can
 // leave fetches resolving out of order, and without this a stale one would overwrite the
@@ -279,7 +281,7 @@ async function seedChrome(cwd: string) {
   latestChromeSeed.set(cwd, seed);
   const config = await fetchDirConfig(cwd);
   if (latestChromeSeed.get(cwd) !== seed) return; // a newer seed for this cwd already won
-  chromeByCwd.set(cwd, { headerColor: config.headerColor, headerTextColor: config.headerTextColor });
+  chromeByCwd.set(cwd, { headerColor: config.headerColor, headerTextColor: config.headerTextColor, iconUrl: config.iconUrl });
 }
 const refreshAllChrome = () => {
   const cwds = new Set(state.value.cells.map((c) => c.cwd).filter((c): c is string => c !== null));
@@ -382,14 +384,14 @@ const fallbackLabel = (c: Cell): string | null => c.command?.label ?? c.launcher
 // come out of the meta and two out of the chrome, so a `??` on each both crossed the complexity
 // limit and made every field independently defaultable — which is how a field the roster never
 // wired up reads as a legitimate null rather than failing to typecheck.
-const chromeOf = (cwd: string | null): RowChrome => (cwd ? chromeByCwd.get(cwd) : undefined) ?? { headerColor: null, headerTextColor: null };
+const chromeOf = (cwd: string | null): RowChrome => (cwd ? chromeByCwd.get(cwd) : undefined) ?? { headerColor: null, headerTextColor: null, iconUrl: null };
 const rosterRow = (c: Cell): CockpitRow => {
   const meta = (c.session ? sessionMeta.get(c.session) : undefined) ?? EMPTY_SESSION_META;
   const chrome = chromeOf(c.cwd);
   return {
     uid: c.uid,
     cwd: c.cwd,
-    agent: c.agent ?? "claude",
+    agent: rosterAgent(c),
     status: statusForSort.value[c.uid] ?? "idle",
     memo: meta.memo,
     summary: meta.aiTitle,
@@ -400,6 +402,7 @@ const rosterRow = (c: Cell): CockpitRow => {
     workPhase: meta.workPhase,
     headerColor: chrome.headerColor,
     headerTextColor: chrome.headerTextColor,
+    iconUrl: chrome.iconUrl,
     parked: c.parked === true,
   };
 };
@@ -431,12 +434,28 @@ const onAgent = (uid: number, agent: TerminalAgent) => (state.value = setCellAge
 const onPark = (uid: number, parked: boolean) => (state.value = setCellParked(state.value, uid, parked));
 // Pass the on-screen order so closing the zoomed cell stays zoomed on its filmstrip
 // neighbour (previous, or next when it was the first) instead of collapsing the grid.
-const onClose = (uid: number) =>
-  (state.value = closeCell(
+//
+// The slot goes down WITH the cell. TerminalCell's own close button tears its session down before
+// emitting close, but every other way here — the terminal-close shortcut, a launcher cell's close —
+// used to drop the cell while its slot kept an open socket: the PTY then read as attached forever
+// (never reaped, refused for resume), and the orphaned slot was the ghost a later `cell-<uid>` key
+// collision handed to a different cell as its terminal (#1533). `slotLive` is what makes the
+// already-torn-down path a no-op rather than a second terminate.
+const onClose = (uid: number) => {
+  const slot = `cell-${uid}`;
+  if (conn.slotLive(slot)) {
+    const session = state.value.cells.find((c) => c.uid === uid)?.session ?? null;
+    conn.terminate(slot);
+    // Over HTTP as well, like TerminalCell.teardown: the WS `terminate` only reaches the server
+    // while the socket it just closed was still open.
+    if (session) void fetchWithTimeout(`/api/session/${encodeURIComponent(session)}/terminate`, { method: "POST" }).catch(() => {});
+  }
+  state.value = closeCell(
     state.value,
     uid,
     displayCells.value.map((c) => c.uid),
-  ));
+  );
+};
 // Pass the on-screen order so releasing the zoom lands on the page holding the cell that was
 // enlarged — including when the user got there by clicking a roster row or filmstrip thumbnail,
 // which changes what is zoomed without touching the page.
@@ -475,21 +494,34 @@ let offNewTerminal: (() => void) | null = null;
 // marked with `agent`, and Claude is the plain default. The session id arrives from the server once
 // the cell opens its socket, so they all persist and reconnect like any other cell.
 //
+// `autoStart` is what makes an agent cell RUN. Without it these are indistinguishable from the
+// empty launcher — no session, no command, no launcher — so the phone's request (#831) opened the
+// cell-creation form with the agent pre-picked and waited for someone at the desktop to press
+// Start, which is exactly what #1535 reported. A shell needs none of it: its launcher runs on sight.
+//
 // A Record over LAUNCH_AGENTS rather than an if-chain: the chain ended in `shellCell`, so adding an
 // agent to that list without a case here silently opened a SHELL under its name. Now it does not
 // compile.
 const CELL_FOR_AGENT: Record<LaunchAgent, (cwd: string) => Omit<Cell, "uid">> = {
   shell: (cwd) => shellCell(cwd),
-  claude: (cwd) => ({ session: null, cwd }),
-  codex: (cwd) => ({ session: null, cwd, agent: "codex" }),
-  antigravity: (cwd) => ({ session: null, cwd, agent: "antigravity" }),
+  claude: (cwd) => ({ session: null, cwd, autoStart: true }),
+  codex: (cwd) => ({ session: null, cwd, agent: "codex", autoStart: true }),
+  antigravity: (cwd) => ({ session: null, cwd, agent: "antigravity", autoStart: true }),
+  grok: (cwd) => ({ session: null, cwd, agent: "grok", autoStart: true }),
+  muse: (cwd) => ({ session: null, cwd, agent: "muse", autoStart: true }),
 };
 const cellForAgent = (cwd: string, agent: LaunchAgent | undefined): Omit<Cell, "uid"> => (agent ? CELL_FOR_AGENT[agent](cwd) : shellCell(cwd));
 
+// `revealCell` after the insert, not instead of its page: what starts a cell is MOUNTING, and a
+// cell mounts only on the page the grid shows. insertCellAfter can only page by the manual index
+// — ordering needs the live status and the directory priorities, which only this component has.
 const openNewTerminal = ({ cwd, afterSlotKey, agent }: NewTerminalRequest) => {
   const match = afterSlotKey?.match(SLOT_UID_RE);
   const afterUid = match ? Number(match[1]) : NO_ORIGIN_UID;
-  state.value = insertCellAfter(state.value, afterUid, cellForAgent(cwd, agent));
+  const uid = state.value.nextUid; // insertCellAfter gives the new cell this one
+  const placed = insertCellAfter(state.value, afterUid, cellForAgent(cwd, agent));
+  const order = orderCells(placed.cells, statusForSort.value, placed.sortMode, priorityByCwd.value).map((c) => c.uid);
+  state.value = revealCell(placed, uid, order);
 };
 const detachNewTerminal = () => {
   offNewTerminal?.();
@@ -499,7 +531,7 @@ onMounted(() => (offNewTerminal = registerNewTerminalHandler(openNewTerminal)));
 onBeforeUnmount(detachNewTerminal);
 
 // Server config: the default workspace dir + the auto-recorded dir presets + sound.
-const { defaultCwd, home, presets, launchers, loadConfig, recordPreset, removePreset } = useAppConfig();
+const { defaultCwd, home, presets, launchers, customAgents, loadConfig, recordPreset, removePreset } = useAppConfig();
 const showSettings = ref(false);
 onMounted(loadConfig);
 
@@ -844,6 +876,7 @@ onBeforeUnmount(detachSpawnedChat);
       :default-cwd="defaultCwd"
       :presets="presets"
       :launchers="launchers"
+      :custom-agents="customAgents"
       :home="home"
       :reorderable="reorderable"
       :open-session-ids="openSessionIds"

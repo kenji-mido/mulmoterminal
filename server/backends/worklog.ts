@@ -5,14 +5,16 @@
 // into one summary — into weekly wiki pages, and reconciles progress against
 // vision/milestones. The batch self-scaffolds the wiki pages and its state file, so a
 // user only has to flip the flag. See plans/feat-worklog-vision.md (#351).
-import { SCHEDULE_TYPES } from "@receptron/task-scheduler";
-import type { TaskDefinition } from "@mulmoclaude/core/scheduler";
+import { MISSED_RUN_POLICIES, SCHEDULE_TYPES } from "@receptron/task-scheduler";
+import type { SystemTaskDef } from "@mulmoclaude/core/scheduler";
+import { spawnSystemChat, type ScheduledChatSpawn } from "./scheduled-run.js";
 
 const HOUR_MS = 3_600_000;
 
-// The run window is [lastRunAt, now], NOT a fixed interval: user/system tasks aren't
-// caught up, so a missed or slept-through run can leave a >intervalHours gap that a
-// fixed window would silently drop. lastRunAt is the high-water mark in worklog-state.json.
+// The run window is [lastRunAt, now], NOT a fixed interval: a run can be late (the server was
+// off and the scheduler caught it up at boot) or cover several missed windows at once, and a
+// fixed window would silently drop the difference. lastRunAt is the high-water mark in
+// worklog-state.json — the batch's own file, separate from the scheduler's state.json.
 export const WORKLOG_PROMPT = `あなたは開発作業ログのバッチです。カレントディレクトリ（ワークスペース = CLAUDE_CWD）で以下を実行してください。
 
 【最重要・セキュリティ / 信頼境界】
@@ -61,15 +63,23 @@ export const WORKLOG_PROMPT = `あなたは開発作業ログのバッチです�
 
 // Build the built-in worklog system task, or null when disabled. `intervalHours` sets
 // the cadence; the actual run window is still [lastRunAt, now] (see WORKLOG_PROMPT).
-export function worklogSystemTask(deps: { enabled: boolean; intervalHours: number; spawnChat: (message: string) => void }): TaskDefinition | null {
+//
+// `run-once` on a missed window: one catch-up run covers everything since lastRunAt, so
+// several missed windows must NOT become several batches all summarising the same period.
+export function worklogSystemTask(deps: { enabled: boolean; intervalHours: number; spawnChat: ScheduledChatSpawn }): SystemTaskDef | null {
   if (!deps.enabled) return null;
   const intervalMs = Math.max(1, Math.round(deps.intervalHours)) * HOUR_MS;
-  return {
+  const task = {
     id: "system.worklog",
+    name: "Dev worklog",
     description: "Periodic cross-clone dev worklog → weekly wiki pages",
     schedule: { type: SCHEDULE_TYPES.interval, intervalMs },
-    run: async () => {
-      deps.spawnChat(WORKLOG_PROMPT);
-    },
+    missedRunPolicy: MISSED_RUN_POLICIES.runOnce,
+  } as const;
+  return {
+    ...task,
+    // Returns at the spawn and files a failure later — see spawnSystemChat for why awaiting the
+    // batch here would stop the whole tick loop for its duration.
+    run: async () => spawnSystemChat(task, WORKLOG_PROMPT, deps.spawnChat),
   };
 }

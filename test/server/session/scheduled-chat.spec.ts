@@ -78,6 +78,19 @@ describe("a scheduled task's chat", () => {
     expect(registry.isFailedWorker(ID)).toBe(false);
   });
 
+  // The scheduler records the run from this, and the map holds ONE hook per session: registering
+  // a second from the caller would REPLACE the failed-worker mark above rather than run beside it.
+  it("tells the dispatcher the outcome, without losing the failed-worker mark", async () => {
+    const { registry, spawnScheduledWorker, runCompletionHook } = await fresh();
+    const seen: { didError: boolean; sessionId: string }[] = [];
+    spawnScheduledWorker(ID, { ...noop, onComplete: (outcome, sessionId) => void seen.push({ ...outcome, sessionId }) });
+
+    await runCompletionHook(ID, { didError: true });
+
+    expect(seen).toEqual([{ didError: true, sessionId: ID }]);
+    expect(registry.isFailedWorker(ID)).toBe(true);
+  });
+
   it("spawns and retains, in that order", async () => {
     // Retention exists because nothing else would ever end this session; registering a session
     // that failed to spawn would put a dead id on it.

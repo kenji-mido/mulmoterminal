@@ -2,26 +2,14 @@
 // can be resolved for it, and merge the global (AppConfig) + per-dir (.mulmoterminal.json) configs.
 
 import path from "node:path";
-import os from "node:os";
 import { gitStatus } from "../git/git-status.js";
 import { git } from "../git/worktrees.js";
 import { repoForRemote } from "../git/forge-support.js";
 import { mergeHeaderConfig, type HeaderConfig, type HeaderContext } from "./header-config.js";
 import { loadDirConfig } from "./dir-config.js";
-import { isStrictlyWithin } from "../infra/path-within.js";
-
-const WORKTREES_ROOT = path.join(os.homedir(), ".mulmoterminal", "worktrees");
-
-// A managed worktree lives at <root>/<repo>-<hash>/<task>. The task is the FIRST segment
-// under <root> — NOT path.basename, which would return the wrong name for any cwd deeper
-// than the task dir itself (a session working in <task>/src would read as "src"). Root is a
-// parameter so the rule is unit-testable without the real home dir. Exported for that test.
-export function worktreeTask(cwd: string, root: string = WORKTREES_ROOT): string | null {
-  if (!isStrictlyWithin(root, cwd)) return null;
-  // segments[0] = "<repo>-<hash>", segments[1] = "<task>", anything after is inside the task.
-  const segments = path.relative(path.resolve(root), path.resolve(cwd)).split(path.sep);
-  return segments[1] ?? null;
-}
+import { worktreeTask } from "./worktree-task.js";
+import { worktreeEnvValues } from "./worktree-env.js";
+import type { TerminalAgent } from "../../common/sessionAgent.js";
 
 async function remoteInfo(cwd: string): Promise<{ remoteUrl: string | null; repo: string | null }> {
   const res = await git(["remote", "get-url", "origin"], cwd);
@@ -32,7 +20,7 @@ async function remoteInfo(cwd: string): Promise<{ remoteUrl: string | null; repo
 
 export interface SessionMeta {
   session: string | null;
-  agent: "claude" | "codex" | "antigravity";
+  agent: TerminalAgent;
   model: string | null;
 }
 
@@ -54,6 +42,7 @@ export async function buildHeaderContext(cwd: string, meta: SessionMeta): Promis
     task: worktreeTask(cwd),
     isGitRepo: status.repo,
     prUrl: null, // resolved by the /api/header route only when a `pr` button is present
+    worktreeEnv: worktreeEnvValues(cwd),
   };
 }
 

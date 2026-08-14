@@ -1,5 +1,5 @@
 // Navigation seam for the full-screen file explorer + editor, a thin derivation over
-// vue-router (mirrors usePrsView). The open view is the URL: /files?cwd=<project dir>.
+// vue-router (mirrors useGithubView). The open view is the URL: /files?cwd=<project dir>.
 // A terminal header's Files button opens it rooted at that terminal's directory.
 import { computed, type ComputedRef } from "vue";
 import { router } from "../router";

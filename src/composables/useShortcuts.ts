@@ -117,7 +117,13 @@ function unpin(kind: ShortcutKind, slug: string): Promise<boolean> {
 
 /** Bulk reconcile one kind against the authoritative {slug,title,icon} list an
  *  index just fetched: prune dead slugs, refresh stale title/icon, self-heal the
- *  file. Other kinds untouched. */
+ *  file. Other kinds untouched.
+ *
+ *  `live` MUST be the whole WORKSPACE's list of that kind — this prunes and persists, to a file
+ *  shared with MulmoClaude, so a subset is written back as a deletion. This store cannot check
+ *  that from here (it has no idea what scope produced the list), which is exactly why the caller
+ *  carries the rule: collectionUi.ts refuses to call this while a project scope is active, after
+ *  a project-scoped list deleted twenty-one of the user's pins on 2026-08-09. */
 function reconcile(kind: ShortcutKind, live: { slug: string; title: string; icon: string }[]): Promise<void> {
   return enqueue(async () => {
     await load();

@@ -110,28 +110,87 @@ had no rule until now.
 
 Deliberate divergence is fine — say so in a comment with the reason, and flag it in the PR.
 
-## The GUI MCP has two server ids, and they are not meant to match
+## A shared app is enforced by Firestore rules, not by this repo
 
-The same tool is called `mcp__mt__presentChart` in a workspace cell and
-`mcp__mulmoterminal-render__presentChart` in a project cell. Both are current. The branch is
+`server/backends/sharedApp/` looks like the authority over a shared app and is not. Its checks run
+on the author's machine only; what binds a stranger writing to Firestore directly is
+`../mulmoserver/firestore.rules`, deployed by hand with no CI. So a guarantee added here alone is a
+diagnostic — and a condition added to a rule is paid for by every request that evaluates it, which
+on a shared path (`items` create/update) means every app using that path. The budget is 1000
+expressions per request, so measure the paths a change lands on rather than the change.
+
+Read [`docs/shared-app-principles.md`](docs/shared-app-principles.md) before adding a key, a view,
+or an operation — it is the short list of invariants and where each one is actually held. The
+decisions behind them are D1–D10 in `plans/feat-shareable-collections.md`; what is planned next is
+[`plans/feat-shared-app-platform.md`](plans/feat-shared-app-platform.md).
+
+## The GUI MCP has three server-id shapes, and they are not meant to match
+
+The same tool is called `mcp__mt__presentChart` in a workspace cell,
+`mcp__mulmoterminal-render__presentChart` in a project cell, and
+`mcp__plugin_mulmoterminal_render__presentChart` in a muse cell. All three are current. The branch is
 `carriesFullGuiMcp()` in `server/session/mcp-config.ts`: the workspace / single view / cell-less chat
 gets a **generated** `--mcp-config` carrying every tool under `GUI_SERVER_ID`; a project cell is
 handed **no `--mcp-config` at all** and reaches the tools through the user's own `.mcp.json` under the
 per-group ids from `toolGroupServerId()`. Both constants live in `common/toolGroups.ts`.
 
-**Ask that predicate from every new spawn path.** It is deliberately agent-agnostic: claude cells,
-codex cells and the launcher chips that run either all consult it, so two terminals in the workspace
-reach the same tools however they were started. It sat in `spawn-claude.ts` while claude was the only
-caller, and the drift that produced — a codex cell and a `claude` chip silently getting less than the
-cell beside them — is exactly what a new path re-creates by not asking. A chip's only lever is the
-command line, so its injection lives in `launcher-gui-mcp.ts` and recognises **only** a bare `claude`
-or `codex`: it is rewriting text the user wrote, and an unrecognised shape must be left alone.
+**Ask that predicate from every new spawn path that starts an AGENT.** It is deliberately
+agent-agnostic: claude cells and codex cells both consult it, so two terminals in the workspace reach
+the same tools however they were started. It sat in `spawn-claude.ts` while claude was the only
+caller, and the drift that produced — a codex cell silently getting less than the cell beside it —
+is exactly what a new path re-creates by not asking.
+
+**A launcher chip is not one of those paths, and must never become one.** A chip runs the user's
+command line **verbatim, and nothing in this repo parses it**. There is no launcher command parser —
+if you are looking for one, it was deleted, not moved. Concretely: no flags are inserted, no MCP is
+attached, `handleLaunchConnection` passes `worktreeLimited: false` unconditionally, and
+`spawnLauncherPty` records `agent: "shell"` whatever the command names.
+
+It was not always so — a chip whose command was `claude` or `codex` was rewritten for parity with
+the cell (#1040, #1358), and a command starting with the word `codex` was held to the worktree limit
+(#1207, #1208). All of it was removed deliberately: a chip that silently runs something other than
+what it says is what made the chips and the Agent Picker impossible to tell apart, and every one of
+those behaviours rested on guessing at text the user wrote.
+
+**A CUSTOM AGENT is the other side of that line, and it works because it is DECLARED.** A
+`customAgents` entry in the global config (`common/customAgents.ts`) is an Agent Picker option whose
+`command` the user writes — `ollama launch claude --model … --` — and Claude Code's whole argv is
+appended to it, so the session resumes, reports cost, and gets the GUI tools. The reason that is not
+the banned guessing above: the entry carries `agent: "claude"`, saying which CLI's arguments to
+append. It is required, and an entry omitting it is dropped on load. Nothing reads the command text
+to decide anything. Adding a second value to `CUSTOM_AGENT_KINDS` means teaching the spawn to build
+THAT agent's argv — it is not a label.
+
+So do not re-add a recogniser, however narrow, and do not "restore" the worktree limit for chips —
+that hole is known and accepted (a `codex` chip can occupy a worktree twice). A chip that wants GUI
+tools asks for them in the flags the user writes. Agent behaviour belongs to the Agent Picker.
+
+**Muse is the third shape and the one that breaks the pattern.** It reads neither a flag nor a file
+in the directory: MCP servers are declared by an installed PLUGIN (`server/agents/muse-mcp.ts`), and
+`muse plugins install` records one PER MACHINE — `--scope project` writes nothing into the project.
+So the registration cannot express "this directory gets render", and two things follow that nothing
+else here does:
+
+- a plugin MCP server is started with a **curated environment** — measured at 16 variables, all of
+  muse's own — so `guiMcpEnv` does not reach it and neither does an `env` block in the manifest.
+  The group and the port are argv; the SESSION is asked for, by walking the bridge's process tree
+  back to a tmux pane whose name is the session id (`server/session/bridge-session.ts`).
+- the four servers are registered for every session, and the ones a session is not entitled to
+  serve an EMPTY toolset rather than failing. Erroring would show three broken servers in a cell
+  that switched one group on.
+
+Do not "fix" that by trying to install per directory, and do not add an env var for the bridge —
+both were tried, and both fail silently by serving zero tools.
 
 The ids differ in **who owns them**, which is what decides whether a rename is free:
 
 - `GUI_SERVER_ID` (`mt`) — regenerated on every spawn, written to no file a user keeps. Ours. It is
   short because the client repeats it on **every tool name** (`mcp__<id>__`, or codex's
   `mcp-<id>-` with `-` rewritten to `_`), so the id is paid per tool, per listing, per session.
+- muse's per-group ids (`render`, `data`, …) — **ours, inside a manifest we generate**, and short
+  for `GUI_SERVER_ID`'s reason: muse builds the tool name out of the plugin id AND the capability
+  id, so `mulmoterminal-render` inside a `mulmoterminal` plugin would say our name twice in every
+  tool name. Free to rename, and a rename re-registers itself on the next spawn.
 - `toolGroupServerId()` (`mulmoterminal-render`, …) — **keys in config files users wrote**, read
   back by the launcher's per-group switch, documented in the setup guide. Renaming these breaks
   working setups with no error anywhere; it needs a migration over existing per-folder configs.
@@ -180,10 +239,14 @@ procedure: open this file, paste this, restart what, how to tell it worked, what
 
 - **Both languages**, and `nav_order` must be a **unique** sequence running **newest release
   first** — ordered by release date, not by version number sorted as text, so 1.11.1 sits above
-  1.11.0. A new release takes the lowest free number and everything below shifts down by one.
-  When renumbering, **enumerate `docs/guide/*/v*.md` rather than typing the list out**: a
-  hand-typed list has silently dropped a page, and the check written from the same list agreed
-  with it, so nothing caught the duplicate until review did.
+  1.11.0. **Release pages live in the 1000s** (`1001` is the newest); the reference guide keeps
+  the small numbers and grows into the space between. A new release takes `1001` and every older
+  page shifts down by one. The two ranges are far apart because they used to collide: the guide
+  had reached `claude-ollama` = 14 and `glossary` = 15 while releases started at 14, and
+  just-the-docs breaks a tie by title, so the sidebar quietly read 4.5.0 / glossary / 4.4.0 with
+  nothing erroring. When renumbering, **enumerate `docs/guide/*/v*.md` rather than typing the list
+  out**: a hand-typed list has silently dropped a page, and the check written from the same list
+  agreed with it, so nothing caught the duplicate until review did.
 - **State the date in the first line and call it a snapshot.** These pages *will* go stale — that
   is accepted, and the date is what makes a stale one readable rather than misleading. Never
   edit an old one to match new behaviour; write the next version's page instead.

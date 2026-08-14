@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { homeRelative, truncateFront, formatCwd, worktreeLabel } from "../../../src/components/cwdDisplay.js";
+import { homeRelative, truncateFront, formatCwd } from "../../../src/components/cwdDisplay.js";
 
 describe("homeRelative", () => {
   it("anchors a path under home on ~", () => {
@@ -43,23 +43,5 @@ describe("formatCwd", () => {
   });
   it("returns empty for a null cwd", () => {
     expect(formatCwd(null, "/Users/me")).toBe("");
-  });
-});
-
-describe("worktreeLabel", () => {
-  it("extracts <repo> and <task> from a managed worktree path", () => {
-    expect(worktreeLabel("/Users/me/.mulmoterminal/worktrees/myrepo-1a2b3c4d/fix-login")).toEqual({ repo: "myrepo", task: "fix-login" });
-  });
-  it("keeps a repo name that itself contains dashes", () => {
-    expect(worktreeLabel("/x/worktrees/my-cool-repo-deadbeef/task-2")).toEqual({ repo: "my-cool-repo", task: "task-2" });
-  });
-  it("handles Windows separators", () => {
-    expect(worktreeLabel("C:\\Users\\me\\.mulmoterminal\\worktrees\\app-0badf00d\\wip")).toEqual({ repo: "app", task: "wip" });
-  });
-  it("returns null for non-worktree paths", () => {
-    expect(worktreeLabel(null)).toBeNull();
-    expect(worktreeLabel("/Users/me/ss/proj")).toBeNull();
-    expect(worktreeLabel("/x/worktrees/no-hash-here/task")).toBeNull(); // dir lacks the -<8hex> suffix
-    expect(worktreeLabel("/x/worktrees/app-1a2b3c4d")).toBeNull(); // no task segment
   });
 });

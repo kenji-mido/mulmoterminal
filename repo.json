@@ -1,0 +1,6 @@
+{
+  "name": "mulmoterminal",
+  "description": "A browser terminal grid for running several AI coding agents in parallel",
+  "icon": "favicon.svg",
+  "homepage": "https://receptron.github.io/mulmoterminal/"
+}

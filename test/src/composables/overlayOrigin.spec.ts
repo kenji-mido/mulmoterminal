@@ -1,10 +1,11 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { flushPromises } from "@vue/test-utils";
 import { router } from "../../../src/router/index";
-import { prsGotoIndex, prsClose } from "../../../src/composables/usePrsView";
+import { githubGotoIndex, githubClose } from "../../../src/composables/useGithubView";
 import { accountingViewOpen, accountingViewClose } from "../../../src/composables/useAccountingView";
 import { wikiGotoIndex, wikiGotoPage, wikiGotoGraph, wikiClose } from "../../../src/composables/useWikiBrowse";
 import { browseGotoIndex, browseGotoDetail, browseClose } from "../../../src/composables/useCollectionBrowse";
+import { roomsViewOpen, roomsViewClose, roomsViewSelect } from "../../../src/composables/useRoomsView";
 
 // Drives the real singleton router (jsdom web-history) — the composables are bound to it.
 const settle = () => flushPromises();
@@ -12,10 +13,11 @@ const settle = () => flushPromises();
 // Every full-screen overlay, as (name, open, close). Same contract for all of them, so the
 // cases below are one table rather than four near-identical blocks (#886).
 const OVERLAYS = [
-  ["PRs", () => prsGotoIndex(), () => prsClose(), "prs"],
+  ["GitHub", () => githubGotoIndex(), () => githubClose(), "github"],
   ["accounting", () => accountingViewOpen(), () => accountingViewClose(), "accounting"],
   ["wiki", () => wikiGotoIndex(), () => wikiClose(), "wiki"],
   ["collections", () => browseGotoIndex("collection"), () => browseClose(), "collections"],
+  ["rooms", () => roomsViewOpen(), () => roomsViewClose(), "rooms"],
 ] as const;
 
 describe("overlay return-to-origin", () => {
@@ -72,6 +74,34 @@ describe("overlay return-to-origin", () => {
     expect(router.currentRoute.value.name).toBe("terminals");
   });
 
+  // Same rule as the wiki's tabs: a room is picked from inside the overlay, and closing has to
+  // return to the view it was opened from rather than to the room looked at before this one.
+  it("rooms: keeps the origin while moving between rooms", async () => {
+    await router.push("/terminals");
+    await settle();
+
+    roomsViewOpen("standup");
+    await settle();
+    roomsViewSelect("design-review");
+    await settle();
+    expect(router.currentRoute.value.name).toBe("roomView");
+    expect(router.currentRoute.value.params.room).toBe("design-review");
+
+    roomsViewClose();
+    await settle();
+    expect(router.currentRoute.value.name).toBe("terminals");
+  });
+
+  // The id becomes a filename on the server, so a name that is not a room id must not reach a
+  // route that hands it to the API.
+  it("rooms: opens the index rather than routing a name that is not a room id", async () => {
+    await router.push("/terminals");
+    await settle();
+    roomsViewOpen("../escape");
+    await settle();
+    expect(router.currentRoute.value.name).toBe("rooms");
+  });
+
   it("collections: keeps the origin from index to detail", async () => {
     await router.push("/terminals");
     await settle();
@@ -95,7 +125,7 @@ describe("overlay return-to-origin", () => {
     await router.push("/terminals");
     await settle();
 
-    prsGotoIndex();
+    githubGotoIndex();
     await settle();
     wikiGotoIndex();
     await settle();

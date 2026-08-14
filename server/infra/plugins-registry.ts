@@ -33,7 +33,7 @@ import { htmlByPath } from "../backends/openPath.js";
 import { createPluginRuntime } from "./pluginRuntime.js";
 import { resolvePluginTools } from "./tool-precedence.js";
 import { HOST_TOOL_DEFINITIONS } from "./host-tools.js";
-import { groupOfTool, toolGroupServerId, GUI_SERVER_ID, AUTO_ALLOWED_TOOLS, type ToolGroup } from "../../common/toolGroups.js";
+import { groupOfTool, toolGroupServerId, GUI_SERVER_ID, AUTO_ALLOWED_TOOLS, NEVER_AUTO_APPROVED_TOOLS, type ToolGroup } from "../../common/toolGroups.js";
 import { missingRequiredEnv, soleExecutor, isExecutor } from "./server-tool-load.js";
 import { isRecord } from "../../common/isRecord.js";
 
@@ -296,7 +296,11 @@ export function mountAllRoutes(app: Express) {
 export function allowedToolNames(group: ToolGroup | null = null) {
   const serverId = group === null ? GUI_SERVER_ID : toolGroupServerId(group);
   const defs = group === null ? toolDefinitions : toolDefinitions.filter((d) => groupOfTool(d.name) === group);
-  return defs.map((d) => `mcp__${serverId}__${d.name}`);
+  // NEVER_AUTO_APPROVED_TOOLS is filtered HERE rather than at the call site because this function
+  // is the auto-approval list itself: a second caller that forgot the filter would re-open the
+  // hole silently. Filtering here does not take the tool away — availability comes from
+  // --mcp-config, which still carries it. It only means the agent has to ask.
+  return defs.filter((d) => !NEVER_AUTO_APPROVED_TOOLS.includes(d.name)).map((d) => `mcp__${serverId}__${d.name}`);
 }
 
 // The fully-qualified names a GRID cell pre-approves: the auto-allowed tools, each under the

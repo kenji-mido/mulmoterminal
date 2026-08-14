@@ -16,19 +16,32 @@ import { z } from "zod";
 import { THEME_COLOR_KEYS } from "../../common/themeColors.js";
 import { THEME_IDS } from "../../common/themeIds.js";
 import { CUSTOM_THEME_ID_RE, THEME_VAR_KEYS, isBuiltinThemeId } from "../../common/themeVars.js";
-import { isUsableModelId } from "../../common/modelIds.js";
+import { isUsableModelId, isUsableProviderId } from "../../common/modelIds.js";
 import { normalizeFontSize, TERMINAL_FONT_SIZE_MAX, TERMINAL_FONT_SIZE_MIN } from "../../common/terminalFontSize.js";
 import { normalizeFontFamily, TERMINAL_FONT_FAMILY_MAX_CHARS, TERMINAL_FONT_FAMILY_SAFE_RE } from "../../common/terminalFontFamily.js";
 import { normalizeOrderPriority } from "../../common/orderPriority.js";
 import { SESSION_AGENTS } from "../../common/sessionAgent.js";
 import { NOTIFY_KINDS } from "../../common/notifyKinds.js";
+import { DIR_ICON_MAX_CHARS } from "../../common/dirIcon.js";
+import { HEADER_STATUS_KEYS, HEADER_STATUS_TINTS, sanitizeHeaderStatusColors, sanitizeHeaderStatusTint } from "../../common/headerStatusColors.js";
 import type { QuickCommand } from "../../common/quickCommands.js";
+import { isRecord } from "../../common/isRecord.js";
+import {
+  ENV_NAME_RE,
+  MAX_PORT_BASE,
+  MAX_SLUG_CHARS,
+  MAX_WORKTREE_ENV_VARS,
+  MIN_PORT,
+  type WorktreeEnvSpec,
+  type WorktreeEnvVar,
+} from "../../common/worktreeEnv.js";
+import { CUSTOM_AGENT_KINDS, type CustomAgent } from "../../common/customAgents.js";
 
 // ---- shared constants ---------------------------------------------------------------------
 
 export const VIEW_TARGETS = ["diff", "prs", "wiki", "collections", "accounting"] as const;
 export const RUN_TYPES = ["shell", "input", "open"] as const;
-export const BUILTIN_CHIPS = ["dir", "git", "work", "ctx", "usage", "status", "diff", "tools"] as const;
+export const BUILTIN_CHIPS = ["dir", "git", "work", "ctx", "usage", "status", "diff", "tools", "env"] as const;
 
 export const NAME_MAX_CHARS = 40;
 // Runtime caps (sanitizeButtons / sanitizeChips truncate past these), mirrored by the JSON Schema
@@ -114,6 +127,21 @@ export type CwdPreset = z.infer<typeof cwdPresetSchema>;
 export const launcherSchema = z.object({ label: z.string(), command: z.string() });
 export type Launcher = z.infer<typeof launcherSchema>;
 
+// A CUSTOM AGENT — the user's own way of starting Claude Code, offered in the Agent Picker
+// (common/customAgents.ts, which is where the difference from a launcher is written out).
+// Claude Code's argv is APPENDED to `command`, so this is a real agent session, not a chip.
+//
+// `satisfies` pins the schema to the shared interface: the browser reads the same rows off
+// GET /api/config, so a field added to one alone would not reach the other.
+export const customAgentSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  // WHICH agent it launches as — whose arguments get appended. Declared, never inferred from the
+  // command text (common/customAgents.ts).
+  agent: z.enum(CUSTOM_AGENT_KINDS),
+  command: z.string(),
+}) satisfies z.ZodType<CustomAgent>;
+
 // Validation for common/quickCommands.ts's QuickCommand, which the settings UI edits and so
 // cannot live here. `satisfies` is what keeps the two from drifting: widen the schema without
 // widening the interface and this stops compiling.
@@ -162,6 +190,22 @@ export type UserMcpServer = z.infer<typeof userMcpServerSchema>;
 
 export const dirColorField = hexColor.nullable().catch(null);
 export const dirThemeField = themeIdSchema.nullable().catch(null);
+// Per-status header colours, and whether a status recolours the header at all. The rules live in
+// common/ because the browser applies them and this file only has to let them through — a second
+// copy here is how a config the server accepts starts painting something else.
+export const dirHeaderStatusColorsField = z
+  .unknown()
+  .transform((value) => {
+    const colors = sanitizeHeaderStatusColors(value);
+    return Object.keys(colors).length ? colors : null;
+  })
+  .nullable()
+  .catch(null);
+export const dirHeaderStatusTintField = z
+  .unknown()
+  .transform((value) => sanitizeHeaderStatusTint(value))
+  .nullable()
+  .catch(null);
 // Clamped, not range-checked: normalizeFontSize keeps an out-of-range number at the nearest
 // usable size instead of discarding it, so `fontSize: 99` reads as "as big as allowed" rather
 // than silently falling back to the global size. writableDirConfigSchema below is the strict
@@ -211,16 +255,16 @@ export const dirColorsField = z
   .nullable()
   .catch(null);
 
-// A provider/model id the launch path will actually accept. Enforced here too, so the
-// picker can never offer an id that the ws query drops on the way to the spawn — a
-// dropped provider whose model survives would start the session on Anthropic instead.
-const modelIdSchema = z.string().trim().refine(isUsableModelId);
+// A provider id the launch path will actually accept. Enforced here too, so the picker can
+// never offer an id that the ws query drops on the way to the spawn — a dropped provider
+// whose model survives would start the session on Anthropic instead.
+const providerIdSchema = z.string().trim().refine(isUsableProviderId);
 
 // An Anthropic-compatible backend a directory can point its sessions at (#579). The key
 // itself is never stored here — `tokenEnv` names the env var the SERVER reads it from,
 // because this config is served over HTTP to the browser and the phone.
 export const providerSchema = z.object({
-  id: modelIdSchema,
+  id: providerIdSchema,
   label: z.string().min(1),
   // No trailing /v1: Claude Code appends /v1/messages itself.
   baseUrl: z.string().min(1),
@@ -292,6 +336,52 @@ export function resolveAddDirs(input: unknown, base: string, exists: (p: string)
   return unique.length ? unique : null;
 }
 
+// What a directory wants handed out uniquely per working tree (#1367): the port its dev server
+// binds, the database name its migrations touch. The DECLARATION only — which variables and what
+// kind of value each takes. What each tree actually gets is reserved in config/worktree-env.ts.
+//
+// A port names its `base` rather than a range, because the number a project already uses is the
+// one its README, its proxy config and its bookmarks say. The trees spread upward from it.
+const worktreeEnvVarSchema = z.discriminatedUnion("kind", [
+  z.object({ kind: z.literal("port"), base: z.number().int().min(MIN_PORT).max(MAX_PORT_BASE) }),
+  z.object({ kind: z.literal("slug"), prefix: z.string().max(MAX_SLUG_CHARS).optional() }),
+]);
+export const worktreeEnvSchema = z
+  .record(z.string().regex(ENV_NAME_RE), worktreeEnvVarSchema)
+  // The cap the LOADER applies (it slices at MAX_WORKTREE_ENV_VARS), mirrored here for the reason
+  // the buttons / chips / skills ones are: a config the shipped JSON Schema calls valid must not
+  // have its tail silently dropped at load time. Both halves are needed — `check` is what refuses
+  // it, `meta` is what reaches the JSON Schema, since z.toJSONSchema cannot see a check.
+  .check((ctx) => {
+    if (Object.keys(ctx.value).length > MAX_WORKTREE_ENV_VARS) {
+      ctx.issues.push({ code: "custom", message: `worktreeEnv holds at most ${MAX_WORKTREE_ENV_VARS} variables`, input: ctx.value });
+    }
+  })
+  .meta({ maxProperties: MAX_WORKTREE_ENV_VARS });
+
+// The lenient loader: one malformed variable is dropped on its own, so a typo in `API_PORT`
+// cannot take a working `PORT` down with it — the same treatment `providers.models` gets, and for
+// the same reason (the other entries are still exactly what the author meant).
+export const dirWorktreeEnvField = z
+  .unknown()
+  .transform((raw): WorktreeEnvSpec | null => {
+    if (!isRecord(raw)) return null;
+    const spec: WorktreeEnvSpec = {};
+    // The cap counts what SURVIVED, not what was written: slicing first would let one malformed
+    // entry among the first sixteen consume a slot and push a perfectly good seventeenth
+    // declaration out, leaving a variable the file plainly sets unset (CodeRabbit review on
+    // #1367). The same reason each entry is dropped on its own rather than failing the block.
+    for (const [name, value] of Object.entries(raw)) {
+      if (Object.keys(spec).length >= MAX_WORKTREE_ENV_VARS) break;
+      if (!ENV_NAME_RE.test(name)) continue;
+      const parsed = worktreeEnvVarSchema.safeParse(value);
+      if (parsed.success) spec[name] = parsed.data satisfies WorktreeEnvVar;
+    }
+    return Object.keys(spec).length ? spec : null;
+  })
+  .nullable()
+  .catch(null);
+
 // ---- JSON Schema for the config skill -----------------------------------------------------
 // The WRITABLE per-dir shape (what a user types into `.mulmoterminal.json`), described strictly
 // so the skill can validate its output and drive structured generation. Distinct from the
@@ -349,11 +439,37 @@ const writableHeaderButtonSchema = z.discriminatedUnion("run", [
 const writableCustomChipSchema = z.object({ label: nonEmptyText, text: nonEmptyText, when: nonEmptyText.optional() });
 const writableHeaderChipSchema = z.union([builtinChipSchema, writableCustomChipSchema]);
 
+// A status may be given one colour or two. The bare string is the common case — recolour the
+// background and let the ink be derived — and accepting it here keeps the authoring form the same
+// shape the runtime already takes (sanitizeHeaderStatusColors).
+//
+// partialRecord for the reason `colors` below states: z.record over an enum marks every key
+// required in the generated JSON Schema, which would reject a config that recolours only `working`.
+// "One of the two colours is required" as a union of two shapes rather than a `.refine` on one:
+// z.toJSONSchema DROPS a refine (the `fontFamily` comment below is the same trap), so the shipped
+// dir-config.schema.json would have accepted `"working": {}` — an entry that says nothing, which
+// the runtime then ignores. Written this way the requirement survives into the schema, and a typo
+// is reported at authoring time, where it can be fixed.
+const statusHex = z.string().regex(HEX_COLOR_RE);
+const writableHeaderStatusColorsSchema = z.partialRecord(
+  z.enum(HEADER_STATUS_KEYS),
+  z.union([statusHex, z.object({ background: statusHex, text: statusHex.optional() }), z.object({ background: statusHex.optional(), text: statusHex })]),
+);
+
 const writableDirConfigSchema = z.object({
   name: nonEmptyText.max(NAME_MAX_CHARS).optional(),
+  // The IMAGE marking this directory's cells (#1421) — a path relative to this file's own
+  // directory, an http(s) URL, or a data: image. NOT the Material Symbols name a header button
+  // takes under the same key: this one is a picture the project ships, that one is a glyph id.
+  //
+  // `false` means "no icon here" and, unlike omitting the key, stops MulmoTerminal looking for
+  // the favicon the repository already ships (#1428).
+  icon: z.union([nonEmptyText.max(DIR_ICON_MAX_CHARS), z.literal(false)]).optional(),
   badgeColor: z.string().regex(HEX_COLOR_RE).optional(),
   headerColor: z.string().regex(HEX_COLOR_RE).optional(),
   headerTextColor: z.string().regex(HEX_COLOR_RE).optional(),
+  headerStatusColors: writableHeaderStatusColorsSchema.optional(),
+  headerStatusTint: z.enum(HEADER_STATUS_TINTS).optional(),
   cellColor: z.string().regex(HEX_COLOR_RE).optional(),
   cellBorderColor: z.string().regex(HEX_COLOR_RE).optional(),
   dotColor: z.string().regex(HEX_COLOR_RE).optional(),
@@ -394,6 +510,10 @@ const writableDirConfigSchema = z.object({
   // Whether this directory's sessions carry the built-in closing-summary instructions (#1062).
   // Omit to follow `appendSystemPrompt` in the global config, which defaults to on.
   appendSystemPrompt: z.boolean().optional(),
+  // Values every working tree of this project needs its OWN of (#1367) — a dev server's port, a
+  // database name. Each tree (the checkout itself and every managed worktree) is reserved a
+  // distinct value, exported into its terminals. Omit and nothing is set, as before.
+  worktreeEnv: worktreeEnvSchema.optional(),
 });
 
 export function dirConfigJsonSchema(): Record<string, unknown> {

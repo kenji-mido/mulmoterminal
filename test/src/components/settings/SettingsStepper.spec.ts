@@ -6,7 +6,7 @@ import SettingsStepper from "../../../../src/components/settings/SettingsStepper
 // contract worth pinning is what the caller relies on: the emitted delta is SIGNED, so the
 // caller's nudge function takes it as-is, and the ends of the range are unreachable rather than
 // clamped after the fact.
-const mountStepper = (props: Partial<{ value: number; unit: string; min: number; max: number; step: number; label: string }> = {}) =>
+const mountStepper = (props: Partial<{ value: number; unit: string; min: number; max: number; step: number; label: string; disabled: boolean }> = {}) =>
   mount(SettingsStepper, { props: { value: 14, unit: " px", min: 8, max: 32, step: 1, label: "terminal font size", ...props } });
 
 const decrease = (w: ReturnType<typeof mountStepper>) => w.find('[aria-label="Decrease terminal font size"]');
@@ -47,6 +47,22 @@ describe("SettingsStepper", () => {
   it("disables past the end, not only at it", () => {
     expect(decrease(mountStepper({ value: 4 })).attributes("disabled")).toBe("");
     expect(increase(mountStepper({ value: 40 })).attributes("disabled")).toBe("");
+  });
+
+  // `pointer-events-none` on the container greys the stepper for the MOUSE and does nothing for a
+  // keyboard, so a section that gates a whole setting has to say so here too — else the buttons are
+  // still tabbable and a press saves a value the screen calls unavailable (Codex review on #1412).
+  it("disables both ends when the whole setting is off", () => {
+    const off = mountStepper({ value: 14, disabled: true });
+    expect(decrease(off).attributes("disabled")).toBe("");
+    expect(increase(off).attributes("disabled")).toBe("");
+  });
+
+  it("emits nothing while disabled", async () => {
+    const off = mountStepper({ value: 14, disabled: true });
+    await increase(off).trigger("click");
+    await decrease(off).trigger("click");
+    expect(off.emitted("nudge")).toBeUndefined();
   });
 
   // The readout is what a screen reader announces after a press, so it has to be live.

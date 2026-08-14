@@ -9,7 +9,7 @@ const complete = (turnId = "t1") => line({ type: "event_msg", payload: { type: "
 
 // A fake rollout the test appends to, driving the loop one tick at a time. `sleep`
 // resolves immediately, and the loop is stopped by a tick budget rather than a timer.
-function harness(initial: string, startAtEnd: boolean) {
+function harness(initial: string, startAtEnd: boolean, restoreOpenTurn = false) {
   let content = initial;
   let ticks = 0;
   const maxTicks = 12;
@@ -23,6 +23,7 @@ function harness(initial: string, startAtEnd: boolean) {
     onBoundary: (b) => boundaries.push(b),
     isAlive: () => ticks < maxTicks,
     startAtEnd,
+    restoreOpenTurn,
     sleep: async () => {
       ticks += 1;
       const add = appendAtTick.get(ticks);
@@ -65,6 +66,36 @@ describe("watchCodexActivity", () => {
     const h = harness(started("old") + complete("old"), true);
     h.appendAt(2, started("new"));
     h.appendAt(4, complete("new"));
+    await h.run();
+    expect(h.boundaries).toEqual(["started", "completed"]);
+  });
+
+  // The reattach case (#1538 review): the process behind the file is still RUNNING, so a turn
+  // the skipped content leaves open is what it is doing right now — without restoring it the
+  // cell sits idle until the turn's END arrives. The end itself then comes off the tail.
+  it("restores a turn the skipped content leaves open, then tails its end", async () => {
+    const h = harness(started("mid"), true, true);
+    h.appendAt(3, complete("mid"));
+    await h.run();
+    expect(h.boundaries).toEqual(["started", "completed"]);
+  });
+
+  // A trailing COMPLETED is history, not state: re-reporting it would re-flag the cell (and
+  // re-push) for a turn finished before the restart — the replay startAtEnd exists to prevent.
+  it("restores nothing when the skipped content's last turn is closed", async () => {
+    const h = harness(started("old") + complete("old"), true, true);
+    await h.run();
+    expect(h.boundaries).toEqual([]);
+  });
+
+  // The writer is still alive at reattach, so the snapshot can land MID-record. The torn
+  // record must ride the pending fragment into the tail: judged as a line at restore time, a
+  // torn task_complete is ignored there AND unparseable from its suffix alone on the first
+  // poll — the completion is lost for good and the restored working flag sticks (#1538 review).
+  it("assembles a completion record torn by the reattach snapshot, instead of losing it", async () => {
+    const torn = complete("mid");
+    const h = harness(started("mid") + torn.slice(0, 25), true, true);
+    h.appendAt(2, torn.slice(25));
     await h.run();
     expect(h.boundaries).toEqual(["started", "completed"]);
   });

@@ -8,6 +8,7 @@ export interface CellChromeSource {
   filesOpen?: boolean | undefined;
   rightPane?: RightPane | null | undefined;
   canvasAvailable?: boolean | undefined;
+  collectionsAvailable?: boolean | undefined;
 }
 
 // The two booleans are resolved rather than passed through as `boolean | undefined`: under
@@ -19,9 +20,16 @@ export interface CellChromeProps {
   filesOpen: boolean;
   rightPane: RightPane | null;
   canvasAvailable: boolean;
+  collectionsAvailable: boolean;
 }
 
-export type CellChromeEvent = "toggle-expand" | "toggle-files" | "toggle-canvas" | "toggle-tools" | "close";
+// EVERY event CellChromeButtons can raise, minus the ones a cell binds itself (`toggle-park`,
+// which only a session terminal has). A button whose event is missing HERE is dead: the cell
+// binds `v-on="chromeEvents"`, so an emit with no entry is dropped silently — the grid's own
+// handler waits for something nothing ever sends it. That is what happened to the collections
+// button, which shipped in #1573 and never once opened the pane. `cellChromeEventsAreComplete`
+// in the spec pins the two lists together so the next button cannot repeat it.
+export type CellChromeEvent = "toggle-expand" | "toggle-files" | "toggle-canvas" | "toggle-tools" | "toggle-collections" | "toggle-github" | "close";
 
 // Bound as two objects rather than spelled out in each template.
 //
@@ -43,12 +51,17 @@ export function cellChromeBinding(
       filesOpen: source.filesOpen ?? false,
       rightPane: source.rightPane ?? null,
       canvasAvailable: source.canvasAvailable ?? false,
+      // Absent means NOT available, so a cell type that forgets to forward it hides the button
+      // rather than offering one onto a store its agent cannot reach.
+      collectionsAvailable: source.collectionsAvailable ?? false,
     })),
     chromeEvents: {
       "toggle-expand": () => emit("toggle-expand"),
       "toggle-files": () => emit("toggle-files"),
       "toggle-canvas": () => emit("toggle-canvas"),
       "toggle-tools": () => emit("toggle-tools"),
+      "toggle-collections": () => emit("toggle-collections"),
+      "toggle-github": () => emit("toggle-github"),
       close,
     },
   };
@@ -68,6 +81,8 @@ export function cellShellEvents(emit: {
     "toggle-files": () => emit("toggle-files"),
     "toggle-canvas": () => emit("toggle-canvas"),
     "toggle-tools": () => emit("toggle-tools"),
+    "toggle-collections": () => emit("toggle-collections"),
+    "toggle-github": () => emit("toggle-github"),
     close: () => emit("close"),
     move: (dir: -1 | 1) => emit("move", dir),
   };

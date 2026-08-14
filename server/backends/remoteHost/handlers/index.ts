@@ -14,11 +14,12 @@
 import type { CommandHandlers } from "@mulmoclaude/core/remote-host";
 import { googleCalendarColors, googleCalendarCreateEvent, googleCalendarListCalendars, googleCalendarListEvents } from "../googleCalendar.js";
 import { getCollection } from "./getCollection.js";
-import { createGetFeed } from "./getFeed.js";
+import { getFeedFor } from "./getFeed.js";
 import { getRemoteView } from "./getRemoteView.js";
 import { createIssueWorkHandlers } from "./issueWork.js";
 import { getRemoteViewItems } from "./getRemoteViewItems.js";
 import { createListAccountingBooks } from "./listAccountingBooks.js";
+import { listCollectionProjects } from "./listCollectionProjects.js";
 import { listCollections } from "./listCollections.js";
 import { createListFeeds } from "./listFeeds.js";
 import { createListShortcuts } from "./listShortcuts.js";
@@ -35,6 +36,9 @@ export function createRemoteHostHandlers(deps: RemoteHostHandlerDeps): CommandHa
 
   return {
     listCollections,
+    // How the phone LEARNS which projects it may name — the other half of the scope the
+    // collection handlers already resolve (../commandScope.ts).
+    listCollectionProjects,
     getCollection,
     getRemoteView,
     getRemoteViewItems,
@@ -52,7 +56,7 @@ export function createRemoteHostHandlers(deps: RemoteHostHandlerDeps): CommandHa
     "google.calendar.colors": googleCalendarColors,
 
     listFeeds: createListFeeds(workspace),
-    getFeed: createGetFeed(workspace),
+    getFeed: getFeedFor(workspace),
     listShortcuts: createListShortcuts(workspace),
     listSkills: createListSkills(workspace),
     listAccountingBooks: createListAccountingBooks(workspace),

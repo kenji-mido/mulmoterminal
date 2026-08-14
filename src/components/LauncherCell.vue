@@ -7,8 +7,8 @@ import { isShellLauncher, type CellLauncher } from "./gridTabs";
 import type { GridCellEmits, GridCellProps } from "./gridCell";
 import { CELL_BTN, CELL_TERM } from "./cellChromeClasses";
 
-// A grid cell running a configured launch command (a plain shell, codex, any
-// interactive program) instead of Claude. Unlike CommandCell this is PERSISTENT: it
+// A grid cell running a configured launch command — any interactive program, run exactly as the
+// user wrote it and never inspected. Unlike CommandCell this is PERSISTENT: it
 // carries a session id and a durable connection (persistKey), so it survives page
 // switches and reconnects — but it has no Claude hooks, so its status is only
 // running (working) / exited (idle). `launcher.index` is the command's position in the
@@ -61,6 +61,7 @@ function relaunch() {
     :files-open="filesOpen"
     :right-pane="rightPane"
     :canvas-available="canvasAvailable"
+    :collections-available="collectionsAvailable"
     :home="home"
     :cwd="cwd"
     :default-cwd="defaultCwd"

@@ -1,16 +1,19 @@
 <script setup lang="ts">
+import { useI18n } from "vue-i18n";
 import { computed, ref } from "vue";
 import { useSavedListMirror } from "../../composables/useSavedListMirror";
 import SettingsButton from "../SettingsButton.vue";
 import SettingsField from "../SettingsField.vue";
 import { canAddQuickCommand } from "../settingsValidators";
 import SettingsListRow from "./SettingsListRow.vue";
-import { SECTION_HEADING, SETTINGS_LIST } from "./sectionClasses";
+import { SETTINGS_LIST } from "./sectionClasses";
 import type { QuickCommand } from "../../../common/quickCommands";
 import { SESSION_AGENTS, type SessionAgent } from "../../../common/sessionAgent";
 
 const props = defineProps<{ quickCommands?: QuickCommand[] | undefined }>();
 const emit = defineEmits<{ (e: "update-quick-commands", commands: QuickCommand[]): void }>();
+
+const { t } = useI18n();
 
 // Phrases the phone offers as chips on a session (#830). `agents` scopes an entry to session
 // kinds, and selecting none means every kind.
@@ -49,12 +52,11 @@ const agentScopeLabel = (command: QuickCommand): string => (command.agents?.leng
 </script>
 
 <template>
-  <h3 :class="SECTION_HEADING">Phone quick commands</h3>
-  <p class="mb-3 mt-1.5 text-[12px] text-dim">
-    Phrases you send often, offered as chips on the phone's terminal view. Tapping one puts the text in the input box — it isn't sent until you press send. The
-    label is the chip's face, so keep it short. Example: <code>PR</code> → <code>PR作って</code>. Leave every kind unchecked to offer a command everywhere, or
-    tick the ones it suits — <code>git status</code> belongs to a shell, not to Claude.
-  </p>
+  <i18n-t keypath="settings.quickCommands.intro" tag="p" class="mb-3 mt-1.5 text-[12px] text-dim">
+    <template #labelExample><code>PR</code></template>
+    <template #textExample><code>PR作って</code></template>
+    <template #gitStatus><code>git status</code></template>
+  </i18n-t>
   <ul v-if="quickCommandList.length" :class="SETTINGS_LIST">
     <SettingsListRow v-for="c in quickCommandList" :key="c.label" :name="c.label" @remove="removeQuickCommand(c.label)">
       <span class="flex-none font-mono text-[12px] text-secondary">{{ c.label }}</span>
@@ -66,33 +68,33 @@ const agentScopeLabel = (command: QuickCommand): string => (command.agents?.leng
     <SettingsField
       v-model="newQuickLabel"
       class="min-w-0 shrink grow basis-[25%]"
-      placeholder="Label"
-      aria-label="Quick command label"
+      :placeholder="t('settings.quickCommands.labelPlaceholder')"
+      :aria-label="t('settings.quickCommands.labelField')"
       spellcheck="false"
       @keydown.enter="addQuickCommand"
     />
     <SettingsField
       v-model="newQuickText"
       class="min-w-0 flex-auto"
-      placeholder="text to insert (e.g. PR作って)"
-      aria-label="Quick command text"
+      :placeholder="t('settings.quickCommands.textPlaceholder')"
+      :aria-label="t('settings.quickCommands.textField')"
       spellcheck="false"
       @keydown.enter="addQuickCommand"
     />
-    <SettingsButton :disabled="!newQuickValid" @click="addQuickCommand">Add</SettingsButton>
+    <SettingsButton :disabled="!newQuickValid" @click="addQuickCommand">{{ t("settings.common.add") }}</SettingsButton>
   </div>
   <div class="mt-1.5 flex items-center gap-3">
-    <span class="text-[11px] text-muted">Offer to:</span>
+    <span class="text-[11px] text-muted">{{ t("settings.quickCommands.offerTo") }}</span>
     <label v-for="agent in SESSION_AGENTS" :key="agent" class="flex cursor-pointer items-center gap-1 text-[11px] text-dim">
       <input
         type="checkbox"
         class="cursor-pointer"
         :checked="newQuickAgents.includes(agent)"
-        :aria-label="`Offer to ${agent} sessions`"
+        :aria-label="t('settings.quickCommands.offerToAgent', { agent })"
         @change="toggleNewQuickAgent(agent)"
       />
       <span class="font-mono">{{ agent }}</span>
     </label>
-    <span class="text-[11px] text-muted">(none ticked = every kind)</span>
+    <span class="text-[11px] text-muted">{{ t("settings.quickCommands.offerToNone") }}</span>
   </div>
 </template>

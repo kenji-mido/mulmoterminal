@@ -6,8 +6,9 @@
 // host keeps a FACTORY (see ./index.ts) and passes deps down — a deliberate divergence from the
 // reference host, forced by where the state lives rather than by taste.
 import type { SessionAgent } from "../../../../common/sessionAgent.js";
+import type { TerminalSessionListing } from "../dirIcons.js";
 import type { IngestResult } from "../ingestAttachments.js";
-import type { SessionScreen, TerminalSessionSummary } from "../terminalScreen.js";
+import type { SessionScreen } from "../terminalScreen.js";
 
 export interface RemoteHostHandlerDeps {
   workspace: string;
@@ -17,8 +18,10 @@ export interface RemoteHostHandlerDeps {
   // path-only attachments plus a deferred staging cleanup (remoteHost/ingestAttachments.ts).
   ingest: (storageIds: string[]) => Promise<IngestResult>;
   // The phone's remote terminal view (#435) — the picker's list and one session's
-  // current screen. Wired in server/index.ts, where the PTY table lives.
-  listTerminalSessions: () => Promise<TerminalSessionSummary[]>;
+  // current screen. Wired in server/index.ts, where the PTY table lives. The list
+  // arrives with its directory images already packed (#1556), since the same place
+  // that knows each session's cwd is the one that can read them.
+  listTerminalSessions: () => Promise<TerminalSessionListing>;
   captureTerminalScreen: (sessionId: string) => Promise<SessionScreen>;
   // Type into one session's live PTY (#445). Returns false when no PTY is attached
   // in this process — a tmux session that outlived a restart stays viewable but not

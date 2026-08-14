@@ -3,7 +3,7 @@ title: Open-source alternatives for running parallel AI coding agents
 nav_title: Alternatives
 layout: default
 parent: English
-nav_order: 11
+nav_order: 15
 description: An honest map of the tools that run several Claude Code / Codex sessions at once — Vibe Kanban, Nimbalyst, Parallel Code, Conductor, Claude Squad, and Claude Code's own `claude agents` — and which one fits which bottleneck. Written by the maintainer of one of them.
 ---
 

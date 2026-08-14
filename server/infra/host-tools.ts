@@ -7,6 +7,7 @@
 import type { ToolDefinition } from "gui-chat-protocol";
 import { MANAGE_ACCOUNTING } from "./accounting-tool.js";
 import { MANAGE_COLLECTION } from "./collection-tool.js";
+import { MANAGE_SHARED_APP } from "./shared-app-tool.js";
 
 // Mirrors MulmoClaude's spawnBackgroundChat signature (message/role/hidden) so the
 // tool is a drop-in from the model's point of view — but the implementation is
@@ -52,4 +53,6 @@ export const SPAWN_BACKGROUND_CHAT: ToolDefinition = {
 // manageCollection is the shared collection data plane from
 // @mulmoclaude/core/collection/server, bound in collection-tool.ts; its dispatch
 // route calls the engine handler in-process.
-export const HOST_TOOL_DEFINITIONS: ToolDefinition[] = [SPAWN_BACKGROUND_CHAT, MANAGE_ACCOUNTING, MANAGE_COLLECTION];
+// manageSharedApp is MulmoTerminal's OWN — the deploy/publish/unpublish operations on a shared
+// app, which core deliberately does not have (see shared-app-tool.ts).
+export const HOST_TOOL_DEFINITIONS: ToolDefinition[] = [SPAWN_BACKGROUND_CHAT, MANAGE_ACCOUNTING, MANAGE_COLLECTION, MANAGE_SHARED_APP];

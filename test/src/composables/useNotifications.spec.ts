@@ -25,6 +25,15 @@ describe("parseCollectionTarget", () => {
     expect(parseCollectionTarget("/collections/todo?selected=item-1")).toEqual({ slug: "todo", itemId: "item-1" });
   });
 
+  it("parses the project the bell was published with", () => {
+    expect(parseCollectionTarget("/collections/todo?selected=item-1&project=p1")).toEqual({ slug: "todo", itemId: "item-1", project: "p1" });
+    expect(parseCollectionTarget("/collections/todo?project=p1")).toEqual({ slug: "todo", itemId: undefined, project: "p1" });
+  });
+
+  it("leaves the project undefined on a workspace link (and on one MulmoClaude wrote)", () => {
+    expect(parseCollectionTarget("/collections/todo?selected=item-1")?.project).toBeUndefined();
+  });
+
   it("parses a bare slug with no record", () => {
     expect(parseCollectionTarget("/collections/todo")).toEqual({ slug: "todo", itemId: undefined });
   });

@@ -3,7 +3,7 @@ title: Glossary — parallel agents, worktrees, vibe coding
 nav_title: Glossary
 layout: default
 parent: English
-nav_order: 13
+nav_order: 17
 description: Vibe coding, parallel agents, AI coding agents, git worktrees, the cockpit roster — the words this guide uses, tied to what you actually see on screen in MulmoTerminal.
 ---
 
@@ -59,6 +59,15 @@ opens another page (tab).
 
 → [Basics](basics.html)
 
+## Agent Picker
+
+The **Claude / Codex / Antigravity / Grok / Shell** toggle at the top of an empty cell's launcher form:
+what that cell will be started as. It is what starts a real **agent session** — resumable
+transcript, cost and context, a "waiting for you" status. Not to be confused with a **launch
+command** (a launcher chip), which runs your own command line verbatim, whatever it names.
+
+→ [Basics](basics.html)
+
 ## Cockpit roster
 
 The **one-row-per-session list** beside an enlarged cell: directory, AI summary, latest prompt,
@@ -81,7 +90,7 @@ The server's **default working directory** (`CLAUDE_CWD`) — settled in the ord
 It is printed as `Workspace: …` at startup.
 Collections, Wiki and Accounting read and write there, and if you also run MulmoClaude it should be **the same directory for both** (`~/mulmoclaude` by default) — not the directory you cloned MulmoClaude into.
 
-It is treated differently from a project directory: **only a Claude cell launched in the workspace** carries the whole GUI MCP, the way the single view in 3.x did.
+It is treated differently from a project directory: **a Claude or Codex session launched here has every GUI tool**, the way the single view in 3.x did — whichever of the two you pick in the Agent Picker. Antigravity and Grok are the exceptions (each gets what its directory registered, in the workspace too → [Antigravity and Grok register everywhere](basics.html#antigravity-gui-tools)), and a Shell or a **launch command** carries no GUI tools at all, `claude` as the command line included: a launch command is run verbatim and is never an agent session.
 
 → [Which directory to launch in](basics.html#launch-dir)
 
@@ -91,7 +100,7 @@ A git feature that checks out another branch of the same repository into its own
 **several agents can work one repository without colliding**. That is what makes parallel work
 practical. A cell's launcher can create a worktree and start the session inside it.
 
-→ [Scenarios](scenarios.html)
+→ [Isolating work in a git worktree](worktree.html)
 
 ## Session persistence (tmux)
 

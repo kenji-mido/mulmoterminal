@@ -28,6 +28,11 @@ export interface ScheduledChatDeps {
   spawn: (sessionId: string) => void;
   /** Put it on the scheduled-session retention — nothing else would ever end it. */
   retain: (sessionId: string) => void;
+  /** Told the outcome once the turn finishes (or its teardown reports failure), for the
+   *  scheduler to record the run. Threaded through here rather than registered by the caller
+   *  because the hook map holds exactly ONE hook per session: a second registration would
+   *  replace the failed-worker mark below instead of running alongside it. */
+  onComplete?: ((outcome: { didError: boolean }, sessionId: string) => void | Promise<void>) | undefined;
 }
 
 /**
@@ -48,7 +53,8 @@ export function spawnScheduledWorker(sessionId: string, deps: ScheduledChatDeps)
   // run while they are away is exactly that, with the phone the only way they would hear about it
   // (Codex, PR #1196). Marked after the spawn, like the hook below.
   markUserScheduledSession(sessionId);
-  registerCompletionHook(sessionId, ({ didError }) => {
-    if (didError) markFailedWorker(sessionId);
+  registerCompletionHook(sessionId, async (outcome) => {
+    if (outcome.didError) markFailedWorker(sessionId);
+    await deps.onComplete?.(outcome, sessionId);
   });
 }

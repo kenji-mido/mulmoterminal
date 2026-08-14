@@ -54,6 +54,43 @@ describe("buildCustomViewSrcdoc", () => {
     expect(out).toContain("v.startChat=function");
   });
 
+  // The i18n half of the bridge (#1490). Run the injected bootstrap against a
+  // stand-in `window` rather than string-matching it: what has to hold is what
+  // `t()` RETURNS for an author who copied their app's vue-i18n locale JSON.
+  const runBootstrap = (out: string): { locale: string; dict: Record<string, string>; t: (key: string, named?: Record<string, unknown>) => string } => {
+    const script = /<script>([\s\S]*?)<\/script>/.exec(out)?.[1] ?? "";
+    const win: Record<string, unknown> = { addEventListener: () => {} };
+    // The bootstrap only EXISTS as a string (it is inlined into the iframe's <script>), so running it
+    // is the only way to assert what a view actually gets. The input is this repo's own literal, not
+    // anything a user or collection author can influence.
+    // eslint-disable-next-line sonarjs/code-eval, no-new-func
+    new Function("window", script)(win);
+    return win.__MC_VIEW as ReturnType<typeof runBootstrap>;
+  };
+
+  it("carries the host-picked locale + dict into __MC_VIEW", () => {
+    const out = buildCustomViewSrcdoc("<head></head>", { ...boot, locale: "ja", dict: { greet: "こんにちは {name}" } });
+    const view = runBootstrap(out);
+    expect(view.locale).toBe("ja");
+    expect(view.dict).toEqual({ greet: "こんにちは {name}" });
+  });
+
+  it("t() substitutes named placeholders and falls back to the key", () => {
+    const view = runBootstrap(buildCustomViewSrcdoc("<head></head>", { ...boot, locale: "en", dict: { greet: "Hello {name}" } }));
+    expect(view.t("greet", { name: "Ada" })).toBe("Hello Ada");
+    expect(view.t("greet")).toBe("Hello {name}");
+    expect(view.t("missing")).toBe("missing");
+  });
+
+  // A view whose collection declares no i18n still gets a working t() — that is
+  // what lets an i18n-less view use t() unconditionally.
+  it("defaults to an empty dict when the host passes none", () => {
+    const view = runBootstrap(buildCustomViewSrcdoc("<head></head>", boot));
+    expect(view.locale).toBe("");
+    expect(view.dict).toEqual({});
+    expect(view.t("anything")).toBe("anything");
+  });
+
   it("includes origin so openItem/startChat can postMessage the known parent", () => {
     const out = buildCustomViewSrcdoc("<head></head>", boot);
     expect(out).toContain('"origin":"http://localhost:5173"');

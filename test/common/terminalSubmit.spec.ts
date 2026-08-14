@@ -10,6 +10,7 @@ import {
   submittableLine,
   submittableLineForAgent,
   enterKeyOverride,
+  enterSubmits,
   type EnterKeyEvent,
   type TerminalSubmitMode,
 } from "../../common/terminalSubmit.js";
@@ -190,5 +191,53 @@ describe("enterKeyOverride", () => {
       expect(enterKeyOverride(mode, ev({ key: "a" }))).toBeNull();
       expect(enterKeyOverride(mode, ev({ key: "a", shiftKey: true }))).toBeNull();
     }
+  });
+});
+
+// Whether a keystroke SUBMITS — the question the scroll-restore asks (#1546), and deliberately not
+// the same question as "which bytes does it emit". In "cr" mode a bare Enter emits nothing special
+// (xterm's own \r), so a caller reading enterKeyOverride's null as "not a submit" would miss the
+// commonest submit there is.
+describe("enterSubmits", () => {
+  const key = (over: Partial<Parameters<typeof enterSubmits>[0]> = {}) => ({
+    type: "keydown",
+    key: "Enter",
+    shiftKey: false,
+    altKey: false,
+    ctrlKey: false,
+    metaKey: false,
+    ...over,
+  });
+
+  it("says yes to a bare Enter", () => {
+    expect(enterSubmits(key())).toBe(true);
+  });
+
+  // The modes disagree about which BYTES carry each meaning, never about the meaning — so this
+  // answer must not depend on the mode, and there is no mode parameter to get wrong.
+  it("takes no mode, because the meaning is the same in both", () => {
+    expect(enterSubmits).toHaveLength(1);
+  });
+
+  it("says no to the newline combinations", () => {
+    expect(enterSubmits(key({ shiftKey: true }))).toBe(false);
+    expect(enterSubmits(key({ altKey: true }))).toBe(false);
+    expect(enterSubmits(key({ shiftKey: true, altKey: true }))).toBe(false);
+  });
+
+  it("says no to Ctrl/Meta+Enter, which is neither submit nor newline", () => {
+    expect(enterSubmits(key({ ctrlKey: true }))).toBe(false);
+    expect(enterSubmits(key({ metaKey: true }))).toBe(false);
+  });
+
+  // An Enter confirming an IME candidate belongs to the IME. Scrolling the transcript there would
+  // move the screen while someone is still choosing a word.
+  it("says no while an IME is composing", () => {
+    expect(enterSubmits({ ...key(), isComposing: true })).toBe(false);
+  });
+
+  it("says no to another key, and to a keyup", () => {
+    expect(enterSubmits(key({ key: "a" }))).toBe(false);
+    expect(enterSubmits(key({ type: "keyup" }))).toBe(false);
   });
 });

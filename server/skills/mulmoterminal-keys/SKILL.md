@@ -1,6 +1,6 @@
 ---
 name: mulmoterminal-keys
-description: Bind keyboard shortcuts and fix keyboard/clipboard behaviour in MulmoTerminal. Writes `keymap`, `copyOnSelect` and `terminalSubmit` in `~/.mulmoterminal/config.json` — none of which can be set from Settings (its Keyboard shortcuts section only lists what is bound). Covers zooming a cell, jumping to whichever agent is waiting for you, opening and closing terminals, copy/paste, sending raw bytes to the terminal so a key the shell understands can be reached from a key your keyboard has (Cmd+Right for end-of-line), copying by selecting with no key pressed, and the Enter-vs-newline binding. Use when the user wants a shortcut or hotkey, wants to switch cells or reach a waiting agent without the mouse, wants selecting text to copy it, or reports that Shift+Enter submits their prompt instead of adding a line, that Enter drops to a new line instead of sending, that Ctrl+C stopped interrupting, or that a shortcut does nothing.
+description: Bind keyboard shortcuts and fix keyboard/clipboard behaviour in MulmoTerminal. Writes `keymap`, `copyOnSelect` and `terminalSubmit` in `~/.mulmoterminal/config.json` — the keymap cannot be set from Settings at all (its Keyboard shortcuts section only lists what is bound), while the other two have a checkbox and a picker there that this skill can explain instead of writing. Covers zooming a cell, jumping to whichever agent is waiting for you, opening and closing terminals, copy/paste, sending raw bytes to the terminal so a key the shell understands can be reached from a key your keyboard has (Cmd+Right for end-of-line), copying by selecting with no key pressed, and the Enter-vs-newline binding. Use when the user wants a shortcut or hotkey, wants to switch cells or reach a waiting agent without the mouse, wants selecting text to copy it, or reports that Shift+Enter submits their prompt instead of adding a line, that Enter drops to a new line instead of sending, that Ctrl+C stopped interrupting, or that a shortcut does nothing.
 ---
 
 # Keyboard, shortcuts and clipboard
@@ -129,7 +129,8 @@ clipboard **without pressing anything**. Off unless written.
   copy, **check this before the setting**.
 - Whitespace-only selections, and a repeat of the last copied text, are deliberately **not** copied
   so an accidental drag doesn't destroy the clipboard. Say so if they report "it didn't copy".
-- Read on page load: **reload the tab**.
+- **Settings → Terminal keys has a checkbox for it**, applied immediately. Point at that when the
+  user only wants it turned on; write the key when they are setting up a machine without a browser.
 
 ## `terminalSubmit` — Enter vs. newline
 
@@ -150,4 +151,6 @@ button type the text without submitting it.
 - **Claude sessions only.** A shell, codex, or command cell always submits with a plain `\r` even in
   `esc-cr`, so a reversed setting never rewrites a shell's Enter. Say so if asked.
 - An invalid value falls back to `cr`, so a typo cannot leave Enter broken.
+- **Settings → Terminal keys offers both modes**, worded as behaviour rather than as byte names.
+  Confirm the symptom first either way — the control makes it easy to set wrongly too.
 - Takes effect after a **tab reload** (keyboard) and a **server restart** (phone remote view).

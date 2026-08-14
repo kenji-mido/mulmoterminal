@@ -180,6 +180,32 @@ describe("GridView roster ordering (#720)", () => {
     expect(rows.map((r: { parked: boolean }) => r.parked)).toEqual([false, true]);
     w.unmount();
   });
+
+  // `Cell.agent` is absent for Claude AND for a cell that is no agent session at all, so reading
+  // it as "claude" (which the row did) put Anthropic's mark on every launcher chip and shell
+  // terminal in the roster. The row has to answer "shell" for those and only then fall back.
+  it("says shell for a launcher row and keeps the agent for a session row", async () => {
+    localStorage.setItem(
+      "grid_v2",
+      JSON.stringify({
+        cells: [
+          { uid: 30, session: IDS.idleA, cwd: "/w" },
+          { uid: 31, session: IDS.idleB, cwd: "/w", agent: "codex" },
+          { uid: 32, session: IDS.blocked, cwd: "/w", launcher: { shell: true, label: "shell" } },
+        ],
+        expanded: 30,
+        page: 0,
+        sortMode: "manual",
+      }),
+    );
+    const w = mount(GridView, {
+      global: { stubs: { TerminalGrid: OrderStub, AppToolbar: ToolbarStub, SettingsModal: SettingsStub } },
+    });
+    await flushPromises();
+    const rows = w.findComponent(OrderStub).props("listRows");
+    expect(rows.map((r: { agent: string | null }) => r.agent)).toEqual(["claude", "codex", "shell"]);
+    w.unmount();
+  });
 });
 
 // A toolbar stub that surfaces the view-toggle props and can fire the toggle-view event, plus a
@@ -271,11 +297,18 @@ describe("GridView settings wiring", () => {
 // the shortcuts are given, which cell the cursor is moved to, and whether a key that should
 // only move ends up changing the layout.
 
-// Focus calls land here instead of a real xterm.
+// Focus calls land here instead of a real xterm; slot liveness/terminate are faked so the close
+// path's cleanup (#1533) can be asserted without real sockets.
 const focused = vi.hoisted(() => [] as string[]);
+const slots = vi.hoisted(() => ({ live: new Set<string>(), terminated: [] as string[] }));
 vi.mock("../../../src/composables/useTerminalConnections", async (orig) => ({
   ...(await orig<Record<string, unknown>>()),
   focus: (key: string) => focused.push(key),
+  slotLive: (key: string) => slots.live.has(key),
+  terminate: (key: string) => {
+    slots.terminated.push(key);
+    slots.live.delete(key);
+  },
 }));
 
 import { setActiveKeymap } from "../../../src/composables/activeKeymap";
@@ -511,7 +544,7 @@ describe("GridView skill launch (#1111)", () => {
 
   it("seeds the skill's slash command and shows the session in a cell of its own", async () => {
     const { w, spawns } = await mountWithSpawn();
-    expect(spawns).toEqual([{ message: "/mulmoterminal-theme", draft: false, agent: "claude" }]);
+    expect(spawns).toEqual([{ message: "/mulmoterminal-theme", draft: false, agent: "claude", project: null }]);
     const spawned = spawnedCells(w);
     expect(spawned).toHaveLength(1);
     // Seeded with the directory the server spawns these in, so the cell's header isn't blank while
@@ -534,7 +567,7 @@ describe("GridView skill launch (#1111)", () => {
     launchAgent.value = agent;
     try {
       const { w, spawns } = await mountWithSpawn();
-      expect(spawns).toEqual([{ message: "/mulmoterminal-theme", draft: false, agent }]);
+      expect(spawns).toEqual([{ message: "/mulmoterminal-theme", draft: false, agent, project: null }]);
       expect(spawnedCells(w)[0].agent).toBe(agent);
       w.unmount();
     } finally {
@@ -872,6 +905,76 @@ describe("GridView launcher picks (#1114)", () => {
     const cells = w.findComponent(ShellLaunchStub).props("cells") as LauncherCell[];
     expect(cells[0].launcher).toEqual({ shell: true, label: "shell" });
     expect(cells[0].cwd).toBe("/proj");
+    w.unmount();
+  });
+});
+
+// A close that reaches GridView with the slot still alive — the terminal-close shortcut, a
+// launcher cell's close button — used to drop the cell while the slot kept an open socket: the
+// PTY read as attached forever, and the orphaned slot was the ghost a later `cell-<uid>` key
+// collision handed to a different cell as its terminal (#1533). TerminalCell's own close button
+// tears the slot down FIRST, so for it this cleanup must stay a no-op.
+describe("GridView close cleans up the cell's slot (#1533)", () => {
+  const CloseGridStub = {
+    name: "TerminalGrid",
+    props: ["cells"],
+    emits: ["close", "focus-cell"],
+    template: '<div class="close-stub" />',
+  };
+  beforeEach(() => {
+    slots.live.clear();
+    slots.terminated.length = 0;
+  });
+
+  const mountCloseGrid = async (keymap: unknown = null, expanded: number | null = null) => {
+    localStorage.setItem(
+      "grid_v2",
+      JSON.stringify({
+        cells: [0, 1, 2].map((i) => ({ uid: i, session: uuid(i), cwd: "/w" })),
+        expanded,
+        page: 0,
+        sortMode: "manual",
+      }),
+    );
+    const w = mount(GridView, {
+      global: { stubs: { TerminalGrid: CloseGridStub, AppToolbar: ToolbarStub, SettingsModal: SettingsStub } },
+    });
+    await flushPromises();
+    setActiveKeymap(keymap);
+    return w;
+  };
+  const terminatePosts = () =>
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([u, init]) => String(u).includes("/terminate") && (init as RequestInit)?.method === "POST")
+      .map(([u]) => String(u));
+
+  it("terminates the slot and reaps the session when a live-slot cell closes", async () => {
+    slots.live.add("cell-1");
+    const w = await mountCloseGrid();
+    w.findComponent(CloseGridStub).vm.$emit("close", 1);
+    await flushPromises();
+    expect(slots.terminated).toEqual(["cell-1"]);
+    expect(terminatePosts()).toEqual([`/api/session/${uuid(1)}/terminate`]);
+    w.unmount();
+  });
+
+  it("does nothing extra when the cell already tore itself down", async () => {
+    const w = await mountCloseGrid(); // no slot registered as live — teardown() already released it
+    w.findComponent(CloseGridStub).vm.$emit("close", 1);
+    await flushPromises();
+    expect(slots.terminated).toEqual([]);
+    expect(terminatePosts()).toEqual([]);
+    w.unmount();
+  });
+
+  // Zoomed, because the shortcut acts on the zoomed cell — un-zoomed there is no "current
+  // terminal" and it deliberately does nothing (gridShortcut.ts).
+  it("the terminal-close shortcut goes through the same cleanup", async () => {
+    slots.live.add("cell-2");
+    const w = await mountCloseGrid({ "terminal-close": "F10" }, 2);
+    await press("F10");
+    expect(slots.terminated).toEqual(["cell-2"]);
+    expect(terminatePosts()).toEqual([`/api/session/${uuid(2)}/terminate`]);
     w.unmount();
   });
 });

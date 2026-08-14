@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { appRequest } from "../../helpers/appRequest.js";
 import { initFeedsBackend, mountFeedsRoutes } from "../../../server/backends/feeds.js";
+import { initProjectRoots } from "../../../server/infra/project-root.js";
 import { listFeeds, readFeedState, removeFeed } from "@mulmoclaude/core/feeds/server";
 
 // The feeds engine reads the workspace + fetches sources — mock it so the route
@@ -22,6 +23,9 @@ let request: ReturnType<typeof appRequest>;
 const ws = path.join(tmpdir(), "mt-feeds-ws");
 
 beforeAll(() => {
+  // The feed routes sit on the collection surface and resolve their root per request now, so
+  // they need the same binding every collection route needs.
+  initProjectRoots({ workspace: ws });
   initFeedsBackend({ workspace: ws, spawnWorker: vi.fn() as never });
   const app = express();
   app.use(express.json());

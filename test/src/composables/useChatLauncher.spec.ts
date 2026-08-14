@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { pushCollectionSurface, popCollectionSurface } from "../../../src/composables/collectionSurface";
 import { nextTick } from "vue";
 import { startCollectionChat, launchAgent } from "../../../src/composables/useChatLauncher";
 import { registerSpawnedChatHandler, resetSpawnedChatQueue, type SpawnedChatRequest } from "../../../src/composables/useSpawnedChat";
@@ -38,8 +39,34 @@ describe("startCollectionChat", () => {
     const [url, init] = fetchFn.mock.calls[0];
     expect(url).toBe("/api/plugin/spawnBackgroundChat");
     expect(init?.method).toBe("POST");
-    expect(JSON.parse(String(init?.body))).toEqual({ message: "fix my records", draft: false, agent: "claude" });
+    expect(JSON.parse(String(init?.body))).toEqual({ message: "fix my records", draft: false, agent: "claude", project: null });
     expect(placed).toEqual([{ id: "sess-1", agent: "claude", draft: false, canvas: false }]);
+  });
+
+  // The chat runs where its COLLECTION lives. A starter pressed in a project's Collections pane
+  // seeds a prompt full of that project's paths, so opening the terminal in the workspace hands
+  // the agent a template for a directory it is not standing in.
+  it("sends the surface's project so the chat spawns in that directory", async () => {
+    const surface = {
+      projectId: "proj-abc",
+      nav: {
+        routeSlug: () => undefined,
+        routeSelectedId: () => undefined,
+        isFeedRoute: () => false,
+        setSelectedId: () => {},
+        gotoIndex: () => {},
+        gotoDetail: () => {},
+        navigateToRecord: () => {},
+      },
+    };
+    const fetchFn = mockFetch(() => ({ ok: true, json: () => ({ jsonData: { chatId: "sess-p" } }) }));
+    pushCollectionSurface(surface);
+    try {
+      await startCollectionChat("in the project");
+      expect(JSON.parse(String(fetchFn.mock.calls[0][1]?.body)).project).toBe("proj-abc");
+    } finally {
+      popCollectionSurface(surface);
+    }
   });
 
   it("spawns a codex chat (auto-run, draft forced off) when the launch agent is codex", async () => {
@@ -48,7 +75,7 @@ describe("startCollectionChat", () => {
 
     await startCollectionChat("summarize this", { draft: true }); // codex ignores draft — it auto-runs
 
-    expect(JSON.parse(String(fetchFn.mock.calls[0][1]?.body))).toEqual({ message: "summarize this", draft: false, agent: "codex" });
+    expect(JSON.parse(String(fetchFn.mock.calls[0][1]?.body))).toEqual({ message: "summarize this", draft: false, agent: "codex", project: null });
     // The agent travels with the id: the cell reconnects on codex's endpoint, not claude's.
     expect(placed).toEqual([{ id: "cx-1", agent: "codex", draft: false, canvas: false }]);
   });
@@ -58,7 +85,7 @@ describe("startCollectionChat", () => {
 
     await startCollectionChat("track my tasks", { hidden: false, draft: true });
 
-    expect(JSON.parse(String(fetchFn.mock.calls[0][1]?.body))).toEqual({ message: "track my tasks", draft: true, agent: "claude" });
+    expect(JSON.parse(String(fetchFn.mock.calls[0][1]?.body))).toEqual({ message: "track my tasks", draft: true, agent: "claude", project: null });
     // draft travels to the cell too: a prompt waiting in the input box, not a turn running.
     expect(placed).toEqual([{ id: "sess-3", agent: "claude", draft: true, canvas: false }]);
   });

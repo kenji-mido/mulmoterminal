@@ -3,7 +3,7 @@ title: Run Claude Code against another model (OpenRouter, local)
 nav_title: Other models
 layout: default
 parent: English
-nav_order: 10
+nav_order: 14
 description: Point Claude Code at an Anthropic-compatible backend such as OpenRouter and run a session on a model other than Claude.
 ---
 
@@ -129,9 +129,15 @@ In any directory, tell a Claude session `add OpenRouter to my mulmoterminal conf
 `mulmoterminal-config` skill keeps your existing settings and writes a valid entry — **without your
 key in it**.
 
-**Do not list models here.** Registering a provider with this `id` is enough — the
-[27 measured models](#verified) appear in the picker on their own. You only list models to add ones
-that are **not** in that list (→ [Adding models](#add-models)).
+**Under the id `openrouter`, do not list models here.** Registering a provider with this `id` is
+enough — the [27 measured models](#verified) appear in the picker on their own. You only list models
+to add ones that are **not** in that list (→ [Adding models](#add-models)).
+
+**Under any other `id`, `models` is required.** The measured list is OpenRouter's alone, matched by
+that exact id, so a backend registered as `deepseek`, `moonshot` or an in-house gateway starts with
+none — and **a backend with no models is not offered in the picker**, because a session named on a
+provider without a model refuses to start. List the ids you want to run
+(→ [Adding models](#add-models)).
 
 | Key | Meaning |
 |---|---|
@@ -140,7 +146,7 @@ that are **not** in that list (→ [Adding models](#add-models)).
 | `baseUrl` | **no trailing `/v1`** — see below |
 | `tokenEnv` | the **name** of the environment variable holding the key, never the key |
 | `maxOutputTokens` | optional; defaults to 16000 |
-| `models` | optional; only to add models **not** in the built-in list (→ [Adding models](#add-models)) |
+| `models` | **required unless `id` is `openrouter`** — that is the only id with presets. Under `openrouter`, only to add models **not** in the built-in list (→ [Adding models](#add-models)) |
 
 ### Never end `baseUrl` in `/v1`
 {: .no_toc }
@@ -204,6 +210,19 @@ Ids may contain letters, digits and `. _ : / - ~` — the same rule as a provide
 OpenRouter's "always the latest" aliases such as `~anthropic/claude-opus-latest` work too. A value shaped
 differently (whitespace, a leading dash) makes sessions in that directory **refuse to start**, rather
 than quietly running on some other model. The directory's other settings still load.
+
+A model id may also end in **`[1m]`** — Claude Code's own way of asking for the 1M context window,
+on an alias or a full name alike:
+
+```json
+{ "model": "claude-opus-5[1m]" }
+```
+
+The suffix is passed to `claude --model` exactly as you wrote it; Claude Code reads it and strips it
+before the id reaches the backend, so nothing here interprets it. It is the only bracketed suffix
+that exists — `[2m]`, `[200k]` and friends are refused — and it belongs at the very end of the id.
+See [Extended context](https://code.claude.com/docs/en/model-config#extended-context) for which
+models it actually changes anything for. A **provider** `id` may not carry it.
 
 ### What happens on resume
 {: .no_toc }
@@ -330,7 +349,9 @@ If you are unsure where to start, try **Kimi K2.7 Code** (fast, coding-oriented)
 | `404 No endpoints available …` | that model is excluded by your [privacy settings](https://openrouter.ai/settings/privacy) |
 | Empty replies, looks hung | `maxOutputTokens` too low — keep it at 16000+ |
 | Talks but never uses tools | the model's own limitation — check the table or `model-trials.ts` |
-| No MODEL select in the launch form | no provider is registered (step 2) or its key is missing; "Use another model…" in the form names what's missing |
+| No MODEL select in the launch form | no provider is registered (step 2), its key is missing, or it has no models to pick; the link beside the MODEL label — "Needs attention" / "Use another model…" — names what's missing |
+| A registered backend is missing from the MODEL list | it has no models: presets come with the id `openrouter` and no other, so [list its `models`](#add-models) |
+| `models` is in the config and the picker still offers none | every id in it was refused — a model id is letters, digits and `. _ : / - ~` (plus an optional trailing `[1m]`), so an object like `{"id": "…"}` or a value with a space is dropped. The server's log names what it dropped |
 | No model in the header | `ctx` is not in your `chips` |
 
 ---
@@ -341,6 +362,16 @@ If you are unsure where to start, try **Kimi K2.7 Code** (fast, coding-oriented)
 - It reaches the session through a **0600 file**, not a command-line argument, so `ps` doesn't expose it to other users on the machine
 - An unresolvable key **refuses the launch**, so prompts never reach an unintended backend
 - `ANTHROPIC_API_KEY` is **removed** from a provider session's environment — left in place it would outrank the auth token
+
+## When the model is reached by a COMMAND, not a URL {#custom-agents}
+
+Everything above assumes a backend you can name with a base URL and a token. If instead your model
+is reached by **running something** — `ollama launch claude --model … --`, a wrapper script, a
+second Claude Code install — that is a **custom agent** rather than a provider: it puts your own
+command in the Agent Picker and hands it Claude Code's own arguments, so the cell is still a real
+session (resume, cost, context, GUI tools).
+
+→ [Custom agents](config.html#custom-agents)
 
 ## Running a local LLM (claude-ollama)
 

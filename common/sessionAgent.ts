@@ -1,7 +1,7 @@
 // What a remote-host session is running. The server decides it (from the PtyEntry, or from
 // what tmux says is in the pane) and the settings UI offers it as the scope for a quick
 // command, so the list of kinds is a value both sides read.
-export const SESSION_AGENTS = ["claude", "codex", "antigravity", "shell"] as const;
+export const SESSION_AGENTS = ["claude", "codex", "antigravity", "grok", "muse", "shell"] as const;
 
 // Null anywhere this appears means the host cannot tell — a session that outlived a restart
 // exists only in tmux, and nothing recorded what launched it. That is distinct from "shell".
@@ -9,7 +9,7 @@ export type SessionAgent = (typeof SESSION_AGENTS)[number];
 
 // The agents a terminal can be LAUNCHED as, which is the session kinds minus "shell" (a shell is
 // a launcher, not an agent). Claude is first because it is the default everywhere below.
-export const TERMINAL_AGENTS = ["claude", "codex", "antigravity"] as const;
+export const TERMINAL_AGENTS = ["claude", "codex", "antigravity", "grok", "muse"] as const;
 
 export type TerminalAgent = (typeof TERMINAL_AGENTS)[number];
 
@@ -27,6 +27,12 @@ export const asTerminalAgent = (value: unknown): TerminalAgent => (typeof value 
 // user's own command line, and whether that command line is an agent is the same list.
 export const isTerminalAgent = (agent: string): agent is TerminalAgent => TERMINAL_AGENTS.some((known) => known === agent);
 
+// Every agent that is NOT the default. Claude is the absent case in more than one place — a grid
+// cell stores its agent only when it is not Claude, and only a non-Claude session wears a badge —
+// and each of those had spelled the list out as `"codex" | "antigravity"`, which is a list to
+// forget when a fourth agent arrives. Derived, so there is nothing to forget.
+export type BadgedAgent = Exclude<TerminalAgent, "claude">;
+
 export interface AgentBadge {
   /** Where there is room for it — a sidebar row, a header bar. */
   full: string;
@@ -40,6 +46,8 @@ export interface AgentBadge {
 const AGENT_BADGES: Partial<Record<TerminalAgent, AgentBadge>> = {
   codex: { full: "codex", short: "cx" },
   antigravity: { full: "agy", short: "agy" },
+  grok: { full: "grok", short: "gk" },
+  muse: { full: "muse", short: "mu" },
 };
 
 /** How a session row announces which agent it is running, or null when it wears no badge. The one

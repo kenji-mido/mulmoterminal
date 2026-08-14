@@ -75,16 +75,21 @@ describe("CommandCell", () => {
   // rather than five hand-written `@` lines. A key that binding gets wrong is a button that
   // silently does nothing, and canvas/tools had no cell-level coverage at all — so all five are
   // asserted, not just the two that already were.
-  it("forwards every chrome event, including the canvas and tools toggles", async () => {
-    const w = mount(CommandCell, { props: { expanded: true, filesOpen: false, canvasAvailable: true, command: COMMAND, home: "/work" } });
+  it("forwards every chrome event, including the canvas, tools and collections toggles", async () => {
+    const w = mount(CommandCell, {
+      props: { expanded: true, filesOpen: false, canvasAvailable: true, collectionsAvailable: true, command: COMMAND, home: "/work" },
+    });
     await w.find('[aria-label="Show files"]').trigger("click");
     await w.find('[aria-label="Show canvas"]').trigger("click");
     await w.find('[aria-label="Show tools"]').trigger("click");
+    await w.find('[aria-label="Show this folder\'s collections"]').trigger("click");
     await w.find('[aria-label="Restore terminal"]').trigger("click");
     await w.find('[aria-label="Close terminal"]').trigger("click");
     expect(w.emitted("toggle-files")).toHaveLength(1);
     expect(w.emitted("toggle-canvas")).toHaveLength(1);
     expect(w.emitted("toggle-tools")).toHaveLength(1);
+    // The one this list was missing while the button was dead — see cellChromeForwarding.spec.
+    expect(w.emitted("toggle-collections")).toHaveLength(1);
     expect(w.emitted("toggle-expand")).toHaveLength(1);
     expect(w.emitted("close")).toHaveLength(1);
   });

@@ -25,6 +25,10 @@ const MODELS = [
 
 const READY = { providers: [{ id: "openrouter", label: "OpenRouter", ready: true, tokenEnv: "OPENROUTER_API_KEY", models: MODELS }], anyReady: true };
 const UNCONFIGURED = { providers: [], anyReady: false };
+// Reachable — key present, base URL fine — and with nothing to run: the built-in presets are
+// OpenRouter's alone, so any other id offers only what its own `models` lists (#1432).
+const NO_MODELS = { providers: [{ id: "deepseek", label: "DeepSeek", ready: true, tokenEnv: "DEEPSEEK_API_KEY", models: [] }], anyReady: true };
+const READY_AND_NO_MODELS = { providers: [...READY.providers, ...NO_MODELS.providers], anyReady: true };
 const BLOCKED = {
   providers: [
     {
@@ -95,6 +99,67 @@ describe("ModelPicker", () => {
     await select.setValue("openrouter|moonshotai/kimi-k2.7-code");
     await select.setValue("");
     expect(wrapper.emitted("update:modelValue")?.at(-1)).toEqual([null]);
+  });
+
+  // #1432: a provider with no models rendered as `<optgroup label="DeepSeek"></optgroup>` — Chrome
+  // draws that as a shaded row that a click and the arrow keys both skip, so it read as a broken
+  // option rather than as the setup problem it is. Written against the SHAPE, not against this
+  // payload: an empty group is never right, whatever put it there.
+  it("never renders a group with no options in it", async () => {
+    for (const payload of [READY, NO_MODELS, READY_AND_NO_MODELS]) {
+      await serve(payload);
+      const wrapper = picker();
+      await flushPromises();
+      const groups = wrapper.findAll("optgroup");
+      expect(groups.every((group) => group.findAll("option").length > 0)).toBe(true);
+      wrapper.unmount();
+    }
+  });
+
+  it("does not offer a reachable provider that has no models to pick", async () => {
+    await serve(READY_AND_NO_MODELS);
+    const wrapper = picker();
+    await flushPromises();
+    expect(
+      wrapper
+        .get('[data-testid="cell-model-select"]')
+        .findAll("optgroup")
+        .map((group) => group.attributes("label")),
+    ).toEqual(["OpenRouter"]);
+  });
+
+  // With nothing left to choose between, the select would be one row reading "This directory's
+  // default" — a decision that isn't one. The setup problem is what to show instead.
+  it("hides the select when the only provider has no models", async () => {
+    await serve(NO_MODELS);
+    const wrapper = picker();
+    await flushPromises();
+    expect(wrapper.find('[data-testid="cell-model-select"]').exists()).toBe(false);
+  });
+
+  // The help holds the explanation, so the link to it has to say that there IS one — otherwise a
+  // grid where another provider works looks complete and the broken one is simply gone.
+  it("points at the help when a configured provider is not offered", async () => {
+    await serve(READY_AND_NO_MODELS);
+    const wrapper = picker();
+    await flushPromises();
+    expect(wrapper.get('[data-testid="cell-model-help"]').text()).toBe("Needs attention");
+  });
+
+  it("says what to add for a provider with no models, and where", async () => {
+    await serve(NO_MODELS);
+    const wrapper = picker();
+    await flushPromises();
+    await wrapper.get('[data-testid="cell-model-help"]').trigger("click");
+    expect(wrapper.text()).toContain("provider 'deepseek' has no models to pick");
+    expect(wrapper.text()).toContain("~/.mulmoterminal/config.json");
+  });
+
+  it("keeps the plain help link when every configured provider is offered", async () => {
+    await serve(READY);
+    const wrapper = picker();
+    await flushPromises();
+    expect(wrapper.get('[data-testid="cell-model-help"]').text()).toBe("How this works");
   });
 
   it("hides the select when nothing is configured, and offers the help instead", async () => {

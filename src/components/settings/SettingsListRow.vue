@@ -6,8 +6,12 @@
 // `name` is what the entry is called in the list — the repo, the launcher's label, the server id.
 // It only reaches the accessible name, so a screen reader hears which entry a button removes
 // rather than fourteen buttons all called "Remove".
+import { useI18n } from "vue-i18n";
+
 defineProps<{ name: string }>();
 const emit = defineEmits<{ (e: "remove"): void }>();
+
+const { t } = useI18n();
 </script>
 
 <template>
@@ -16,8 +20,8 @@ const emit = defineEmits<{ (e: "remove"): void }>();
     <button
       class="cursor-pointer rounded-md border-0 bg-transparent px-1.5 py-1 text-[14px] text-muted hover:bg-[var(--err-hover-bg)] hover:text-err-text"
       type="button"
-      :title="`Remove ${name}`"
-      :aria-label="`Remove ${name}`"
+      :title="t('settings.common.remove', { name })"
+      :aria-label="t('settings.common.remove', { name })"
       @click="emit('remove')"
     >
       <span class="material-symbols-outlined" aria-hidden="true">close</span>

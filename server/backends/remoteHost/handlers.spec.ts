@@ -10,7 +10,7 @@ import { initCollectionsBackend } from "../collections.js";
 
 const unusedTerminalDeps = {
   spawnIssueSeed: () => "unused-session",
-  listTerminalSessions: async () => [],
+  listTerminalSessions: async () => ({ sessions: [], icons: {} }),
   captureTerminalScreen: async () => ({ screen: "", suggestion: "", quickCommands: [] }),
   writeToSession: () => false,
   canClearBox: () => false,

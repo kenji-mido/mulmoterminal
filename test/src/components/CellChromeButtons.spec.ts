@@ -35,6 +35,35 @@ describe("CellChromeButtons", () => {
     expect(expanded.find('[aria-label="Restore terminal"]').exists()).toBe(true);
   });
 
+  // The collections pane is a window onto the `data` tool group's store, so the button is absent
+  // where that group is not registered — unlike Canvas, which stays and explains itself.
+  it("shows the collections button only where the directory has the collection tools", () => {
+    const without = mount(CellChromeButtons, { props: { expanded: true } });
+    expect(without.find(`[aria-label="Show this folder's collections"]`).exists()).toBe(false);
+
+    const withTools = mount(CellChromeButtons, { props: { expanded: true, collectionsAvailable: true } });
+    expect(withTools.find(`[aria-label="Show this folder's collections"]`).exists()).toBe(true);
+  });
+
+  // The pane renders no close control of its own, so this button is its only way out. Losing the
+  // tools mid-session (a relaunch, a reconnect that answers differently) must not strand it.
+  it("keeps the collections button while its pane is open, even with the tools gone", () => {
+    const w = mount(CellChromeButtons, { props: { expanded: true, collectionsAvailable: false, rightPane: "collections" } });
+    const button = w.find('[aria-label="Hide collections"]');
+    expect(button.exists()).toBe(true);
+    expect(button.attributes("aria-pressed")).toBe("true");
+  });
+
+  it("does not resurrect it for another pane", () => {
+    const w = mount(CellChromeButtons, { props: { expanded: true, collectionsAvailable: false, rightPane: "tools" } });
+    expect(w.find(`[aria-label="Show this folder's collections"]`).exists()).toBe(false);
+  });
+
+  it("keeps the collections button off a tiled cell even with the tools present", () => {
+    const w = mount(CellChromeButtons, { props: { expanded: false, collectionsAvailable: true } });
+    expect(w.find(`[aria-label="Show this folder's collections"]`).exists()).toBe(false);
+  });
+
   it("emits toggle-expand and close from their own buttons", async () => {
     const w = mountButtons();
     await w.find('[aria-label="Expand terminal"]').trigger("click");

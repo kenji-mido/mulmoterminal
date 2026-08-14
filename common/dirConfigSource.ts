@@ -10,9 +10,12 @@
 // together so a field added to the loader can't quietly go missing here.
 export const DIR_CONFIG_KEYS = [
   "name",
+  "icon",
   "badgeColor",
   "headerColor",
   "headerTextColor",
+  "headerStatusColors",
+  "headerStatusTint",
   "cellColor",
   "cellBorderColor",
   "dotColor",
@@ -31,6 +34,7 @@ export const DIR_CONFIG_KEYS = [
   "model",
   "addDirs",
   "appendSystemPrompt",
+  "worktreeEnv",
 ] as const;
 
 export interface DirConfigSource {
@@ -42,9 +46,17 @@ export interface DirConfigSource {
   // Keys the app doesn't read at all: a misspelling (`badgeColour`), or a setting that belongs
   // in the global config instead of a directory's file.
   unknown: string[];
+  // Keys `.mulmoterminal.local.json` set, and therefore took over from the shared file (#1430).
+  // Without this the panel can say a value is in force but not WHICH of two files decided it —
+  // and "I changed it and nothing happened" is usually the other file winning.
+  local: string[];
+  // Keys the open `repo.json` contributed (#1442) — including the ones derived from its single
+  // `color`. It is the LOWEST layer, so any of these may have been overridden above; the panel
+  // shows what it offered, which is what a reader needs to reason about the stack.
+  repo: string[];
 }
 
-export const EMPTY_DIR_CONFIG_SOURCE: DirConfigSource = { applied: [], ignored: [], unknown: [] };
+export const EMPTY_DIR_CONFIG_SOURCE: DirConfigSource = { applied: [], ignored: [], unknown: [], local: [], repo: [] };
 
 // The settings a directory can make that the per-cell config deliberately doesn't carry — the
 // browser has no use for them while running a terminal, but the preview has to SHOW them or a
@@ -65,6 +77,14 @@ export interface DirConfigExtras {
   appendSystemPrompt: boolean | null;
   buttonLabels: string[];
   chipLabels: string[];
+  // The repository file an icon was picked up from when the config named none (#1428), relative
+  // to the directory. Null when the icon was configured, or when there is none — so the preview
+  // can distinguish a setting from a discovery, which `iconUrl` cannot.
+  autoIcon: string | null;
+  // Which per-tree variables this directory declares (#1367) — the NAMES, not the values. The
+  // values belong to a tree rather than to the file, and each cell already shows its own on the
+  // `env` header chip; what this panel answers is whether the declaration was read at all.
+  worktreeEnvNames: string[];
 }
 
 export const EMPTY_DIR_CONFIG_EXTRAS: DirConfigExtras = {
@@ -75,6 +95,8 @@ export const EMPTY_DIR_CONFIG_EXTRAS: DirConfigExtras = {
   appendSystemPrompt: null,
   buttonLabels: [],
   chipLabels: [],
+  autoIcon: null,
+  worktreeEnvNames: [],
 };
 
 // "The loader kept nothing for this key" — null/undefined, but also the empty collections the
@@ -97,7 +119,7 @@ export function keysWithValue(resolved: object): Set<string> {
 // `raw` is the file as parsed; `kept` is which keys survived the loader (see keysWithValue).
 export function describeDirConfig(raw: Record<string, unknown>, kept: ReadonlySet<string>): DirConfigSource {
   const known = new Set<string>(DIR_CONFIG_KEYS);
-  const source: DirConfigSource = { applied: [], ignored: [], unknown: [] };
+  const source: DirConfigSource = { applied: [], ignored: [], unknown: [], local: [], repo: [] };
   for (const key of Object.keys(raw)) {
     if (!known.has(key)) source.unknown.push(key);
     else if (kept.has(key)) source.applied.push(key);

@@ -1,7 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { mount, flushPromises } from "@vue/test-utils";
 import CellLaunchForm from "../../../src/components/CellLaunchForm.vue";
-import type { LaunchAgent } from "../../../common/launchAgent";
+import AgentMark from "../../../src/components/AgentMark.vue";
+import type { AgentPick, CustomAgent } from "../../../common/customAgents";
+import { TERMINAL_AGENTS } from "../../../common/sessionAgent";
 
 // The launcher's two "there is already a session here" surfaces, mounted directly: a worktree row
 // (one branch, one session) and a resume row. Both used to hand a running agent's terminal to a
@@ -10,7 +12,7 @@ import type { LaunchAgent } from "../../../common/launchAgent";
 // (#1207).
 
 type WorktreeRow = { path: string; branch: string | null; task: string; dirty: boolean; session?: unknown };
-type SessionRow = { id: string; title: string; mtime: number; attached?: boolean };
+type SessionRow = { id: string; title: string; mtime: number; attached?: boolean; runningKey?: string | null };
 
 function mockFetch(worktrees: WorktreeRow[] = [], sessions: SessionRow[] = []) {
   globalThis.fetch = vi.fn(async (url: string) => {
@@ -23,13 +25,13 @@ function mockFetch(worktrees: WorktreeRow[] = [], sessions: SessionRow[] = []) {
 
 const mountForm = (
   openSessionIds: string[] = [],
-  over: { dir?: string; presets?: { label: string; path: string }[]; target?: LaunchAgent; defaultCwd?: string | null } = {},
+  over: { dir?: string; presets?: { label: string; path: string }[]; agent?: AgentPick; defaultCwd?: string | null; customAgents?: CustomAgent[] } = {},
 ) =>
   mount(CellLaunchForm, {
     // defaultCwd is deliberately NOT "/repo": the launcher treats the workspace differently — it
     // states that every GUI tool is available instead of offering the switches, and hides the
     // worktree section — so the ordinary case to mount is a PROJECT directory.
-    props: { dir: "/repo", target: "claude" as LaunchAgent, choice: null, defaultCwd: "/home/me/ws", presets: [], openSessionIds, ...over },
+    props: { dir: "/repo", agent: "claude" as AgentPick, choice: null, defaultCwd: "/home/me/ws", presets: [], openSessionIds, ...over },
     global: { stubs: { ModelPicker: true } },
   });
 
@@ -114,6 +116,49 @@ describe("a worktree row", () => {
   });
 });
 
+// The fork's folder button opens the IN-BROWSER picker (DirPickerModal), not upstream's
+// /api/pick-file — that route opens the native dialog on the SERVER's display, which is
+// unreachable from a phone. Upstream's tests here pinned the native path: a button that disables
+// itself while the host dialog is open, and the error a host with no dialog reports. Neither has
+// anything to answer in this fork, so what is pinned instead is the wiring the fork does have.
+// The modal's own behaviour is covered in DirPickerModal.spec.ts.
+describe("the folder button", () => {
+  const mountAndOpenPicker = async () => {
+    globalThis.fetch = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/worktrees")) return { ok: true, json: async () => ({ isGit: true, base: "main", worktrees: [] }) };
+      return { ok: true, json: async () => ({ cwd: "/repo", sessions: [] }) };
+    }) as unknown as typeof fetch;
+    const w = mountForm();
+    await flushPromises();
+    await w.find('[data-testid="cell-dir-pick"]').trigger("click");
+    await flushPromises();
+    return w;
+  };
+
+  it("opens the in-browser picker rather than asking the server for a dialog", async () => {
+    const w = await mountAndOpenPicker();
+    expect(w.findComponent({ name: "DirPickerModal" }).exists()).toBe(true);
+    // The whole point: nothing was asked of /api/pick-file, so nothing opens on the server's screen.
+    expect(vi.mocked(globalThis.fetch).mock.calls.some(([url]) => String(url).includes("/api/pick-file"))).toBe(false);
+  });
+
+  it("fills the directory field from the picker's choice, without launching", async () => {
+    const w = await mountAndOpenPicker();
+    w.findComponent({ name: "DirPickerModal" }).vm.$emit("select", "/picked/dir");
+    await flushPromises();
+    expect(w.emitted("update:dir")?.at(-1)).toEqual(["/picked/dir"]);
+    expect(w.emitted("launch")).toBeUndefined();
+  });
+
+  it("closes the picker once a directory is chosen", async () => {
+    const w = await mountAndOpenPicker();
+    w.findComponent({ name: "DirPickerModal" }).vm.$emit("select", "/picked/dir");
+    await flushPromises();
+    expect(w.findComponent({ name: "DirPickerModal" }).exists()).toBe(false);
+  });
+});
+
 // A worktree is reachable without its row — the field takes any path, and launching in a worktree
 // records it as a recent directory, so its chip appears too. Refusing only the row would leave the
 // one-session rule holding on whichever way in the user did not take.
@@ -171,7 +216,7 @@ describe("a worktree reached without its row", () => {
   // shells out of the answer for the same reason — so it can still be opened there.
   it("lets a shell open in a worktree an agent is in", async () => {
     mockFetch([taken()]);
-    const w = mountForm([], { dir: "/wt/fix-login", target: "shell" });
+    const w = mountForm([], { dir: "/wt/fix-login", agent: "shell" });
     await flushPromises();
     expect(w.find('[data-testid="cell-dir-go"]').attributes("disabled")).toBeUndefined();
     await w.find('[data-testid="cell-dir-input"]').trigger("keydown.enter");
@@ -215,12 +260,14 @@ describe("a worktree reached without its row", () => {
 describe("a resume row", () => {
   const row = (over: Partial<SessionRow> = {}): SessionRow => ({ id: "s-9", title: "fix the parser", mtime: 1, ...over });
 
+  // The agent travels with the id: since #1417 the row is one of the PICKED agent's own
+  // conversations, and the cell has to connect the endpoint that wrote it.
   it("resumes a session nobody is holding", async () => {
     mockFetch([], [row()]);
     const w = mountForm();
     await flushPromises();
     await w.find('[data-testid="cell-resume-item"]').trigger("click");
-    expect(w.emitted("resume")?.[0]).toEqual([{ id: "s-9", cwd: "/repo" }]);
+    expect(w.emitted("resume")?.[0]).toEqual([{ id: "s-9", cwd: "/repo", agent: "claude" }]);
   });
 
   // The case the grid's own list is blind to: the other viewer is a second browser tab or a second
@@ -246,6 +293,131 @@ describe("a resume row", () => {
     expect(item.attributes("disabled")).toBeDefined();
     await item.trigger("click");
     expect(w.emitted("resume")).toBeUndefined();
+  });
+});
+
+// A session left running by a restart: alive, nobody attached, and until #1467 invisible — the
+// launcher offered its conversation with nothing to say that a process was still holding it, and
+// no way to end it short of `tmux kill-session` by hand.
+describe("a resume row whose session is still running", () => {
+  const running = (over: Partial<SessionRow> = {}): SessionRow => ({ id: "s-9", title: "fix the parser", mtime: 1, runningKey: "s-9", ...over });
+  const postsTo = (call: unknown[]): string => String(call[0]);
+
+  beforeEach(() => vi.restoreAllMocks());
+
+  it("says it is running, and offers to stop it", async () => {
+    mockFetch([], [running()]);
+    const w = mountForm();
+    await flushPromises();
+    expect(w.find('[data-testid="ri-running"]').exists()).toBe(true);
+    expect(w.find('[data-testid="ri-stop"]').exists()).toBe(true);
+    // Still resumable: stopping is the alternative to picking it up, not a replacement.
+    expect(w.find('[data-testid="cell-resume-item"]').attributes("disabled")).toBeUndefined();
+  });
+
+  // For codex/agy/muse the row's id is the AGENT's conversation id while the running tmux session
+  // is keyed by whatever MulmoTerminal minted at spawn. Resuming by the row's id starts a second
+  // backend on a conversation that already has one (#1533) — picking it up means reattaching the
+  // key it RUNS under.
+  it("resumes under the surviving key, not the row's own id", async () => {
+    mockFetch([], [running({ id: "conv-1", runningKey: "key-1" })]);
+    const w = mountForm();
+    await flushPromises();
+    await w.find('[data-testid="cell-resume-item"]').trigger("click");
+    expect(w.emitted("resume")?.[0]).toEqual([{ id: "key-1", cwd: "/repo", agent: "claude" }]);
+  });
+
+  it("says nothing when the server reports no running session", async () => {
+    mockFetch([], [running({ runningKey: null })]);
+    const w = mountForm();
+    await flushPromises();
+    expect(w.find('[data-testid="ri-running"]').exists()).toBe(false);
+    expect(w.find('[data-testid="ri-stop"]').exists()).toBe(false);
+  });
+
+  // A row somebody is HOLDING is that terminal's to close: ending it from another cell's launch
+  // form would pull a session out from under a tab the user cannot see from here.
+  it("offers no stop for a session another terminal is holding", async () => {
+    mockFetch([], [running({ attached: true })]);
+    const w = mountForm();
+    await flushPromises();
+    expect(w.find('[data-testid="ri-open"]').exists()).toBe(true);
+    expect(w.find('[data-testid="ri-stop"]').exists()).toBe(false);
+  });
+
+  // An older server sends no `runningKey` at all, and must read as "nothing is running" — an
+  // absent field must not grow a button that posts `undefined` at the terminate route.
+  it("renders exactly as before against a server that never says", async () => {
+    mockFetch([], [{ id: "s-9", title: "fix the parser", mtime: 1 }]);
+    const w = mountForm();
+    await flushPromises();
+    expect(w.find('[data-testid="ri-running"]').exists()).toBe(false);
+    expect(w.find('[data-testid="ri-stop"]').exists()).toBe(false);
+  });
+
+  it("terminates the session and re-reads the list", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    mockFetch([], [running()]);
+    const w = mountForm();
+    await flushPromises();
+    const before = (globalThis.fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls.length;
+    await w.find('[data-testid="ri-stop"]').trigger("click");
+    await flushPromises();
+    const calls = (globalThis.fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls.slice(before);
+    expect(calls.map(postsTo)).toContain("/api/session/s-9/terminate");
+    // The reload is what makes the row's state the server's answer rather than a local guess.
+    expect(calls.map(postsTo).some((u) => u.includes("/api/sessions"))).toBe(true);
+  });
+
+  // The KEY, not the row id: a codex/agy conversation started from a grid cell runs under a key
+  // MulmoTerminal minted, and terminating the conversation id would kill nothing while reporting
+  // success.
+  it("terminates the key the server named, not the row's id", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    mockFetch([], [running({ id: "conversation-1", runningKey: "mt-key-2" })]);
+    const w = mountForm();
+    await flushPromises();
+    await w.find('[data-testid="ri-stop"]').trigger("click");
+    await flushPromises();
+    const urls = (globalThis.fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls.map((c) => String(c[0]));
+    expect(urls).toContain("/api/session/mt-key-2/terminate");
+    expect(urls.some((u) => u.includes("/api/session/conversation-1/terminate"))).toBe(false);
+  });
+
+  // The two race, and the order that loses leaves the cell attached to a session the terminate
+  // then kills — a terminal that dies on arrival with nothing saying why (CodeRabbit on #1474).
+  it("refuses to resume the row whose stop is still in flight", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    let release = (): void => {};
+    const held = new Promise((resolve) => {
+      release = () => resolve({ ok: true, json: async () => ({ cwd: "/repo", sessions: [] }) });
+    });
+    globalThis.fetch = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/terminate")) return held;
+      if (u.includes("/api/worktrees")) return { ok: true, json: async () => ({ isGit: true, base: "main", worktrees: [] }) };
+      return { ok: true, json: async () => ({ cwd: "/repo", sessions: [running()] }) };
+    }) as unknown as typeof fetch;
+    const w = mountForm();
+    await flushPromises();
+    await w.find('[data-testid="ri-stop"]').trigger("click");
+    const item = w.find('[data-testid="cell-resume-item"]');
+    expect(item.attributes("disabled")).toBeDefined();
+    await item.trigger("click");
+    expect(w.emitted("resume")).toBeUndefined();
+    release();
+    await flushPromises();
+  });
+
+  it("does nothing when the confirmation is declined", async () => {
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+    mockFetch([], [running()]);
+    const w = mountForm();
+    await flushPromises();
+    const before = (globalThis.fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls.length;
+    await w.find('[data-testid="ri-stop"]').trigger("click");
+    await flushPromises();
+    expect((globalThis.fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls).toHaveLength(before);
   });
 });
 
@@ -324,10 +496,14 @@ describe("the workspace chip", () => {
   });
 });
 
-// The workspace is handed the WHOLE GUI MCP at spawn whatever agent runs there
-// (carriesFullGuiMcp), so there is no per-directory choice to offer. Four switches there would be
-// worse than redundant: they write a per-folder registration that a claimed session then
+// A claude or codex session in the workspace is handed the WHOLE GUI MCP at spawn
+// (carriesFullGuiMcp), so there is no per-directory choice to offer it. Four switches there would
+// be worse than redundant: they write a per-folder registration that a claimed session then
 // ignores, i.e. controls that visibly do nothing.
+//
+// "Whatever agent runs there" is NOT true and was the bug (#1423): antigravity reaches MCP through
+// a per-directory file, never through a per-spawn config, so in the workspace it must still be
+// asked. The cases below pin both halves.
 describe("the GUI tool groups in the workspace", () => {
   const guiMcpFetch = () => {
     globalThis.fetch = vi.fn(async (url: string) => {
@@ -376,6 +552,59 @@ describe("the GUI tool groups in the workspace", () => {
     expect(w.find('[data-testid="cell-mcp-all"]').exists()).toBe(false);
     expect(w.find('[data-testid="cell-mcp-toggle-render"]').exists()).toBe(true);
     expect(w.find('[data-testid="cell-mcp-toggle-external"]').exists()).toBe(true);
+  });
+
+  // #1423. Both halves of the bug in one assertion: the claim was untrue for antigravity, AND the
+  // same branch hid the switches — which is the only place in src/ that registers a group at all,
+  // so the form promised every tool while removing the way to obtain any.
+  it("asks antigravity in the workspace, rather than telling it that everything is available", async () => {
+    guiMcpFetch();
+    const w = mountForm([], { dir: "/home/me/ws", defaultCwd: "/home/me/ws", agent: "antigravity" });
+    await flushPromises();
+    expect(w.find('[data-testid="cell-mcp-all"]').exists()).toBe(false);
+    expect(w.find('[data-testid="cell-mcp-toggle-render"]').exists()).toBe(true);
+    expect(w.find('[data-testid="cell-mcp-toggle-external"]').exists()).toBe(true);
+  });
+
+  // The same question asked of the agent added after that fix. grok reaches MCP through
+  // `.grok/config.toml`, so it is in exactly antigravity's position and must get the switches
+  // rather than the promise — which is what makes #1423 a rule here and not a one-off repair.
+  it("asks grok in the workspace too", async () => {
+    guiMcpFetch();
+    const w = mountForm([], { dir: "/home/me/ws", defaultCwd: "/home/me/ws", agent: "grok" });
+    await flushPromises();
+    expect(w.find('[data-testid="cell-mcp-all"]').exists()).toBe(false);
+    expect(w.find('[data-testid="cell-mcp-toggle-render"]').exists()).toBe(true);
+    expect(w.find('[data-testid="cell-mcp-toggle-external"]').exists()).toBe(true);
+  });
+
+  it("still tells codex in the workspace that everything is available", async () => {
+    guiMcpFetch();
+    const w = mountForm([], { dir: "/home/me/ws", defaultCwd: "/home/me/ws", agent: "codex" });
+    await flushPromises();
+    expect(w.find('[data-testid="cell-mcp-all"]').exists()).toBe(true);
+    expect(w.find('[data-testid="cell-mcp-toggle-render"]').exists()).toBe(false);
+  });
+
+  // A custom agent IS the CLI its entry declares, with the user's command wrapped around it — the
+  // appended argv carries the same --mcp-config a plain claude cell gets. Read from `entry.agent`,
+  // never from the command text.
+  it("treats a custom agent as the CLI its entry declares", async () => {
+    guiMcpFetch();
+    const nemotron: CustomAgent = { id: "nemotron", label: "Nemotron", agent: "claude", command: "ollama launch claude --" };
+    const w = mountForm([], { dir: "/home/me/ws", defaultCwd: "/home/me/ws", agent: "custom:nemotron", customAgents: [nemotron] });
+    await flushPromises();
+    expect(w.find('[data-testid="cell-mcp-all"]').exists()).toBe(true);
+  });
+
+  // A cell can outlive the config entry it was launched from. Its CLI is then unknowable, so the
+  // form offers the switches: being wrong in the direction that still leaves a way out.
+  it("offers the switches for a custom agent whose entry is gone", async () => {
+    guiMcpFetch();
+    const w = mountForm([], { dir: "/home/me/ws", defaultCwd: "/home/me/ws", agent: "custom:deleted", customAgents: [] });
+    await flushPromises();
+    expect(w.find('[data-testid="cell-mcp-all"]').exists()).toBe(false);
+    expect(w.find('[data-testid="cell-mcp-toggle-render"]').exists()).toBe(true);
   });
 });
 
@@ -499,5 +728,437 @@ describe("changing the directory", () => {
     expect(w.find('[data-testid="cell-dir-loading"]').exists()).toBe(false);
     expect(w.find('[data-testid="ri-title"]').text()).toBe("the other project");
     expect(w.find('[data-testid="worktree-reuse"]').exists()).toBe(false);
+  });
+});
+
+// A CUSTOM AGENT is one of the user's own ways of starting Claude Code (#1414) — an Agent Picker
+// option, not a launcher chip. What that has to mean on this form: it is offered with the agents,
+// picking it still offers the model, and the agent-only sections stay.
+describe("the Agent Picker's custom agents (#1414)", () => {
+  const nemotron: CustomAgent = { id: "nemotron", label: "Nemotron", agent: "claude", command: "ollama launch claude --model nemotron-3-ultra:cloud --" };
+
+  it("offers one as a picker button, after the built-in agents and before Shell", async () => {
+    mockFetch();
+    const w = mountForm([], { customAgents: [nemotron] });
+    await flushPromises();
+    const labels = w
+      .find('[data-testid="agent-picker"]')
+      .findAll('[data-testid="agent-picker-label"]')
+      .map((b) => b.text());
+    expect(labels).toEqual(["Claude", "Codex", "Antigravity", "Grok", "Muse", "Nemotron", "Shell"]);
+  });
+
+  it("reports the pick as `custom:<id>`, which is what the cell sends to /ws", async () => {
+    mockFetch();
+    const w = mountForm([], { customAgents: [nemotron] });
+    await flushPromises();
+    await w.find('[data-testid="agent-picker-custom:nemotron"]').trigger("click");
+    expect(w.emitted("update:agent")?.[0]).toEqual(["custom:nemotron"]);
+  });
+
+  // It runs Claude Code, so the model picker and the agent-only sections stay — a Shell pick is
+  // what removes them, and a custom agent is not a shell. The wrapper's own `--model` sits before
+  // its `--`, so it is consumed by the wrapper and does not collide with this one.
+  it("keeps the model picker and the agent-only sections", async () => {
+    mockFetch();
+    const w = mountForm([], { agent: "custom:nemotron", customAgents: [nemotron] });
+    await flushPromises();
+    expect(w.findComponent({ name: "ModelPicker" }).exists()).toBe(true);
+    expect(w.find('[data-testid="cell-worktrees"]').exists()).toBe(true);
+  });
+
+  it("is just the built-in agents when the user has configured none", async () => {
+    mockFetch();
+    const w = mountForm([]);
+    await flushPromises();
+    // TERMINAL_AGENTS + Shell — asserted as a count derived from the list rather than a literal,
+    // so adding a fifth agent does not read as this feature breaking.
+    expect(w.find('[data-testid="agent-picker"]').findAll('[role="radio"]')).toHaveLength(TERMINAL_AGENTS.length + 1);
+  });
+
+  // Every option wears a mark, and the built-in agents wear their OWN one (AgentMark.vue's drawn
+  // shapes, the same the rate-limit gauge uses) rather than a Material Symbol — added because a row
+  // of six words in one weight said nothing about which tool each button starts. Derived from
+  // TERMINAL_AGENTS, so a new agent that reaches the picker without a mark fails here.
+  it("marks every built-in agent with its own drawn mark, and Shell with a symbol", async () => {
+    mockFetch();
+    const w = mountForm([], { customAgents: [nemotron] });
+    await flushPromises();
+    for (const agent of TERMINAL_AGENTS) {
+      const button = w.find(`[data-testid="agent-picker-${agent}"]`);
+      // The mark is asked for its OWN agent, not merely for a mark: a row that rendered Claude's
+      // burst under every label would satisfy "an svg is present" while distinguishing nothing,
+      // which is the whole thing this feature exists to do (CodeRabbit on #1521).
+      expect(button.findComponent(AgentMark).props("agent")).toBe(agent);
+      expect(button.find("svg").exists()).toBe(true);
+      expect(button.find(".material-symbols-outlined").exists()).toBe(false);
+    }
+    // The two that are not agents: a plain terminal, and `tune` for the user's own command — not
+    // Claude's burst, which would make a custom entry indistinguishable from the Claude row.
+    expect(w.find('[data-testid="agent-picker-shell"]').find(".material-symbols-outlined").text()).toBe("terminal");
+    expect(w.find('[data-testid="agent-picker-custom:nemotron"]').find(".material-symbols-outlined").text()).toBe("tune");
+  });
+});
+
+// #1417: the list belongs to the AGENT the picker has selected, not to Claude. Before this it read
+// ~/.claude/projects whatever was picked, so choosing Codex offered Claude's conversations and
+// clicking one connected the codex endpoint to a key that only ever named a Claude transcript.
+describe("the resume list follows the Agent Picker", () => {
+  // Keyed by the ROUTE each agent's history is listed at, because that is what the change actually
+  // does — there is no `?agent=` parameter, each agent has its own endpoint (common/agentSessionList).
+  // `/api/sessions` is matched LAST: every other path contains it as a suffix.
+  const ROUTES = ["/api/codex/sessions", "/api/antigravity/sessions", "/api/grok/sessions", "/api/sessions"];
+
+  function mockAgentFetch(byRoute: Record<string, SessionRow[]>) {
+    const asked: string[] = [];
+    globalThis.fetch = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/worktrees")) return { ok: true, json: async () => ({ isGit: true, base: "main", worktrees: [] }) };
+      const route = ROUTES.find((r) => u.startsWith(r));
+      if (route) {
+        asked.push(route);
+        return { ok: true, json: async () => ({ cwd: "/repo", sessions: byRoute[route] ?? [] }) };
+      }
+      return { ok: true, json: async () => ({}) };
+    }) as unknown as typeof fetch;
+    return asked;
+  }
+
+  const rowsFor = (title: string): SessionRow[] => [{ id: `id-${title}`, title, mtime: 1 }];
+
+  it("lists the picked agent's own conversations, and names them in the heading", async () => {
+    mockAgentFetch({ "/api/codex/sessions": rowsFor("a codex chat"), "/api/sessions": rowsFor("a claude chat") });
+    const w = mountForm([], { agent: "codex" });
+    await flushPromises();
+    expect(w.find('[data-testid="ri-title"]').text()).toBe("a codex chat");
+    expect(w.find('[data-testid="cell-resume-heading"]').text()).toBe("or resume a codex conversation here");
+  });
+
+  it("keeps Claude's heading, which is the default nearly every row wears", async () => {
+    mockAgentFetch({ "/api/sessions": rowsFor("a claude chat") });
+    const w = mountForm();
+    await flushPromises();
+    expect(w.find('[data-testid="cell-resume-heading"]').text()).toBe("or resume here");
+  });
+
+  it("re-reads the list when the picker changes, and resumes as that agent", async () => {
+    const asked = mockAgentFetch({ "/api/grok/sessions": rowsFor("a grok chat"), "/api/sessions": rowsFor("a claude chat") });
+    const w = mountForm();
+    await flushPromises();
+    expect(w.find('[data-testid="ri-title"]').text()).toBe("a claude chat");
+
+    await w.setProps({ agent: "grok" });
+    // The previous agent's rows go at once, rather than standing under the new agent's name for
+    // the length of the fetch (#1372's rule, in a second dimension).
+    expect(w.find('[data-testid="cell-resume-item"]').exists()).toBe(false);
+    await flushPromises();
+    expect(asked).toContain("/api/grok/sessions");
+    expect(w.find('[data-testid="ri-title"]').text()).toBe("a grok chat");
+    await w.find('[data-testid="cell-resume-item"]').trigger("click");
+    expect(w.emitted("resume")?.[0]).toEqual([{ id: "id-a grok chat", cwd: "/repo", agent: "grok" }]);
+  });
+
+  // A custom agent runs Claude Code, so its history IS Claude's — the same rule that gives it the
+  // model picker.
+  it("gives a custom agent Claude's list", async () => {
+    const asked = mockAgentFetch({ "/api/sessions": rowsFor("a claude chat") });
+    const w = mountForm([], {
+      agent: "custom:ollama",
+      customAgents: [{ id: "ollama", label: "Ollama", agent: "claude", command: "ollama launch claude --" }],
+    });
+    await flushPromises();
+    expect(asked).toEqual(["/api/sessions"]);
+    expect(w.find('[data-testid="ri-title"]').text()).toBe("a claude chat");
+  });
+
+  // A shell resumes nothing, so there is no history to offer and no route to ask.
+  it("asks for nothing, and shows no section, for a shell", async () => {
+    const asked = mockAgentFetch({ "/api/sessions": rowsFor("a claude chat") });
+    const w = mountForm([], { agent: "shell" });
+    await flushPromises();
+    expect(asked).toEqual([]);
+    expect(w.find('[data-testid="cell-resume"]').exists()).toBe(false);
+    // …and the loading row must not be left standing in its place.
+    expect(w.find('[data-testid="cell-dir-loading"]').exists()).toBe(false);
+  });
+});
+
+// #1447: the folder button posted to /api/pick-file and dropped a non-200 on the floor, so on a
+// host with no dialog installed it was a button that did nothing and said nothing. The field still
+
+// #1549: `git worktree add` checks out the whole tree — around six seconds on the reporter's
+// 33,000-file monorepo — and the form was byte-identical to the one before the click for all of it.
+// The button's only `disabled` test was "is the task field empty", and the field is cleared once
+// the ANSWER lands, so it stayed live; `uniqueBranch` takes the next free suffix, so every extra
+// press succeeded. Three presses, three worktrees: agent/<task>, -2, -3.
+describe("creating a worktree", () => {
+  /** Everything answers as usual, but the create waits until the test lets it finish. */
+  function mockHeldCreate(answer: { ok: boolean; status?: number; body: unknown }, worktrees: WorktreeRow[] = []) {
+    const bodies: string[] = [];
+    let finish: () => void = () => {};
+    const held = new Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>((resolve) => {
+      finish = () => resolve({ ok: answer.ok, status: answer.status ?? (answer.ok ? 200 : 500), json: async () => answer.body });
+    });
+    globalThis.fetch = vi.fn(async (url: string, init?: RequestInit) => {
+      const u = String(url);
+      if (u.includes("/api/worktrees/create")) {
+        bodies.push(String(init?.body ?? ""));
+        return held;
+      }
+      if (u.includes("/api/worktrees")) return { ok: true, json: async () => ({ isGit: true, base: "main", worktrees }) };
+      if (u.includes("/api/sessions")) return { ok: true, json: async () => ({ cwd: "/repo", sessions: [] }) };
+      return { ok: true, json: async () => ({}) };
+    }) as unknown as typeof fetch;
+    return { finish, bodies };
+  }
+
+  const startButton = (w: ReturnType<typeof mountForm>) => w.find('[data-testid="wt-start"]');
+
+  /** Type a task name and press the button, leaving the create in flight. */
+  async function beginCreate(w: ReturnType<typeof mountForm>, task = "fix login") {
+    await w.find('[data-testid="wt-task"]').setValue(task);
+    await startButton(w).trigger("click");
+    await flushPromises();
+  }
+
+  it("holds the button and says it is working while the worktree is being cut", async () => {
+    const { finish } = mockHeldCreate({ ok: true, body: { path: "/wt/fix-login", branch: "agent/fix-login" } });
+    const w = mountForm();
+    await flushPromises();
+    await w.find('[data-testid="wt-task"]').setValue("fix login");
+    expect(startButton(w).attributes("disabled")).toBeUndefined();
+    await startButton(w).trigger("click");
+    await flushPromises();
+    expect(startButton(w).attributes("disabled")).toBeDefined();
+    expect(startButton(w).text()).toContain("Creating…");
+    finish();
+    await flushPromises();
+    expect(w.emitted("start")?.at(-1)).toEqual(["/wt/fix-login"]);
+    expect(startButton(w).text()).toContain("New worktree");
+  });
+
+  // The Enter key is the OTHER way in and the input is never disabled, so the guard has to live in
+  // the handler rather than only on the button — which is what makes this a fix and not a coat of
+  // paint.
+  it("creates exactly one worktree however many times it is asked", async () => {
+    const { finish, bodies } = mockHeldCreate({ ok: true, body: { path: "/wt/fix-login" } });
+    const w = mountForm();
+    await flushPromises();
+    await beginCreate(w);
+    await w.find('[data-testid="wt-task"]').trigger("keydown.enter");
+    await startButton(w).trigger("click");
+    await flushPromises();
+    expect(bodies).toHaveLength(1);
+    finish();
+    await flushPromises();
+    expect(bodies).toHaveLength(1);
+    expect(w.emitted("start")).toHaveLength(1);
+  });
+
+  // The task name stays put on a failure: it is what the retry needs, and clearing it would make a
+  // refused create look like one that worked.
+  it("shows what the server said instead of nothing at all", async () => {
+    const { finish } = mockHeldCreate({ ok: false, status: 500, body: { error: "fatal: Not a valid object name: 'main'." } });
+    const w = mountForm();
+    await flushPromises();
+    await beginCreate(w);
+    finish();
+    await flushPromises();
+    expect(w.find('[data-testid="wt-error"]').text()).toContain("Not a valid object name");
+    expect(w.emitted("start")).toBeUndefined();
+    expect(startButton(w).attributes("disabled")).toBeUndefined();
+  });
+
+  // A 200 with no path is not a worktree to launch in, and treating it as one would start the agent
+  // in whatever the directory field happens to say.
+  it("refuses to launch on an answer that names no worktree", async () => {
+    const { finish } = mockHeldCreate({ ok: true, body: { branch: "agent/fix-login" } });
+    const w = mountForm();
+    await flushPromises();
+    await beginCreate(w);
+    finish();
+    await flushPromises();
+    expect(w.emitted("start")).toBeUndefined();
+    expect(w.find('[data-testid="wt-error"]').exists()).toBe(true);
+  });
+
+  // One guard for the whole section: these all shell out to git in one repository, where a second
+  // command contends on the index lock.
+  it("holds the existing worktrees' own buttons while a create runs", async () => {
+    const { finish } = mockHeldCreate({ ok: true, body: { path: "/wt/fix-login" } }, [worktree({ session: null })]);
+    const w = mountForm();
+    await flushPromises();
+    expect(w.find('[data-testid="wt-del"]').attributes("disabled")).toBeUndefined();
+    await beginCreate(w);
+    expect(w.find('[data-testid="wt-del"]').attributes("disabled")).toBeDefined();
+    expect(w.find('[data-testid="worktree-reuse"]').attributes("disabled")).toBeDefined();
+    finish();
+    await flushPromises();
+    expect(w.find('[data-testid="wt-del"]').attributes("disabled")).toBeUndefined();
+  });
+
+  it("does not offer the button at all with no task name", async () => {
+    mockFetch();
+    const w = mountForm();
+    await flushPromises();
+    expect(startButton(w).attributes("disabled")).toBeDefined();
+    expect(startButton(w).classes()).toContain("disabled:opacity-40");
+  });
+
+  // The failure belongs to the repository it was refused in, and the section comes BACK for the
+  // next directory — so a message kept in state would reappear under a repo it says nothing true
+  // about. Waited out in real time, like the debounce spec below: what matters is the state after
+  // the new directory's lists land, not that a timer was scheduled.
+  it("drops the failure when the field moves to another repository", async () => {
+    const { finish } = mockHeldCreate({ ok: false, status: 500, body: { error: "fatal: Not a valid object name: 'main'." } });
+    const w = mountForm();
+    await flushPromises();
+    await beginCreate(w);
+    finish();
+    await flushPromises();
+    expect(w.find('[data-testid="wt-error"]').exists()).toBe(true);
+    await w.setProps({ dir: "/elsewhere" });
+    for (let waited_ms = 0; waited_ms < 3000; waited_ms += 25) {
+      if (w.find('[data-testid="cell-worktrees"]').exists()) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      await flushPromises();
+    }
+    expect(w.find('[data-testid="cell-worktrees"]').exists()).toBe(true); // the section is back…
+    expect(w.find('[data-testid="wt-error"]').exists()).toBe(false); // …without the other repo's failure
+  });
+
+  // The harder half of the same rule: the field is editable for the whole round trip, so a refusal
+  // can LAND after the move. Clearing on the change is not enough — the answer has to know which
+  // repository it was about. (Observed during review, not flagged by either bot.)
+  it("does not report a refusal that lands after the field has moved on", async () => {
+    const { finish } = mockHeldCreate({ ok: false, status: 500, body: { error: "fatal: Not a valid object name: 'main'." } });
+    const w = mountForm();
+    await flushPromises();
+    await beginCreate(w);
+    await w.setProps({ dir: "/elsewhere" }); // typed while the create is still in flight
+    finish();
+    for (let waited_ms = 0; waited_ms < 3000; waited_ms += 25) {
+      if (w.find('[data-testid="cell-worktrees"]').exists()) break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      await flushPromises();
+    }
+    expect(w.find('[data-testid="wt-error"]').exists()).toBe(false);
+  });
+
+  // Raised by Codex on #1550. `fetchWithTimeout` keeps its deadline armed across the BODY, so a
+  // read that aborts after a 200 used to be absorbed into `{}` and reported as "the server answered
+  // without a worktree path" — for a worktree that exists. The absorption is still right on a
+  // refusal, where the STATUS is the answer and the body may not be JSON at all.
+  it("reports an unreadable 200 body as a timeout, not as a worktree that was never made", async () => {
+    globalThis.fetch = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/worktrees/create")) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => {
+            throw new DOMException("The operation was aborted.", "AbortError");
+          },
+        };
+      }
+      if (u.includes("/api/worktrees")) return { ok: true, json: async () => ({ isGit: true, base: "main", worktrees: [] }) };
+      return { ok: true, json: async () => ({ cwd: "/repo", sessions: [] }) };
+    }) as unknown as typeof fetch;
+    const w = mountForm();
+    await flushPromises();
+    await beginCreate(w);
+    const text = w.find('[data-testid="wt-error"]').text();
+    expect(text).toContain("Timed out");
+    expect(text).not.toContain("without a worktree path");
+    expect(w.emitted("start")).toBeUndefined();
+  });
+
+  it("still reads a refusal whose body is not JSON at all (a 403 from the origin guard)", async () => {
+    globalThis.fetch = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/worktrees/create")) {
+        return {
+          ok: false,
+          status: 403,
+          json: async () => {
+            throw new SyntaxError("Unexpected token '<'");
+          },
+        };
+      }
+      if (u.includes("/api/worktrees")) return { ok: true, json: async () => ({ isGit: true, base: "main", worktrees: [] }) };
+      return { ok: true, json: async () => ({ cwd: "/repo", sessions: [] }) };
+    }) as unknown as typeof fetch;
+    const w = mountForm();
+    await flushPromises();
+    await beginCreate(w);
+    expect(w.find('[data-testid="wt-error"]').text()).toContain("403");
+  });
+
+  // `fetchWithTimeout` gives up at 60s, which a checkout large enough to make #1549 worth fixing can
+  // exceed — and git carries on regardless. "Could not reach the server" would send the user to look
+  // at their network for a worktree that is about to appear.
+  it("says a timeout is a timeout, not an unreachable server", async () => {
+    globalThis.fetch = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/worktrees/create")) throw new DOMException("The operation was aborted.", "AbortError");
+      if (u.includes("/api/worktrees")) return { ok: true, json: async () => ({ isGit: true, base: "main", worktrees: [] }) };
+      return { ok: true, json: async () => ({ cwd: "/repo", sessions: [] }) };
+    }) as unknown as typeof fetch;
+    const w = mountForm();
+    await flushPromises();
+    await beginCreate(w);
+    const text = w.find('[data-testid="wt-error"]').text();
+    expect(text).toContain("Timed out");
+    expect(text).not.toContain("Could not reach");
+  });
+});
+
+// The delete beside each row is the same shape of button on the same slow route, and had the same
+// nothing: no guard, no progress, and `catch {}` over the answer.
+describe("removing a worktree", () => {
+  function mockHeldRemove(answer: { ok: boolean; status?: number; body: unknown }) {
+    let finish: () => void = () => {};
+    let calls = 0;
+    const held = new Promise<{ ok: boolean; status: number; json: () => Promise<unknown> }>((resolve) => {
+      finish = () => resolve({ ok: answer.ok, status: answer.status ?? (answer.ok ? 200 : 500), json: async () => answer.body });
+    });
+    globalThis.fetch = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/worktrees/remove")) {
+        calls += 1;
+        return held;
+      }
+      if (u.includes("/api/worktrees")) return { ok: true, json: async () => ({ isGit: true, base: "main", worktrees: [worktree({ session: null })] }) };
+      if (u.includes("/api/sessions")) return { ok: true, json: async () => ({ cwd: "/repo", sessions: [] }) };
+      return { ok: true, json: async () => ({}) };
+    }) as unknown as typeof fetch;
+    return { finish, calls: () => calls };
+  }
+
+  it("removes once however many times the button is pressed, and shows which row it is on", async () => {
+    const { finish, calls } = mockHeldRemove({ ok: true, body: { ok: true } });
+    const w = mountForm();
+    await flushPromises();
+    const del = () => w.find('[data-testid="wt-del"]');
+    await del().trigger("click");
+    await flushPromises();
+    expect(del().attributes("disabled")).toBeDefined();
+    expect(del().text()).toContain("progress_activity");
+    await del().trigger("click");
+    await flushPromises();
+    expect(calls()).toBe(1);
+    finish();
+    await flushPromises();
+    expect(del().text()).toContain("delete");
+  });
+
+  it("says why a removal was refused", async () => {
+    const { finish } = mockHeldRemove({ ok: false, status: 409, body: { ok: false, reason: "dirty" } });
+    const w = mountForm();
+    await flushPromises();
+    await w.find('[data-testid="wt-del"]').trigger("click");
+    finish();
+    await flushPromises();
+    expect(w.find('[data-testid="wt-error"]').text()).toContain("uncommitted changes");
   });
 });

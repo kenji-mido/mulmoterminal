@@ -1,4 +1,4 @@
-import { worktreeLabel } from "./cwdDisplay";
+import { worktreeLabel } from "../../common/worktreePath";
 import { isSameDirPath } from "../../common/dirPathKey";
 
 // A directory preset offered as a one-click chip in the cell launch form.

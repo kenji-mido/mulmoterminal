@@ -3,7 +3,7 @@ title: Feature reference — parallel terminals, worktrees, cost, phone
 nav_title: Feature reference
 layout: default
 parent: English
-nav_order: 5
+nav_order: 6
 description: Every MulmoTerminal feature: parallel terminals, the cockpit roster, git worktrees, the GUI panel, phone push, and Claude Code / Codex support.
 ---
 
@@ -29,7 +29,7 @@ MulmoTerminal — a browser terminal for parallel Claude Code and Codex agents �
 | Add / close / reorder cells | **New terminal**, each cell's close button, and **Move left / Move right** in reorder mode. Ordering is **auto** (attention first), **manual**, or **priority** (what each project declared in `orderPriority` — [config](config.html#order-priority)) |
 | Set a terminal aside | The moon button in a cell's header **sinks it** — the tile, its filmstrip thumbnail and its roster row all fade, and the working dot stops pulsing. It stays **connected and keeps its whole history**: this is the alternative to `/clear`-ing a cell you are done with for now, which resets the conversation to change how the cell looks. Survives a reload. **Enlarging it keeps it faded**, so you can read a set-aside session without waking it — the roster row keeps its blue "you are here" edge either way. **Typing into it wakes it** — clicking or scrolling to read it does not, even though a mouse-tracking agent receives those as input. Nothing has to be undone by hand. A cell that **stops for a permission prompt comes back to full strength on its own**; a merely finished turn does not, since that is what setting it aside leads to |
 | Six kinds of notification sound | Besides finished and input-waiting: a Run cell succeeding or failing, a session exiting, and a PR going red. **Only the first two are on by default**; the rest are opt-in ([config](config.html#sounds)) |
-| Worktree isolation | Git worktrees so many agents can run on the same repo without colliding |
+| Worktree isolation | Git worktrees so many agents can run on the same repo without colliding (→ [Worktrees](worktree.html)) |
 | Session persistence (tmux) | If tmux is available, each session runs inside tmux and **reconnects** across reloads and server restarts |
 | Phone companion (RemoteHost) | **Web Push to your phone** on finished / input-waiting turns, plus **watch, reply, and start a new terminal** from the phone — with your own one-tap chips (→ [From your phone](phone.html)) |
 
@@ -45,10 +45,10 @@ MulmoTerminal — a browser terminal for parallel Claude Code and Codex agents �
 | Activity timeline | Tool-call history (Bash / Read / Edit …) shown newest-first in a modal |
 | Copy the last code block | A cell-header button puts the **last fenced block of the latest reply** on the clipboard, taken from the agent's own transcript rather than the screen — so no line wrapping or leading spaces come with it and it pastes cleanly into Discord / Slack / email. Where the browser blocks clipboard access (any address that is not https or localhost, i.e. from your phone) it shows the block selected for copying by hand instead |
 | Cost (estimated) | Approximate **session / today / this month** cost in settings |
-| Worktree diff badge | Shows the amount of change on a worktree cell; click for the diff panel |
+| Worktree diff badge | Shows the amount of change on a worktree cell; click for the diff panel (→ [the diff badge](worktree.html#diff-badge)) |
 | GUI panel | Renders diagrams, forms, images, and documents — plus HTML, **video/slides (MulmoCast)**, collections, and accounting — from the agent's tool calls (Claude / Codex both supported) |
 | Clickable file paths | A **file path an agent prints** in the terminal becomes a link, and **what it opens is chosen by extension**: `.md` renders, `.json` is indented, `.csv` / `.tsv` become a table (each in a new tab), source and `.txt` open in the app's own **Files** view for editing, and images / PDF / video open as-is. **While a grid cell is enlarged the file pane beside it takes the click instead**, so the file opens next to the terminal that printed it — everything but the images / PDF / video row, and only for files under that cell's own directory. Files within the session's working directory ([routing table](https://github.com/receptron/mulmoterminal#clicking-a-file-path)) |
-| Cross-repo PRs / Issues view | All registered repos' **open PRs and issues** in one Pull requests view in the toolbar |
+| Cross-repo PRs / Issues view | All registered repos' **open PRs and issues** — in the pane beside an enlarged cell, led by that cell's repository, or in the toolbar's full-screen Pull requests view |
 | Wiki / Collections / Accounting / Files | In-app views from the toolbar: a Wiki (with a graph view), collections, accounting, and a **file explorer + editor** |
 | Summary when it hands back | A Claude session ends its reply with **what was asked, what it achieved, and what it left** whenever it finishes or stops to ask. Coming back to a cell later, that is the current state without scrolling back |
 | See why a setting isn't working | Settings' **Directory settings** shows what each directory's `.mulmoterminal.json` actually puts in force, which file it came from, and **the keys dropped or never read** ([config](config.html#dir-settings-preview)) |
@@ -112,12 +112,13 @@ so a very large unsaved buffer may not get out.
 | Feature | Description |
 |---|---|
 | Header action buttons | Add `input` (send text) / `open` (URL, file manager, in-app views, file picker, new terminal, PR) / `shell` (run a command) via `buttons`, with `${variables}` and `when` conditions |
-| Header display chips | Reorder / hide built-in chips plus custom chips via `chips` |
+| Header display chips | Reorder / hide built-in chips plus custom chips via `chips` (→ [Customizing the header](header.html)) |
 | Name badge / colors | Per-directory name and per-element colors in `.mulmoterminal.json` |
 | Launchers / cwd presets / PR repos | Extend launch commands, working-directory suggestions, and cross-repo PR targets in settings |
 | Themes | Midnight / Nord / Daylight / Solarized Light |
 | Terminal font size | Adjustable in settings (per browser), or pinned per directory with `fontSize` in `.mulmoterminal.json` |
 | Terminal scroll speed | Adjustable in settings (per browser, 0.25x-3x) — one control for both a shell's scrollback and a full-screen app like Claude Code; turn it down if a Mac trackpad swipe scrolls past what you were reading |
+| Return to the latest on send | Pressing Enter (or a send button) takes a scrolled-up terminal back to the bottom, the way an ordinary terminal does. A shell already behaves this way; a full-screen agent like Claude Code keeps its own scroll position, so this unwinds exactly the scrolling you did. On by default, switchable in settings (per browser) |
 | Terminal font | `fontFamily` in the global config, or per directory — CJK faces are in the default stack, so Japanese no longer falls back to whatever the browser picks |
 
 > **Do nothing and it works as before** — buttons/chips/colors only take effect for what you add, and the default look is unchanged.

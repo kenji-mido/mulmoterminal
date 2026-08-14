@@ -1,46 +1,54 @@
-import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ref, computed } from "vue";
 import { parseUpdateNotice } from "./updateNotice";
 import { jsonBody } from "../jsonBody";
 import { fetchWithTimeout } from "../utils/fetchWithTimeout";
+import { parseUpdateStatus, type UpdateStatus } from "../../common/updateStatus";
 
 // The server runs the check at startup and it reaches the network (git ls-remote can take
-// several seconds), so an early read returns null before it lands. Poll a few times to catch a
-// notice that shows up late, then stop — a genuinely up-to-date server just answers null each
-// time.
+// several seconds), so an early read answers with `ready: false`. Poll a few times to catch the
+// result when it lands, then stop.
 const POLL_MS = 3000;
 const MAX_POLLS = 5;
 
-// The header's "update available" badge state, read from GET /api/update-status (the server's
-// startup check). Best-effort — any failure just leaves the badge hidden.
+// Module state, not per-caller: two components read this — the header badge and the Settings
+// version line — and the answer is one server-side value that settles once. A second polling
+// loop per consumer would re-ask a question already answered, and the modal would open with an
+// empty line until its own fetch returned.
+const status = ref<UpdateStatus | null>(null);
+let polling = false;
+
+async function fetchOnce(): Promise<void> {
+  try {
+    const res = await fetchWithTimeout("/api/update-status");
+    if (!res.ok) return;
+    // Assign whatever came back, including a status carrying no notice: a null must CLEAR a
+    // notice an earlier read picked up (e.g. after a `git pull` + restart), not just be ignored.
+    status.value = parseUpdateStatus(await jsonBody(res));
+  } catch {
+    // best-effort — no badge, no version line
+  }
+}
+
+async function poll(polls: number): Promise<void> {
+  await fetchOnce();
+  if (status.value?.ready || polls + 1 >= MAX_POLLS) {
+    polling = false;
+    return;
+  }
+  setTimeout(() => void poll(polls + 1), POLL_MS);
+}
+
+// Ask again when a consumer appears and the answer still hasn't landed — the loop gives up after
+// MAX_POLLS, and opening Settings ten minutes later must not inherit that dead end.
+function startPolling(): void {
+  if (polling || status.value?.ready) return;
+  polling = true;
+  void poll(0);
+}
+
+// What the header badge and the Settings version line read: the running install, and the update
+// notice when there is one. Best-effort — any failure just leaves both hidden.
 export function useUpdateStatus() {
-  const notice = ref<string | null>(null);
-  const badge = computed(() => parseUpdateNotice(notice.value));
-
-  async function fetchOnce(): Promise<void> {
-    try {
-      const res = await fetchWithTimeout("/api/update-status");
-      if (!res.ok) return;
-      const data = await jsonBody(res);
-      // Assign both ways: a null answer must CLEAR a notice an earlier read picked up (e.g.
-      // after a `git pull` + restart), not just be ignored.
-      notice.value = typeof data.notice === "string" ? data.notice : null;
-    } catch {
-      // best-effort — no badge is fine
-    }
-  }
-
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  let polls = 0;
-  async function poll(): Promise<void> {
-    await fetchOnce();
-    polls += 1;
-    // Keep polling only while there's nothing to show and we haven't given up: once a notice
-    // arrives it won't change without a restart, and a null is either "current" or "not ready".
-    if (notice.value === null && polls < MAX_POLLS) timer = setTimeout(() => void poll(), POLL_MS);
-  }
-
-  onMounted(() => void poll());
-  onUnmounted(() => timer && clearTimeout(timer));
-
-  return { badge };
+  startPolling();
+  return { status: computed(() => status.value), badge: computed(() => parseUpdateNotice(status.value?.notice)) };
 }

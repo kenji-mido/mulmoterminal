@@ -1,41 +1,26 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
+import { useI18n } from "vue-i18n";
 import { previewNotify } from "../../composables/useAttentionSound";
 import { customSoundLabel, isCustomSound, toggledKinds, withKindSound, type SoundMap } from "../../composables/soundSettings";
 import SettingsButton from "../SettingsButton.vue";
 import SettingsField from "../SettingsField.vue";
 import SkillLaunchButton from "../SkillLaunchButton.vue";
 import { SELECT_CONTROL } from "../selectClasses";
-import { SECTION_HEADING } from "./sectionClasses";
 import { NOTIFY_KINDS, type NotifyKind } from "../../../common/notifyKinds";
 import { presetRef, SOUND_PRESETS } from "../../../common/notifySounds";
 import type { BundledSkillName } from "../../../common/bundledSkills";
 import type { SoundEmits } from "./soundEmits";
-import { isRecord } from "../../../common/isRecord";
+import { filePickerOpen, pickPaths } from "../../composables/pickPaths";
 
 const props = defineProps<{ soundFile?: string | null | undefined; soundKinds?: NotifyKind[] | undefined; sounds?: SoundMap | undefined }>();
 const emit = defineEmits<SoundEmits & { (e: "launch-skill", skill: BundledSkillName): void }>();
 
+const { t } = useI18n();
+
 // Which moments beep, and what each one plays (#873). The toolbar's speaker icon says whether to
 // beep at all, this says which moments qualify.
-const NOTIFY_KIND_LABEL: Record<NotifyKind, string> = {
-  finished: "Turn finished",
-  waiting: "Waiting for you",
-  "command-done": "Command finished",
-  "command-failed": "Command failed",
-  "session-exited": "Session ended",
-  "worker-failed": "Background worker failed",
-  "pr-ci-failed": "PR CI failed",
-};
-const NOTIFY_KIND_HELP: Record<NotifyKind, string> = {
-  finished: "the agent replied and the output is unread",
-  waiting: "it stopped to ask — a permission prompt or a question",
-  "command-done": "a Run cell's command exited cleanly",
-  "command-failed": "a Run cell's command exited with an error, or never started",
-  "session-exited": "a session's terminal ended — including when you close the cell yourself",
-  "worker-failed": "a background worker ended without finishing — nothing else reports this, since it has no terminal on screen",
-  "pr-ci-failed": "a directory's PR went red. Only seen while the roster is on screen, since that is what polls it",
-};
+const kindLabel = (kind: NotifyKind): string => t(`settings.sounds.kinds.${kind}`);
 
 const soundKindList = ref<NotifyKind[]>([...(props.soundKinds ?? [])]);
 watch(
@@ -79,6 +64,9 @@ function testKindSound(kind: NotifyKind) {
 // Custom attention sound, applied immediately (like the theme) — empty => the
 // built-in chime. The text box mirrors the saved value; Browse / typing apply it.
 const soundPath = ref(props.soundFile ?? "");
+// A host with no file dialog installed: the field still takes a typed path, which nobody discovers
+// from a Browse button that does nothing (#1447).
+const pickError = ref<string | null>(null);
 watch(
   () => props.soundFile,
   (f) => (soundPath.value = f ?? ""),
@@ -92,29 +80,18 @@ function clearSound() {
   emit("update-sound", null);
 }
 async function browseSound() {
-  try {
-    // Deliberately unbounded: this route answers when the USER closes the native file dialog,
-    // so any deadline here is a guess at how long they will take to choose.
-    const res = await fetch("/api/pick-file", { method: "POST", headers: { "content-type": "application/json" } });
-    if (!res.ok) return;
-    const data: unknown = await res.json();
-    const picked = isRecord(data) && Array.isArray(data.paths) && typeof data.paths[0] === "string" ? data.paths[0] : "";
-    if (picked) {
-      soundPath.value = picked;
-      applySound();
-    }
-  } catch {
-    // native dialog unavailable / canceled — leave the field as-is
+  const { paths, error } = await pickPaths();
+  pickError.value = error;
+  const picked = paths[0];
+  if (picked) {
+    soundPath.value = picked;
+    applySound();
   }
 }
 </script>
 
 <template>
-  <h3 :class="SECTION_HEADING">Notification sounds</h3>
-  <p class="mb-3 mt-1.5 text-[12px] text-dim">
-    Which moments beep, and what each one plays. Running many agents at once is what turns notifications into noise — untick the ones you don't need. The
-    speaker button in the toolbar silences all of them at once.
-  </p>
+  <p class="mb-3 mt-1.5 text-[12px] text-dim">{{ t("settings.sounds.intro") }}</p>
   <div v-for="kind in NOTIFY_KINDS" :key="kind" class="py-0.5">
     <div class="flex items-center gap-2">
       <label class="flex min-w-0 flex-1 cursor-pointer items-center gap-2">
@@ -122,11 +99,11 @@ async function browseSound() {
           type="checkbox"
           class="shrink-0 cursor-pointer"
           :checked="soundKindList.includes(kind)"
-          :aria-label="`Beep when a session is ${kind}`"
+          :aria-label="t('settings.sounds.beepAria', { kind })"
           @change="toggleSoundKind(kind)"
         />
         <span class="truncate text-[12px]"
-          ><strong>{{ NOTIFY_KIND_LABEL[kind] }}</strong></span
+          ><strong>{{ kindLabel(kind) }}</strong></span
         >
       </label>
       <!-- The width lives on this wrapper, not the select: SELECT_CONTROL is `w-full`, and a
@@ -136,42 +113,39 @@ async function browseSound() {
         <select
           :value="soundValue(kind)"
           :disabled="!soundKindList.includes(kind)"
-          :aria-label="`Sound for ${NOTIFY_KIND_LABEL[kind]}`"
+          :aria-label="t('settings.sounds.soundFor', { label: kindLabel(kind) })"
           :class="SELECT_CONTROL"
           class="truncate"
           @change="onKindSoundChange(kind, $event)"
         >
-          <option value="">Default</option>
+          <option value="">{{ t("settings.sounds.default") }}</option>
           <option v-for="preset in SOUND_PRESETS" :key="preset.id" :value="presetRef(preset.id)">{{ preset.label }}</option>
           <option v-if="isCustomSound(soundValue(kind))" :value="soundValue(kind)">{{ customSoundLabel(soundValue(kind)) }}</option>
         </select>
       </div>
-      <SettingsButton class="shrink-0" :title="`Play the ${NOTIFY_KIND_LABEL[kind]} sound`" @click="testKindSound(kind)"
+      <SettingsButton class="shrink-0" :title="t('settings.sounds.playFor', { label: kindLabel(kind) })" @click="testKindSound(kind)"
         ><span class="material-symbols-outlined" aria-hidden="true">play_arrow</span></SettingsButton
       >
     </div>
-    <p class="ml-6 text-[11px] text-dim">{{ NOTIFY_KIND_HELP[kind] }}</p>
+    <p class="ml-6 text-[11px] text-dim">{{ t(`settings.sounds.help.${kind}`) }}</p>
   </div>
 
   <p class="mb-1.5 mt-3 text-[12px] text-dim">
-    <strong>Default</strong> plays your own file below, or the built-in chime when that is empty. The presets are fetched once and kept on this machine, so they
-    keep working offline.
+    <strong>{{ t("settings.sounds.defaultTitle") }}</strong> {{ t("settings.sounds.defaultHint") }}
   </p>
   <div class="flex items-center gap-2">
     <SettingsField
       v-model="soundPath"
       class="flex-auto font-mono"
       placeholder="/absolute/path/to/sound.wav"
-      aria-label="Custom notification sound file"
+      :aria-label="t('settings.sounds.fileField')"
       spellcheck="false"
       @change="applySound"
     />
-    <SettingsButton @click="browseSound">Browse…</SettingsButton>
-    <SettingsButton :disabled="!soundPath" title="Use the built-in chime" @click="clearSound">Use chime</SettingsButton>
+    <SettingsButton :disabled="filePickerOpen" @click="browseSound">{{ t("settings.sounds.browse") }}</SettingsButton>
+    <SettingsButton :disabled="!soundPath" :title="t('settings.sounds.useChimeTitle')" @click="clearSound">{{ t("settings.sounds.useChime") }}</SettingsButton>
   </div>
-  <p class="mb-3 mt-3 text-[12px] text-dim">
-    These are the sounds for every session. The skill also gives one project its own sound, picks which moments push to your phone, and works out which of them
-    is the one waking you up.
-  </p>
-  <SkillLaunchButton skill="mulmoterminal-notify" icon="notifications_active" label="Configure notifications…" @launch="emit('launch-skill', $event)" />
+  <p v-if="pickError" data-testid="sound-pick-error" class="mt-1.5 text-[12px] text-err-text" role="alert">{{ pickError }}</p>
+  <p class="mb-3 mt-3 text-[12px] text-dim">{{ t("settings.sounds.outro") }}</p>
+  <SkillLaunchButton skill="mulmoterminal-notify" icon="notifications_active" :label="t('settings.sounds.configure')" @launch="emit('launch-skill', $event)" />
 </template>

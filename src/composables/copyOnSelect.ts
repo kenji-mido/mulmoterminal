@@ -1,11 +1,14 @@
-// Whether a settled mouse selection goes straight to the clipboard (#900), hydrated once from
-// /api/config and read by every terminal's selection handler. A plain module value, not a ref:
-// nothing renders it, one global answer applies to all open terminals, and keeping it free of
-// xterm imports lets useAppConfig set it without pulling the terminal manager into the config
-// layer — the same arrangement as terminalSubmitMode.ts.
-let enabled = false;
+import { createGlobalFlag } from "./globalFlag";
 
-export const isCopyOnSelectEnabled = (): boolean => enabled;
-export const setCopyOnSelect = (value: unknown): void => {
-  enabled = value === true;
-};
+// Whether a settled mouse selection goes straight to the clipboard (#900), hydrated from
+// /api/config and read by every terminal's selection handler at event time. Off unless the config
+// asks for it: it changes the clipboard with no key pressed, so it must never arrive by default.
+//
+// The selection handler uses `isCopyOnSelectEnabled`, which is also what keeps this module free of
+// xterm imports; Settings renders `copyOnSelect`.
+const flag = createGlobalFlag("copyOnSelect", false);
+
+export const copyOnSelect = flag.state;
+export const isCopyOnSelectEnabled = flag.read;
+export const setCopyOnSelect = flag.set;
+export const saveCopyOnSelect = flag.save;

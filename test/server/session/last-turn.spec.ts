@@ -1,12 +1,24 @@
 // @vitest-environment node
 import { describe, it, expect } from "vitest";
-import { lastTurnFromClaudeJsonl, lastTurnFromClaudeParsed, lastTurnFromCodexRollout, EMPTY_TURN } from "../../../server/session/last-turn.js";
+import {
+  currentTurnReplyFromClaudeParsed,
+  lastTurnFromClaudeJsonl,
+  lastTurnFromClaudeParsed,
+  lastTurnFromCodexRollout,
+  EMPTY_TURN,
+} from "../../../server/session/last-turn.js";
 import { parseJsonl } from "../../../server/session/transcript.js";
 
 const line = (o: unknown) => JSON.stringify(o);
 const user = (text: string) => line({ type: "user", message: { content: text } });
 const assistant = (text: string) => line({ type: "assistant", message: { content: [{ type: "text", text }] } });
-const toolUse = (name: string) => line({ type: "assistant", message: { content: [{ type: "tool_use", name, input: {} }] } });
+// The real file carries a stop reason on every assistant record, and `tool_use` is the one that
+// means "still working". The helper above omits it on purpose — a record without one has to keep
+// counting as the end of a turn (#1487) — so these two model what Claude actually writes.
+const narrating = (text: string) => line({ type: "assistant", message: { stop_reason: "tool_use", content: [{ type: "text", text }] } });
+const concluding = (text: string, stopReason = "end_turn") =>
+  line({ type: "assistant", message: { stop_reason: stopReason, content: [{ type: "text", text }] } });
+const toolUse = (name: string) => line({ type: "assistant", message: { stop_reason: "tool_use", content: [{ type: "tool_use", name, input: {} }] } });
 
 // codex rollout rows, in the shape the real ~/.codex/sessions/**/rollout-*.jsonl uses:
 // only the turn boundaries carry turn_id, and task_complete carries the whole reply.
@@ -26,6 +38,31 @@ describe("lastTurnFromClaudeParsed", () => {
   it("takes the LAST prose record of a turn, not the narration before the tools", () => {
     const raw = [user("do X"), assistant("let me look"), toolUse("Read"), assistant("done — here is why")].join("\n");
     expect(lastTurnFromClaudeJsonl(raw)).toEqual({ prompt: "do X", reply: "done — here is why" });
+  });
+
+  // The case above with the stop reasons the real file carries. Without them the fixture passed
+  // while the shipped code relayed the preamble: a round table seat contributed "I'll read the
+  // actual files before weighing in." and its real answer — which disagreed with the others —
+  // arrived 40 seconds later and was never passed on (#1487).
+  it("does not mistake the preamble before a tool call for the answer", () => {
+    const raw = [user("do X"), narrating("I'll read the actual files before weighing in."), toolUse("Read"), concluding("LRU, and here is why")].join("\n");
+    expect(lastTurnFromClaudeJsonl(raw)).toEqual({ prompt: "do X", reply: "LRU, and here is why" });
+  });
+
+  // The same records, caught mid-flight: the preamble is on disk and the answer is not yet. The
+  // previous exchange is the honest answer — handing on the preamble is what the bug did.
+  it("falls back to the previous exchange while the agent is still narrating", () => {
+    const raw = [user("first"), concluding("first answer"), user("do X"), narrating("let me look"), toolUse("Read")].join("\n");
+    expect(lastTurnFromClaudeJsonl(raw)).toEqual({ prompt: "first", reply: "first answer" });
+  });
+
+  // Every stop reason other than tool_use ends the turn one way or another, and a record with no
+  // stop reason at all counts as ending it — being wrong the other way would leave a turn that
+  // never completes, so every exchange waiting on it would time out.
+  it("treats any non-tool_use stop reason, and a missing one, as the end of the turn", () => {
+    expect(lastTurnFromClaudeJsonl([user("q"), concluding("a", "stop_sequence")].join("\n"))).toEqual({ prompt: "q", reply: "a" });
+    expect(lastTurnFromClaudeJsonl([user("q"), concluding("a", "max_tokens")].join("\n"))).toEqual({ prompt: "q", reply: "a" });
+    expect(lastTurnFromClaudeJsonl([user("q"), assistant("a")].join("\n"))).toEqual({ prompt: "q", reply: "a" });
   });
 
   it("falls back to the previous exchange while a turn is still in flight", () => {
@@ -48,6 +85,43 @@ describe("lastTurnFromClaudeParsed", () => {
   it("skips slash-command wrappers, which are not typed prompts", () => {
     const raw = [user("real prompt"), user("<local-command-stdout>ok</local-command-stdout>"), assistant("answer")].join("\n");
     expect(lastTurnFromClaudeJsonl(raw)).toEqual({ prompt: "real prompt", reply: "answer" });
+  });
+});
+
+// The push body's read. Everything above answers "what was the last complete exchange"; this one
+// answers "what did the turn that just ended produce", and the difference is the whole point: it
+// must go silent rather than hand the phone an older turn's reply (#1650).
+describe("currentTurnReplyFromClaudeParsed", () => {
+  const reply = (raw: string) => currentTurnReplyFromClaudeParsed(parseJsonl(raw));
+
+  it("returns the concluding prose of the newest turn", () => {
+    expect(reply([user("first"), concluding("first answer"), user("second"), concluding("second answer")].join("\n"))).toBe("second answer");
+  });
+
+  it("takes the turn's last prose, not the preamble before its tools", () => {
+    expect(reply([user("do X"), narrating("let me look"), toolUse("Read"), concluding("done — here is why")].join("\n"))).toBe("done — here is why");
+  });
+
+  // #1650: the previous turn's reply is exactly what a stale push carried, so it may not survive
+  // a new prompt. A read that lands while the turn is still running gets nothing at all.
+  it("does not borrow the previous turn's reply while the newest turn is still running", () => {
+    expect(reply([user("first"), concluding("first answer"), user("second"), narrating("let me look"), toolUse("Bash")].join("\n"))).toBeNull();
+  });
+
+  // The deterministic half of #1650: an interrupted turn (or one that finished on a tool call)
+  // ends with no prose, yet Stop still fires and a push still goes out.
+  it("is null for a turn that ended without any prose", () => {
+    expect(reply([user("first"), concluding("first answer"), user("second"), toolUse("Bash")].join("\n"))).toBeNull();
+  });
+
+  it("is not reset by a slash-command wrapper, which is not a typed prompt", () => {
+    expect(reply([user("real prompt"), concluding("answer"), user("<local-command-stdout>ok</local-command-stdout>")].join("\n"))).toBe("answer");
+  });
+
+  it("reports a reply that has no preceding prompt, and is null for an empty transcript", () => {
+    expect(reply(concluding("resumed context"))).toBe("resumed context");
+    expect(reply("")).toBeNull();
+    expect(reply(user("hello"))).toBeNull();
   });
 });
 

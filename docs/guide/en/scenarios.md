@@ -42,32 +42,11 @@ When you want to try something *without polluting main*, isolate the work in a *
 2. Click **New worktree** to create a worktree dedicated to that task and launch the session.
 3. As changes pile up, a diff badge appears in the cell header. From there it's one click to **push / create a PR**.
 
-The new branch is `agent/<task>`, forked from your local base branch.
+Two agents in one repository then never tread on each other's files.
 
-A worktree started **from an issue** is named `issue/<number>-<task>` instead, and that one
-fetches first and forks from **`origin/<base>`**. If you keep several clones of one repo side by
-side, only the one you happen to be working in gets pulled, so forking from the local branch would
-quietly start the work on week-old code. With no remote reachable, the local branch is used and the
-worktree is still created.
-
-![Worktrees start from the launcher form](../images/grid-launch-form.png)
-
-### When you're done, clean up as you close
-
-Closing a worktree cell asks first whether to **keep or remove** it. **Remove worktree** deletes the
-worktree **and its branch**, so you aren't left running `git branch -D` afterwards.
-
-![Closing a worktree cell](../images/worktree-close-keep.png)
-
-**When uncommitted or unpushed work is left, the dialog names the counts** and the button becomes
-**Discard & remove** — what you're about to lose is written on the button itself. The diff is
-re-read the moment the dialog opens (the button reads `Checking…` until it lands), so a change made
-seconds ago can't be discarded unseen.
-
-![Closing a worktree that has uncommitted work](../images/worktree-close-discard.png)
-
-Only worktrees **this app created** can be removed; the server refuses a delete aimed outside the
-directory it manages.
+**→ [Isolating work in a git worktree](worktree.html)** has the whole run: the branch name and what
+it forks from, the one-session-per-worktree rule, cleaning up as you close, and how project settings
+are inherited.
 
 ## 3. Work across multiple repositories
 
@@ -128,7 +107,9 @@ Not just the header and badge — `colors` tints the **terminal itself (backgrou
 ## 7. Add your frequent actions to the header
 
 Using `buttons` / `chips` in `.mulmoterminal.json`, you can add **your own buttons** (e.g. send `/compact`, open GitHub,
-run a build) and **display chips** to the header of a running terminal. For details, see [Configuration → Customizing the header](config.html#header).
+run a build) and **display chips** to the header of a running terminal.
+
+**→ [Customizing the header](header.html)** walks it through from the first button, with screenshots.
 
 ---
 

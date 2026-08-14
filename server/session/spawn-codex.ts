@@ -10,13 +10,14 @@ import { codexGuiMcpServers } from "./mcp-config.js";
 import { codexSessionsRoot, snapshotSessions, watchForCodexSession } from "../agents/codex-session.js";
 import { codexRolloutPath } from "../agents/codex-sessions.js";
 import { trackCodexActivity } from "./codex-activity-track.js";
-import { claimedCodexRollouts, claimFullGuiMcp, codexRolloutIds, ptys } from "./registry.js";
+import { claimedCodexRollouts, claimFullGuiMcp, codexRollouts, ptys, rememberCodexRollout } from "./registry.js";
 import { ptySpawn, ptyWouldReattach } from "./pty-spawn.js";
 import { ptyStartLine } from "./pty-exit-log.js";
 import { wireAgentPtyRelay } from "./pty-relay.js";
 import { attachCodexAutoRun } from "./draft-injection.js";
 import type { PtyEntry } from "./types.js";
 import type { SpawnDeps } from "./spawn-deps.js";
+import { refreshCodexSkillsMirror } from "../backends/workspaceSetup.js";
 
 // Bound to ONE pty: `ptys.has(id)` would keep a stale tail alive after a reap-then-
 // respawn under the same id, and both tails would report the same boundaries.
@@ -32,15 +33,15 @@ export function createCodexSpawner(deps: SpawnDeps) {
   // codex persists its rollout only after the first user turn, so watch a FRESH session's lifetime
   // (stop once its pty is gone) and capture the minted id so a later cold reconnect can
   // `codex resume <id>`. Attribution is unambiguous-only (see pickFreshSession).
-  function rememberCodexRollout(sessionId: string, entry: PtyEntry, root: string, before: Set<string>, cwd: string): void {
+  function captureCodexRollout(sessionId: string, entry: PtyEntry, root: string, before: Set<string>, cwd: string): void {
     watchForCodexSession(root, before, { cwd, claimed: claimedCodexRollouts, isCancelled: () => !ptys.has(sessionId) })
       .then((meta) => {
         if (!meta) return;
         claimedCodexRollouts.add(meta.file);
-        codexRolloutIds.set(sessionId, meta.id);
+        rememberCodexRollout(sessionId, meta.id, cwd);
         // A rollout only discovered now is one this session just created, so it is read
         // whole: its first turn is in there and hasn't been reported yet.
-        trackCodexActivity(sessionId, meta.file, false, activityDepsFor(sessionId, entry, deps));
+        trackCodexActivity(sessionId, meta.file, { startAtEnd: false }, activityDepsFor(sessionId, entry, deps));
       })
       .catch(() => {});
   }
@@ -62,6 +63,11 @@ export function createCodexSpawner(deps: SpawnDeps) {
     } = {},
   ): PtyEntry {
     const { initialPrompt = null, mcpGroups = [] } = options;
+    // codex reads skills from its mirror (~/.codex/skills), not from the workspace's own
+    // `.claude/skills`, and the mirror is otherwise refreshed only at boot — so a skill created
+    // mid-run (a new collection) would stay invisible to codex until a restart. No-op outside
+    // the managed workspace.
+    refreshCodexSkillsMirror(cwd);
     const root = codexSessionsRoot();
     const before = snapshotSessions(root);
     // Two surfaces, the same two claude has:
@@ -87,7 +93,7 @@ export function createCodexSpawner(deps: SpawnDeps) {
     // reuses the id, and a stale claim would stand its group urls down with nothing left to serve
     // them (Codex review on #1399). claimFullGuiMcp owns both directions so neither spawn path can
     // apply half the rule.
-    const allTools = claimFullGuiMcp(sessionId, attachGuiMcp, cwd, ptyWouldReattach(sessionId, true));
+    const allTools = claimFullGuiMcp(sessionId, attachGuiMcp, cwd, ptyWouldReattach(sessionId, true), "codex");
     const guiMcpServers = codexGuiMcpServers({ sessionId, port: PORT, groups: mcpGroups, allTools });
     const args = buildCodexArgs({ resume: resumeRolloutId, model: deps.codexModel, guiMcpServers });
     const { term, tmux, reattached } = ptySpawn(sessionId, deps.codexBin, args, cwd, true, { binEnvVar: codexAdapter.binEnvVar });
@@ -97,13 +103,34 @@ export function createCodexSpawner(deps: SpawnDeps) {
     const entry: PtyEntry = { term, ws, buffer: "", cwd, tmux, active: false, agent: "codex" };
     ptys.set(sessionId, entry);
     if (resumeRolloutId) {
-      codexRolloutIds.set(sessionId, resumeRolloutId);
+      // Recorded on resume too, not just on the spawn that discovered it: a session resumed by the
+      // rollout id itself carries no mapping yet, and one whose cell moved needs the new cwd.
+      rememberCodexRollout(sessionId, resumeRolloutId, cwd);
       const file = codexRolloutPath(root, resumeRolloutId);
-      if (file) trackCodexActivity(sessionId, file, true, activityDepsFor(sessionId, entry, deps));
+      if (file) trackCodexActivity(sessionId, file, { startAtEnd: true }, activityDepsFor(sessionId, entry, deps));
+    } else if (reattached) {
+      // A tmux attach picked up a codex that was ALREADY running — a server restart, where
+      // `agentResumeId` rightly withholds the resume id so no second codex starts. But the fresh
+      // branch below waits for a rollout file to APPEAR, and this session's existed before the
+      // snapshot — so nothing ever tailed it and the cell's working/waiting flags stayed dead
+      // until a cold restart (#1536). Claude survives the same restart via its HTTP hooks; codex
+      // has only this tail. The mapping outlived the process in the rollout log (the WS route
+      // awaits its hydration before resolving), so tail it from the end, as a resume does —
+      // except that a turn the file leaves OPEN is restored: unlike a resume, the process is
+      // still running, so an open turn is what it is doing right now (#1538 review).
+      const rolloutId = codexRollouts.get(sessionId)?.conversationId;
+      const file = rolloutId ? codexRolloutPath(root, rolloutId) : null;
+      if (file) trackCodexActivity(sessionId, file, { startAtEnd: true, restoreOpenTurn: true }, activityDepsFor(sessionId, entry, deps));
+      // No mapping — the restart came before the survivor's FIRST turn, so no rollout exists
+      // yet. Its first prompt may still be coming, so run the same appear-watcher a fresh
+      // session gets (attribution is unambiguous-only either way): without it that rollout is
+      // never recorded, activity stays dead, and a later cold reconnect starts a NEW
+      // conversation instead of resuming this one (Codex review on #1538).
+      else captureCodexRollout(sessionId, entry, root, before, cwd);
     } else {
       // Discover the id only for a FRESH session. On resume we already know it; running the watcher
       // could overwrite the known id with a mis-attributed concurrent rollout.
-      rememberCodexRollout(sessionId, entry, root, before, cwd);
+      captureCodexRollout(sessionId, entry, root, before, cwd);
     }
     // A seed prompt is typed into codex's input box after it settles (not a CLI arg — see
     // attachCodexAutoRun), so a long collection-action prompt can't overflow tmux's command limit.

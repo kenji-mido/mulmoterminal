@@ -26,7 +26,7 @@ const chips = [
   ["dir badge", () => mount(DirBadge, { props: { name: "demo", color: null } }), "span"],
   [
     "model / context",
-    () => mount(ModelContextBadge, { props: { agent: "claude", model: "claude-opus-4-20250514", contextTokens: 1000 } }),
+    () => mount(ModelContextBadge, { props: { agent: "claude", model: "claude-opus-4-20250514", contextTokens: 1000, contextWindow: null } }),
     '[data-testid="model-badge"]',
   ],
 ] as const;

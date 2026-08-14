@@ -9,6 +9,7 @@ import { execSync, spawn } from "node:child_process";
 import { existsSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
+import { release } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -106,6 +107,40 @@ const PATH_TOOLS = [
   { cmd: "ollama", versionArg: "--version", required: false, why: "a fully local model via claude-ollama", hint: "https://ollama.com/download" },
 ];
 
+// The variables WSL exports into a login shell, then the kernel that names itself
+// (`…-microsoft-standard-WSL2`, `…-Microsoft` on WSL1) for the processes those variables never
+// reach. Mirrors `isWsl()` in server/files/wsl.ts, which this file cannot import: bin runs as
+// plain JS, the server runs through tsx. Keep the two in step.
+function isWslHost() {
+  if (process.platform !== "linux") return false;
+  return Boolean(process.env.WSL_DISTRO_NAME || process.env.WSL_INTEROP) || /microsoft/i.test(release());
+}
+
+// The file dialog is the one requirement that differs per host, so it is checked per host rather
+// than listed above: macOS and Windows have one built in and can't be missing it. WSL reaches the
+// Windows dialog over interop, and a Linux desktop has whichever toolkit it was installed with —
+// zenity's absence there is what makes the picker look broken (#1447).
+function fileDialogTool() {
+  if (process.platform === "darwin" || process.platform === "win32") return null;
+  const why = "the file / folder picker";
+  if (isWslHost()) {
+    return {
+      cmd: "powershell.exe",
+      versionArg: "-NoProfile -Command exit",
+      required: false,
+      why: `${why}, using the Windows dialog`,
+      hint: "enable WSL interop (wsl.conf), or: sudo apt install zenity",
+    };
+  }
+  return {
+    cmd: "zenity",
+    versionArg: "--version",
+    required: false,
+    why: `${why} (kdialog / qarma / yad also work)`,
+    hint: "sudo apt install zenity  ·  sudo dnf install zenity",
+  };
+}
+
 function toolCheckLine({ cmd, versionArg, required, why, hint }) {
   if (hasCommand(cmd, versionArg)) return `  ✓ ${cmd} — ${why}`;
   const head = required ? `  ✗ ${cmd} — not found, needed for ${why}` : `  ○ ${cmd} — optional (${why})`;
@@ -139,7 +174,7 @@ async function runInit(initArgs) {
     console.log("      → npm install -g @anthropic-ai/claude-code   (then run `claude` and log in)");
   }
 
-  PATH_TOOLS.forEach((tool) => console.log(toolCheckLine(tool)));
+  [...PATH_TOOLS, fileDialogTool()].filter(Boolean).forEach((tool) => console.log(toolCheckLine(tool)));
 
   // Config half: derive working-dir presets from Claude history + write config.json.
   console.log("");
@@ -188,9 +223,13 @@ function runGoogle(googleArgs) {
   });
 }
 
+// WSL has no Linux browser to open (and often no `xdg-open` either), so the URL goes to the
+// Windows shell — `start` through cmd.exe, which is what opens the user's real browser. It exits
+// 0, unlike `explorer.exe`, so a failure here still means a failure.
 function pickOpenCommand() {
   if (process.platform === "darwin") return "open";
   if (process.platform === "win32") return "start";
+  if (isWslHost()) return 'cmd.exe /c start ""';
   return "xdg-open";
 }
 
@@ -355,6 +394,9 @@ Commands:
                     ~/.mulmoterminal/config.json (idempotent — safe to re-run)
   google login      Link a Google account (browser consent, on this machine) so the
                     Calendar tool and the phone's google.calendar.* commands can run
+  room <cmd>        Take part in a conversation room from a shell:
+                    room read <id> / room post <id> <text…> / room list.
+                    Needs a running server
 
 Options:
   --cwd <dir>       Working directory claude runs in (default: current directory; relative paths allowed)
@@ -377,6 +419,12 @@ async function main() {
 
   if (args[0] === "google") {
     await runGoogle(args.slice(1));
+    return;
+  }
+
+  if (args[0] === "room") {
+    const { runRoom } = await import("./room.js");
+    await runRoom(args.slice(1));
     return;
   }
 

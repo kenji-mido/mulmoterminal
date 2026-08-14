@@ -39,6 +39,12 @@ describe("launchChoiceFromParams", () => {
     expect(launchChoiceFromParams(params("model=~anthropic%2Fclaude-opus-latest"))?.model).toBe("~anthropic/claude-opus-latest");
   });
 
+  // #1503. The two params stopped sharing one predicate here: a model may carry Claude Code's
+  // `[1m]` suffix and a provider id may not, so this is also the pair's only asymmetry.
+  it("accepts a model carrying the [1m] extended-context suffix", () => {
+    expect(launchChoiceFromParams(params("model=claude-opus-5%5B1m%5D"))?.model).toBe("claude-opus-5[1m]");
+  });
+
   it("trims surrounding whitespace", () => {
     expect(launchChoiceFromParams(params("model=%20glm-5.2%20"))?.model).toBe("glm-5.2");
   });
@@ -70,14 +76,16 @@ describe("launchChoiceFromParams", () => {
   // keeping the model resolves to ANTHROPIC running another vendor's model id — the exact
   // silent wrong-backend this feature exists to prevent. The whole pick goes instead, and
   // the directory's own default decides.
-  it("drops the whole pair when the model half is unusable", () => {
+  //
+  // The last case is #1503's asymmetry seen from the other side: `[1m]` is a model-name
+  // suffix, so a provider wearing one is not an id the config schema would ever accept.
+  it.each([
+    ["the model half is unusable", "provider=openrouter&model=%20"],
+    ["the provider half is unusable", "provider=not%20an%20id&model=z-ai%2Fglm-5.2"],
+    ["the provider half carries the [1m] suffix, which only a model may", "provider=openrouter%5B1m%5D&model=z-ai%2Fglm-5.2"],
+  ])("drops the whole pair when %s", (_why, query) => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
-    expect(launchChoiceFromParams(params("provider=openrouter&model=%20"))).toBeUndefined();
-  });
-
-  it("drops the whole pair when the provider half is unusable", () => {
-    vi.spyOn(console, "warn").mockImplementation(() => {});
-    expect(launchChoiceFromParams(params("provider=not%20an%20id&model=z-ai%2Fglm-5.2"))).toBeUndefined();
+    expect(launchChoiceFromParams(params(query))).toBeUndefined();
   });
 
   it("says which param it ignored", () => {

@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi, afterEach } from "vitest";
 
 import { launchOptions } from "../../../server/config/launch-options.js";
 import { resolveProvider, type ProviderConfig } from "../../../server/session/provider-env.js";
@@ -92,6 +92,29 @@ describe("launchOptions", () => {
     const broken = { ...OPENROUTER, id: "moonshot", label: "Moonshot", tokenEnv: "MOONSHOT_API_KEY" };
     expect(launchOptions([broken, OPENROUTER], WITH_KEY).anyReady).toBe(true);
   });
+
+  // The rule that made #1432 reachable: every preset in modelPresets.ts carries
+  // `provider: "openrouter"`, so a backend registered under any other id starts with nothing and
+  // offers only what its own `models` lists. Pinned because it is invisible from the config file,
+  // and because "register it and the models appear" was written down as advice.
+  it("gives a provider whose id is not openrouter no presets of its own", () => {
+    const deepseek: ProviderConfig = { id: "deepseek", label: "DeepSeek", baseUrl: "https://api.deepseek.com/anthropic", tokenEnv: "DEEPSEEK_API_KEY" };
+    const [option] = launchOptions([deepseek], { DEEPSEEK_API_KEY: "sk-test" } as NodeJS.ProcessEnv).providers;
+    expect(option).toMatchObject({ id: "deepseek", ready: true, models: [] });
+  });
+
+  it("offers exactly the models such a provider lists, and nothing else", () => {
+    const deepseek: ProviderConfig = {
+      id: "deepseek",
+      label: "DeepSeek",
+      baseUrl: "https://api.deepseek.com/anthropic",
+      tokenEnv: "DEEPSEEK_API_KEY",
+      models: ["deepseek-chat", "deepseek-reasoner"],
+    };
+    const [option] = launchOptions([deepseek], { DEEPSEEK_API_KEY: "sk-test" } as NodeJS.ProcessEnv).providers;
+    expect(option.models.map((model) => model.id)).toEqual(["deepseek-chat", "deepseek-reasoner"]);
+    expect(option.models.every((model) => model.provider === "deepseek" && model.trials.status === "unmeasured")).toBe(true);
+  });
 });
 
 // Codex on PR #587: the config schema accepted ids the launch parser then dropped, and a
@@ -104,13 +127,76 @@ describe("what config accepts and what the launch path accepts", () => {
     expect(sanitizeProviders([provider("open-router.v2")]).map((p) => p.id)).toEqual(["open-router.v2"]);
   });
 
-  it.each(["has space", "-leading-dash", "pipe|char", ""])("refuses the id %j that the launch parser would drop", (id) => {
+  // The last case is #1503's asymmetry: `[1m]` names a context window, which a MODEL has and a
+  // provider key does not, so the two shapes deliberately disagree on exactly that one suffix.
+  it.each(["has space", "-leading-dash", "pipe|char", "", "openrouter[1m]"])("refuses the id %j that the launch parser would drop", (id) => {
     expect(sanitizeProviders([provider(id)])).toEqual([]);
   });
 
   it("drops only the malformed model, not the provider's whole list", () => {
     const [saved] = sanitizeProviders([{ ...provider("openrouter"), models: ["z-ai/glm-5.2", "bad id", 42] }]);
     expect(saved.models).toEqual(["z-ai/glm-5.2"]);
+  });
+
+  // #1503 named three surfaces, and this is the third: `.mulmoterminal.json`'s `model`, the
+  // picker, and a provider's own `models` list all read one shape. A suffix refused HERE is
+  // near-silent — the picker just shows a backend with fewer models than the file lists (#1432)
+  // — so it needs its own assertion rather than trusting the shared predicate.
+  //
+  // `sonnet[1m]` is the realistic entry: behind a gateway that is exactly how the docs say to
+  // select Sonnet 5's 1M window.
+  it("keeps a model carrying the [1m] extended-context suffix", () => {
+    const [saved] = sanitizeProviders([{ ...provider("gateway"), models: ["~anthropic/claude-opus-latest[1m]", "sonnet[1m]"] }]);
+    expect(saved.models).toEqual(["~anthropic/claude-opus-latest[1m]", "sonnet[1m]"]);
+  });
+
+  // Dropping them silently is half of #1432: the picker then says the backend has no models
+  // while the user is looking at a config file that lists them. Each case uses its own provider
+  // id — the warning is said once per process, so a repeat of the same sentence stays quiet.
+  describe("and what it says when it drops one", () => {
+    const warn = () => vi.spyOn(console, "warn").mockImplementation(() => {});
+    afterEach(() => vi.restoreAllMocks());
+
+    it("names every model id it refused, and the shape it wanted", () => {
+      const spy = warn();
+      sanitizeProviders([{ ...provider("named-drops"), models: ["z-ai/glm-5.2", "bad id", 42] }]);
+      const line = spy.mock.calls.map((call) => String(call[0])).join("\n");
+      expect(line).toContain("named-drops");
+      expect(line).toContain('"bad id"');
+      expect(line).toContain("42");
+      expect(line).not.toContain("z-ai/glm-5.2");
+    });
+
+    it("says so when `models` is not a list at all, which empties it whole", () => {
+      const spy = warn();
+      const [saved] = sanitizeProviders([{ ...provider("not-a-list"), models: { "deepseek-chat": true } }]);
+      expect(saved.models).toEqual([]);
+      expect(spy.mock.calls.map((call) => String(call[0])).join("\n")).toContain("not-a-list");
+    });
+
+    // The value is whatever the user's JSON held, and "longer than a model id may be" is one of
+    // the reasons it was rejected — so the line quotes it to a bound instead of echoing a
+    // megabyte of it. Observed during review; no bot flagged it.
+    it("quotes a rejected value to a bound rather than echoing it whole", () => {
+      const spy = warn();
+      const huge = `x`.repeat(50_000);
+      sanitizeProviders([{ ...provider("huge-value"), models: [`${huge} not an id`] }]);
+      const line = spy.mock.calls.map((call) => String(call[0])).join("\n");
+      expect(line).toContain("huge-value");
+      expect(line.length).toBeLessThan(400);
+    });
+
+    it("stays quiet when every listed model was kept", () => {
+      const spy = warn();
+      sanitizeProviders([{ ...provider("all-kept"), models: ["z-ai/glm-5.2", " moonshotai/kimi-k3 "] }]);
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it("stays quiet when the entry lists no models at all", () => {
+      const spy = warn();
+      sanitizeProviders([provider("no-models-listed")]);
+      expect(spy).not.toHaveBeenCalled();
+    });
   });
 
   // The round trip that matters: anything config keeps must survive the ws query.

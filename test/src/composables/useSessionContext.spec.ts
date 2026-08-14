@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { createApp, defineComponent, ref } from "vue";
 import { flushPromises } from "@vue/test-utils";
 import { useSessionContext } from "../../../src/composables/useSessionContext";
+import type { TerminalAgent } from "../../../common/sessionAgent";
 
 function withSetup<T>(composable: () => T): { result: T; unmount: () => void } {
   let result!: T;
@@ -23,8 +24,42 @@ describe("useSessionContext", () => {
     const { result, unmount } = withSetup(() => useSessionContext(ref<string | null>("sess-1"), ref<string | null>("/proj")));
     await flushPromises();
     // #1393: every request carries a deadline now, so the init is no longer absent.
-    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/session/sess-1?cwd=%2Fproj");
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/session/sess-1?agent=claude&cwd=%2Fproj");
     expect(result.context.value?.model).toBe("claude-opus-4-8");
+    unmount();
+  });
+
+  // The badges are read from the agent's OWN log (#1465), so a terminal that is not Claude has to
+  // say which one it is — a request without it is answered from Claude's transcript, where a codex
+  // session has no file and the badge would stay empty.
+  it("names the agent it is asking about", async () => {
+    const fetchMock = vi.fn<(url: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(() =>
+      Promise.resolve(jsonResponse({ context: { model: "gpt-5.5", contextTokens: 42, contextWindow: 258_400 } })),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { result, unmount } = withSetup(() => useSessionContext(ref<string | null>("sess-1"), ref<string | null>("/proj"), ref<TerminalAgent>("codex")));
+    await flushPromises();
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/session/sess-1?agent=codex&cwd=%2Fproj");
+    expect(result.context.value?.contextWindow).toBe(258_400);
+    unmount();
+  });
+
+  // Changing the agent changes which log the server reads, so it has to re-fetch — and clear the
+  // old badge while it does, or a codex cell relaunched as claude keeps wearing `gpt-5.5`.
+  it("re-fetches and drops the old model when the agent changes", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse({ context: { model: "gpt-5.5", contextTokens: 1 } }))
+      .mockResolvedValueOnce({ ok: false } as Response);
+    vi.stubGlobal("fetch", fetchMock);
+    const agent = ref<TerminalAgent>("codex");
+    const { result, unmount } = withSetup(() => useSessionContext(ref<string | null>("sess-1"), ref<string | null>(null), agent));
+    await flushPromises();
+    expect(result.context.value?.model).toBe("gpt-5.5");
+    agent.value = "claude";
+    await flushPromises();
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/session/sess-1?agent=claude");
+    expect(result.context.value).toBeNull(); // no stale codex model on a claude terminal
     unmount();
   });
 

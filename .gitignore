@@ -27,7 +27,13 @@ dist-ssr
 .mcp.json
 .playwright-mcp/
 
-# Per-directory runtime config the app writes (working-dir styling + Run-menu scripts).
-# Local to each checkout — not shared.
-.mulmoterminal.json
+# This project's own MulmoTerminal styling is COMMITTED (`.mulmoterminal.json`), so a fresh clone
+# gets the repository's colours without configuring anything. What stays out is the per-checkout
+# override — several clones of this repo run side by side and each needs its own shade — and the
+# Run-menu scripts, which are one machine's commands.
+.mulmoterminal.local.json
 script.json
+
+# `yarn lint` caches per-file results here. `content` strategy, not the default `metadata` one:
+# a checkout rewrites every mtime, so a metadata cache is worth nothing on a CI runner.
+.eslintcache

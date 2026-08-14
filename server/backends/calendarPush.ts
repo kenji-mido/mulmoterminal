@@ -15,7 +15,8 @@
 //   POST /api/collections/:slug/calendar-push   →  CollectionPushResult
 import type { Express, Request, Response } from "express";
 import { pushCalendarForCollection } from "@mulmoclaude/core/google";
-import { getWorkspaceRoot, loadCollection } from "@mulmoclaude/core/collection/server";
+import { loadCollection } from "@mulmoclaude/core/collection/server";
+import { errorStatus, resolveProjectRoot, type ProjectScope } from "../infra/project-root.js";
 import { toCollectionPushResult } from "./calendarPushResult.js";
 import { hostLogger } from "./hostLogger.js";
 
@@ -30,16 +31,19 @@ export interface CalendarPushRouteDeps {
    *  built to be tested is a route nobody tests. `object` rather than `unknown` because
    *  `unknown | null` collapses to `unknown`, which would drop "or null" from the contract
    *  the route reads. `loadCollection` satisfies this. */
-  findCollection: (slug: string) => Promise<object | null>;
+  findCollection: (slug: string, scope: ProjectScope) => Promise<object | null>;
   push: typeof pushCalendarForCollection;
-  workspaceRoot: () => string;
+  /** The root this request runs against. ONE source for it: the engine lookup and the push
+   *  must agree, and a second reader is how they drift. Read per REQUEST, not at mount — the
+   *  routes go up before the collection host is configured, and (since core 3.0.0) that host
+   *  has no ambient root to read later either. */
+  scope: (req: Request) => ProjectScope;
 }
 
 const liveDeps: CalendarPushRouteDeps = {
   findCollection: loadCollection,
   push: pushCalendarForCollection,
-  // Read per request, not at mount: the collection host is configured after the routes go up.
-  workspaceRoot: getWorkspaceRoot,
+  scope: resolveProjectRoot,
 };
 
 /** Mount POST /api/collections/:slug/calendar-push — backs the collection view's Push
@@ -50,7 +54,8 @@ export function mountCalendarPushRoutes(app: Express, deps: CalendarPushRouteDep
     try {
       // A slug that names nothing is the one genuine 404 here: there is no collection to
       // report a push result for, and the view distinguishes 404 from a generic failure.
-      if (!(await deps.findCollection(slug))) {
+      const scope = deps.scope(req);
+      if (!(await deps.findCollection(slug, scope))) {
         res.status(404).json({ error: `collection '${slug}' not found` });
         return;
       }
@@ -63,7 +68,7 @@ export function mountCalendarPushRoutes(app: Express, deps: CalendarPushRouteDep
       // reports the bare `HTTP 400` and drops the body, which would turn a fixable setup
       // problem into a page-level "HTTP 400" beside no explanation at all. Reunifying the
       // two means teaching `fetchJson` to read the body — tracked separately.
-      const body = toCollectionPushResult(await deps.push(slug, deps.workspaceRoot()));
+      const body = toCollectionPushResult(await deps.push(slug, scope.workspaceRoot));
       hostLogger.info("calendar-push", "pushed via collection route", {
         slug,
         created: body.created,
@@ -75,7 +80,9 @@ export function mountCalendarPushRoutes(app: Express, deps: CalendarPushRouteDep
     } catch (err) {
       const error = err instanceof Error ? err.message : String(err);
       hostLogger.warn("calendar-push", "push threw", { slug, error });
-      res.status(500).json({ error });
+      // A request naming a project this server cannot serve is a client error, not a failure
+      // of the push — `errorStatus` keeps a query-parameter typo out of the 500 bucket.
+      res.status(errorStatus(err)).json({ error });
     }
   });
 }

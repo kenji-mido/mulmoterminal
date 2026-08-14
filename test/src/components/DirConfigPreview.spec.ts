@@ -6,7 +6,8 @@ const detail = (over: Record<string, unknown> = {}) => ({
   exists: true,
   file: "/proj/a/.mulmoterminal.json",
   config: { name: "proj", headerColor: "#2b3a55" },
-  source: { applied: ["name", "headerColor"], ignored: [], unknown: [] },
+  localFile: null,
+  source: { applied: ["name", "headerColor"], ignored: [], unknown: [], local: [] },
   ...over,
 });
 
@@ -110,5 +111,42 @@ describe("DirConfigPreview", () => {
     await w.setProps({ paths: ["/proj/b"] }); // the preset was deleted
     await flushPromises();
     expect(w.find('[data-testid="dir-preview-values"]').exists()).toBe(false);
+  });
+});
+
+// Two files means the panel has to say which one decided a value — and must not claim a file
+// beats one that is not there.
+describe("the local override file (#1430)", () => {
+  it("names both files and lists the keys the local one took over", async () => {
+    served = detail({
+      localFile: "/proj/a/.mulmoterminal.local.json",
+      source: { applied: ["name", "headerColor"], ignored: [], unknown: [], local: ["headerColor"] },
+    });
+    const w = mountPreview(["/proj/a"]);
+    await expand(w);
+    expect(w.get('[data-testid="dir-preview-local-file"]').text()).toContain("/proj/a/.mulmoterminal.local.json");
+    expect(w.get('[data-testid="dir-preview-local-file"]').text()).toContain("wins over the file above");
+    expect(w.get('[data-testid="dir-preview-local-keys"]').text()).toContain("headerColor");
+    expect(w.text()).toContain("those files");
+  });
+
+  // Codex on #1431: a directory may carry the local file ALONE, and saying it beats a file that
+  // does not exist sends the reader looking for one.
+  it("does not claim to beat a shared file that is not there", async () => {
+    served = detail({ file: null, localFile: "/proj/a/.mulmoterminal.local.json" });
+    const w = mountPreview(["/proj/a"]);
+    await expand(w);
+    const line = w.get('[data-testid="dir-preview-local-file"]').text();
+    expect(line).toContain("(this checkout only)");
+    expect(line).not.toContain("wins over the file above");
+    expect(w.text()).toContain("that file");
+    expect(w.text()).not.toContain("those files");
+  });
+
+  it("says nothing about a local file when there is none", async () => {
+    const w = mountPreview(["/proj/a"]);
+    await expand(w);
+    expect(w.find('[data-testid="dir-preview-local-file"]').exists()).toBe(false);
+    expect(w.find('[data-testid="dir-preview-local-keys"]').exists()).toBe(false);
   });
 });

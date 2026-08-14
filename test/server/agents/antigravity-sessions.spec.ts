@@ -3,8 +3,13 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { antigravityTitleFromTranscriptHead, antigravityTranscriptPath, listAntigravitySessions } from "../../../server/agents/antigravity-sessions.js";
-import type { AntigravityConversation } from "../../../server/session/antigravity-conversations.js";
+import {
+  antigravityModelFromTranscriptHead,
+  antigravityTitleFromTranscriptHead,
+  antigravityTranscriptPath,
+  listAntigravitySessions,
+} from "../../../server/agents/antigravity-sessions.js";
+import type { AgentConversation } from "../../../server/session/agent-conversations.js";
 
 // Captured verbatim from agy 1.1.9 (`agy -p`), so a format change breaks this rather than
 // quietly renaming every row. The point of the fixture is the wrapping: the prompt is inside
@@ -53,6 +58,48 @@ describe("antigravityTitleFromTranscriptHead", () => {
   });
 });
 
+describe("antigravityModelFromTranscriptHead", () => {
+  const settings = (sentence: string) => userInput(`<USER_REQUEST>\nhi\n</USER_REQUEST>\n<USER_SETTINGS_CHANGE>\n${sentence}\n</USER_SETTINGS_CHANGE>`);
+  const CHANGED =
+    "The user changed setting `Model Selection` from None to Gemini 3.6 Flash (High). No need to comment on this change if the user doesn't ask about it.";
+
+  // The same fixture the title tests read, so both sides of the block are pinned to one capture.
+  it("reads the model out of a real agy transcript head", () => {
+    expect(antigravityModelFromTranscriptHead(REAL_TRANSCRIPT_HEAD)).toBe("Gemini 3.6 Flash (High)");
+  });
+
+  it("stops at the sentence's period, not at the one inside the version", () => {
+    expect(antigravityModelFromTranscriptHead(settings(CHANGED))).toBe("Gemini 3.6 Flash (High)");
+  });
+
+  it("does not depend on the wording that follows the name", () => {
+    expect(antigravityModelFromTranscriptHead(settings("The user changed setting `Model Selection` from Gemini 3.6 Pro to Gemini 3.6 Flash."))).toBe(
+      "Gemini 3.6 Flash",
+    );
+  });
+
+  it("takes the last block, so a later change wins", () => {
+    const head = settings(CHANGED) + settings("The user changed setting `Model Selection` from Gemini 3.6 Flash (High) to Gemini 3.6 Pro. No need to comment.");
+    expect(antigravityModelFromTranscriptHead(head)).toBe("Gemini 3.6 Pro");
+  });
+
+  it("ignores a settings change that is not about the model", () => {
+    expect(antigravityModelFromTranscriptHead(settings("The user changed setting `Planning Mode` from None to Always. No need to comment."))).toBeNull();
+  });
+
+  // Every one of these is a session the badge labels `antigravity` instead of pasting prose into
+  // the cell header: a name is short, and anything else means the block moved.
+  it("names nobody when there is no block, no transcript, or a runaway capture", () => {
+    expect(antigravityModelFromTranscriptHead(userInput("<USER_REQUEST>\nno settings block\n</USER_REQUEST>"))).toBeNull();
+    expect(antigravityModelFromTranscriptHead("")).toBeNull();
+    expect(antigravityModelFromTranscriptHead(settings(`The user changed setting \`Model Selection\` from None to ${"x".repeat(60)}. Done.`))).toBeNull();
+  });
+
+  it("skips a corrupt line and a truncated final line", () => {
+    expect(antigravityModelFromTranscriptHead(`not json at all\n${settings(CHANGED)}{"step_index":9,"type":"USER_IN`)).toBe("Gemini 3.6 Flash (High)");
+  });
+});
+
 describe("listAntigravitySessions", () => {
   const tmpDir = path.join(os.tmpdir(), `ag-sessions-test-${Date.now()}`);
   const brainDir = path.join(tmpDir, "brain");
@@ -61,7 +108,7 @@ describe("listAntigravitySessions", () => {
   const ID_B = "5fd4f183-39d4-4842-8e03-114e966e7fa5";
   const ID_C = "7c1f0f6c-2b8e-4a5a-9d3e-0f2a1b3c4d5e";
 
-  const record = (over: Partial<AntigravityConversation> = {}): AntigravityConversation => ({
+  const record = (over: Partial<AgentConversation> = {}): AgentConversation => ({
     sessionId: "11111111-1111-4111-8111-111111111111",
     conversationId: ID_A,
     cwd: CWD,

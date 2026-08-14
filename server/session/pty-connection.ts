@@ -10,7 +10,7 @@ import type { WebSocket } from "ws";
 import { messageOf } from "../errors.js";
 import { isResizeFrame } from "./ws-frames.js";
 import { isRecord } from "../../common/isRecord.js";
-import { stripTerminalQueries, terminalModePrefix } from "./terminal-replay.js";
+import { boundedTail, stripTerminalQueries, terminalModePrefix } from "./terminal-replay.js";
 import type { PtyEntry } from "./types.js";
 
 /** A frame as it arrives off the socket. Only `toString()` is used — ws hands us a
@@ -18,6 +18,9 @@ import type { PtyEntry } from "./types.js";
 export type WireFrame = { toString(): string };
 
 export interface ConnectionDeps {
+  /** How much of a session's buffer the replay may carry. The buffer itself runs over it
+   *  (PtyEntry.buffer), so the bound is applied here, on the way out. */
+  outputBufferLimit: number;
   /** A reattach inside the grace window keeps the session alive. */
   cancelReap: (id: string) => void;
   /** Explicit close from the client — tear down now, don't wait out the grace. */
@@ -111,9 +114,14 @@ export function createConnectionHandlers(deps: ConnectionDeps) {
       // this into the normal buffer and the wheel stops reaching the app (#1073). Only a tmux
       // session can be asked; anything else replays as before.
       const prefix = entry.tmux ? terminalModePrefix(deps.terminalModesOf(sessionId)) : "";
-      // Strip terminal queries from the replay so xterm doesn't re-answer them as stray input
-      // (e.g. a DA reply surfacing as "0;276;0c" in the prompt) — see terminal-replay.ts.
-      const data = prefix + stripTerminalQueries(entry.buffer);
+      // Cut to the bound BEFORE stripping: the buffer runs over it (PtyEntry.buffer), and the
+      // strip is five regex passes that would otherwise sweep the overrun as well.
+      // Stripping keeps xterm from re-answering the replayed queries as stray input (e.g. a DA
+      // reply surfacing as "0;276;0c" in the prompt) — see terminal-replay.ts.
+      const data = prefix + stripTerminalQueries(boundedTail(entry.buffer, deps.outputBufferLimit));
+      // Whatever is queued for the next batched frame is already in that replay, so sending it
+      // too would draw it twice.
+      entry.output?.discard();
       if (data) ws.send(JSON.stringify({ type: "output", data }));
       // What that replay draws is only the part of the screen that changed inside the window, so
       // the real screen is asked for once the client reports the size it settled at, below.

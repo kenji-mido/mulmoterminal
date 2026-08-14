@@ -3,7 +3,7 @@ title: 設定 — 色・音・ランチャ・プロジェクト別の設定
 nav_title: 設定
 layout: default
 parent: 日本語
-nav_order: 6
+nav_order: 9
 description: MulmoTerminal の設定方法。設定モーダル、プロジェクトごとの色と名前、Enter の挙動、通知音、フォント、キーボードショートカット、環境変数まで、症状から引ける形で。
 ---
 
@@ -20,9 +20,12 @@ description: MulmoTerminal の設定方法。設定モーダル、プロジェ�
 | キーボードで**拡大するターミナルを切り替えたい** | [キーボードショートカット](#keymap) |
 | ロスターの1行が**長すぎる / 短すぎる** | [ロスターの行数](#cockpit-lines) |
 | セッションに**別のフォルダも見せたい** | [複数フォルダ](#add-dirs) |
+| 2つの `yarn dev` が **ポート 3000 を取り合う** | [worktree ごとのポート](#worktree-env) |
 | **worktree だけ別プロジェクトに見える** | [worktree はこのファイルを引き継ぐ](#worktree-inherit) |
 | 拡大しても **Canvas が出ない** / GUI ツールが使えない | [どのディレクトリで起動するか](basics.html#launch-dir) |
+| **Antigravity / Grok** だけ GUI ツールが無い（ワークスペースでも） | [Antigravity と Grok はどこでも登録が要る](basics.html#antigravity-gui-tools) |
 | **Claude 以外のモデル**で動かしたい | [プロバイダ](#providers) |
+| **自分のコマンド**で Claude Code を起動したい（`ollama launch claude …`） | [カスタムエージェント](#custom-agents) |
 | ヘッダーに**自分のボタン**を足したい | [ヘッダーのカスタマイズ](#header) |
 | **自分の配色**でアプリ全体を染めたい | [自分の配色を作る](#custom-themes) |
 | issue に**着手を知らせたい** | [issueWorkComments](#issue-work-comments) |
@@ -53,7 +56,7 @@ description: MulmoTerminal の設定方法。設定モーダル、プロジェ�
 > | **`/mulmoterminal-theme`** | 自分の[配色](#custom-themes)を作る。Settings のテーマ選択に並びます（Settings → **Create a theme…**） |
 > | **`/mulmoterminal-header`** | [ヘッダーのボタンとチップ](#header)。global でもプロジェクト単位でも |
 > | **`/mulmoterminal-keys`** | [`keymap`](#keymap)・[`copyOnSelect`](#copy-on-select)・[`terminalSubmit`](#terminal-submit)（「Shift+Enter で改行ではなく送信されてしまう」の対処）（Settings → **Set up shortcuts…**） |
-> | **`/mulmoterminal-model`** | [`providers`](#providers)、プロジェクトごとのモデル |
+> | **`/mulmoterminal-model`** | [`providers`](#providers)、プロジェクトごとのモデル、[`customAgents`](#custom-agents) |
 > | **`/mulmoterminal-notify`** | [どの瞬間に鳴らす・通知するか](#sounds)、それぞれ何を鳴らすか（Settings → **Configure notifications…**） |
 >
 > **UI が一切ない設定**に手が届く唯一の対話的な経路でもあります。手編集でも構いません（このページに全フィールドの
@@ -70,28 +73,65 @@ description: MulmoTerminal の設定方法。設定モーダル、プロジェ�
 
 ツールバーの **Settings**（歯車）から開きます。
 
-![設定モーダル — Theme（Create a theme… ボタン付き）/ Terminal font size / Terminal scroll speed / Waiting rows（点滅のチェックボックス）/ Directory appearance / Directory settings（acme-web の行を開いた状態）](../images/config-settings-modal.png)
+タイトルのすぐ下に **Version** の行があり、**いま動いているビルド**が出ます。npm で入れたなら `4.7.0`、
+git チェックアウトならその横に `commit a1b2c3d` のチップが並びます（チェックアウトの場合、バージョン番号は
+最後のリリース時点のものなので、ビルドを特定するのはコミットのほうです）。新しいものがあるときは、ヘッダーの
+バッジと同じ更新通知（実行するコマンド込み）が次の行に続きます。バグ報告に貼るのはこの行です。
 
-上から順に、最大 17 セクションがあります（**Voice input** は文字起こしできるマシンでのみ出るので、多くの環境では 16）。
+![設定モーダル — 左サイドバーの Appearance から Sessions までのグループと、開いている Theme（Create a theme… ボタン付き）](../images/config-settings-modal.png)
+
+**左のサイドバー**がセクションをグループ分けし、一度に 1 つだけ表示します（`sm` 未満、つまりスマホでは
+セクションの上のセレクタになります）。9 グループ・25 セクション（**Voice input** は文字起こしできる
+マシンでのみ出るので、多くの環境では 24）。
+
+セクションをスキルに引き渡すボタン（「Create a theme…」「Configure notifications…」など）は、押すと
+**確認を出します**。新しいグリッドセルでエージェントのセッションが始まるので、何が起きるか・やめ方
+（そのセルを閉じる）をダイアログが説明します。**キャンセル**なら何も起きず、設定は開いたままです。
+
+![skill ボタンの確認ダイアログ — 何が始まるか、やめ方、キャンセル / 開始](../images/skill-launch-confirm-ja.png)
+
+設定画面は**英語と日本語**で表示できます。既定ではブラウザの言語に従い、**Language（言語）**で明示的に
+選ぶこともできます。Language をサイドバーの先頭に置いてあるのは、画面の他が読めない人が最初に探すのが
+この設定だからです。いまのところ訳されているのはこのモーダルだけで、他の画面は英語のままです。
+
+- **Appearance** — Language, Theme, Terminal font, Terminal font size, Terminal scroll speed, Waiting rows
+- **Projects** — Directory appearance, Directory settings
+- **Header & launch** — Launch commands, Header buttons and chips
+- **Input** — Terminal keys, Keyboard shortcuts, Voice input
+- **Models & servers** — Models and backends, MCP servers
+- **Notifications** — Notification sounds, Web Push notifications, Phone quick commands
+- **Integrations** — GitHub and GitLab, Pull request repos, Google account
+- **Sessions** — Sessions and background tasks, Sessions that survived a restart, Cost (estimated)
+- **Help** — Help & user guide
+
+![日本語表示の設定モーダル — サイドバーのグループと通知音のペイン](../images/settings-japanese.png)
 
 | 項目 | 内容 |
 |---|---|
+| **Language** | 設定画面自身の表示言語（ブラウザの言語＝既定 / English / 日本語）。配色と同じくブラウザごとで、設定ファイルではなく `localStorage` に保存されます |
 | **Theme** | Midnight / Nord / Daylight / Solarized Light、および[自分で定義した配色](#custom-themes)。選ぶのは既にあるものだけで、新しく作るのは「Create a theme…」（`mulmoterminal-theme` スキルを起動） |
+| **Terminal font** | 全ターミナルの font-family スタック（`fontFamily`）。サイズと違い**グローバル** — どのフォントが入っているかはマシンの性質だからです。空欄なら内蔵スタック（→ [ターミナルのフォント](#font-family)） |
 | **Terminal font size** | ターミナル（xterm）のフォントサイズ（px, 8〜32）。**このブラウザ**の全ターミナルに適用され、スマホと PC でそれぞれ別の値を保持します。ディレクトリ側の `fontSize`（[後述](#per-dir)）が優先されます |
 | **Terminal scroll speed** | ホイール1ノッチ／トラックパッドの1スワイプでターミナルがどれだけ動くか（1× が xterm 既定）。フォントサイズと同じくブラウザ単位 — ポインティングデバイスの性質なので |
-| **Waiting rows** | 拡大したセルの横（下）に出る一覧で、**入力を待っている**行に琥珀色のリングが付いて点滅し、**終わっただけ**の行は緑で静止します。チェックを外すと止まるのは**動きだけ**で色は残ります。OS が「視差効果を減らす」設定のときは点滅しません |
+| **Waiting rows** | 拡大したセルの横（下）に出る一覧で、**入力を待っている**行に琥珀色のリングが付いて点滅し、**終わっただけ**の行は緑で静止します。チェックを外すと止まるのは**動きだけ**で色は残ります。OS が「視差効果を減らす」設定のときは点滅しません。下の 3 つのステッパーは各行を何行で打ち切るか（`cockpitLines` → [ロスターの行](#cockpit-lines)） |
 | **Directory appearance** | 「Configure appearance…」— ディレクトリの名前バッジ・色・ターミナルのパレット・グリッド上の位置を、`mulmoterminal-dirs` スキルで対話的に設定 |
 | **Directory settings** | 各ディレクトリの `.mulmoterminal.json` が**実際に何をしているか**。行を開くと、効いている値（色は見本付き）・**どのファイル由来か**・**検証で落ちたキー**・**このアプリが読まないキー**が出ます。読み取り専用 — 「Explain my settings…」で `mulmoterminal-config` スキルが同じものを読み、理由を説明して直します（→ [設定が効かないとき](#dir-settings-preview)） |
-| **Notification sounds** | どの瞬間に鳴らすか＋それぞれ何を鳴らすか。種類ごとに1行、プリセット選択と試聴ボタン付き。「Configure notifications…」で `mulmoterminal-notify` スキルを起動すると、プロジェクトごとの音やスマホに通知する瞬間まで設定できます（→ [通知音](#sounds)） |
-| **Voice input** | 音声入力で**話す言語**（ブラウザの言語 / 発話ごとの自動検出 / 固定）。文字起こしできるマシンでだけ表示されます |
-| **Web Push notifications** | 「Notify my devices when a task finishes」トグル（既定 OFF → [スマホ通知](notifications.html)） |
-| **Google account** | Calendar 連携用の Google サインイン（RemoteHost の Connect とは別物） |
-| **Pull request repos** | 横断 PR/Issue ビューが集約するリポ（`owner/repo`） |
 | **Launch commands** | グリッドセルでエージェント以外に起動できるコマンド（`{ label, command }`）。素のシェルは登録不要 — ランチャの **Shell** トグルが無設定で `$SHELL` を開く |
-| **Phone quick commands** | **スマホ**のターミナル表示にチップとして並ぶ定型文。タップで入力欄に入るだけで、送信は送信ボタンを押したとき（`quickCommands`） |
-| **MCP servers** | 自分の HTTP MCP サーバ（`userMcpServers`）。GUI MCP をフルで持つセッション — 作業ディレクトリが**ワークスペース**のセル、およびサーバ自身が起こしたセッション（スマホ・スケジュールタスク）— にマージされます。プロジェクトディレクトリのセルは自前の MCP 設定を読みます（→ [どのディレクトリで起動するか](basics.html#launch-dir)） |
-| **Cost (estimated)** | Session / Today / Month の推定コスト表示 |
+| **Header buttons and chips** | グローバル設定で宣言しているボタンとチップの数（読み取り専用）。未設定なら「built-in」。「Set up header buttons…」で `mulmoterminal-header` スキルを起動（→ [ヘッダーのカスタマイズ](#header)） |
+| **Terminal keys** | [選ぶだけでコピー](#copy-on-select)（`copyOnSelect`、既定 OFF）と、あなたの Claude が**送信**として読むバイト（[Enter — 送信と改行](#terminal-submit)、`terminalSubmit`） |
 | **Keyboard shortcuts** | 今どのキーに何が割り当たっているかの一覧（読み取り専用）。**既定は全部 Not set** — 「Set up shortcuts…」で `mulmoterminal-keys` スキルが `keymap` に書きます（→ [キーボードショートカット](#keymap)） |
+| **Voice input** | 音声入力で**話す言語**（ブラウザの言語 / 発話ごとの自動検出 / 固定）。文字起こしできるマシンでだけ表示されます |
+| **Models and backends** | セッションを動かせるバックエンドと、**今それぞれ到達できるか**（読み取り専用）。「Add a backend…」で `mulmoterminal-model` スキルを起動（→ [別のモデルで動かす](providers.html)） |
+| **MCP servers** | 自分の HTTP MCP サーバ（`userMcpServers`）。GUI ツールを全部持つ **Claude の**セッション — 作業ディレクトリが**ワークスペース**のセル、およびサーバ自身が起こしたセッション（スマホ・スケジュールタスク。ただし issue の seed セッションはグリッドのセルと同じ形で起こされるため除きます）— にマージされます。プロジェクトディレクトリのセルと Codex には合流しません（`.mcp.json` など**自分で書いた Claude の MCP 設定は、どちらのディレクトリでも読まれます**。→ [どのディレクトリで起動するか](basics.html#launch-dir)） |
+| **Notification sounds** | どの瞬間に鳴らすか＋それぞれ何を鳴らすか。種類ごとに1行、プリセット選択と試聴ボタン付き。「Configure notifications…」で `mulmoterminal-notify` スキルを起動すると、プロジェクトごとの音やスマホに通知する瞬間まで設定できます（→ [通知音](#sounds)） |
+| **Web Push notifications** | 「Notify my devices when a task finishes」トグル（既定 OFF → [スマホ通知](notifications.html)） |
+| **Phone quick commands** | **スマホ**のターミナル表示にチップとして並ぶ定型文。タップで入力欄に入るだけで、送信は送信ボタンを押したとき（`quickCommands`） |
+| **GitHub and GitLab** | このアプリが**あなたの名前で** forge に書き込むもの。セルが [issue に着手を知らせるか](#issue-work-comments)（`issueWorkComments`、既定 OFF）と、作った PR の末尾に[クローン名を書くか](#pr-workdir-footer)（`prWorkdirFooter`、既定 ON）。その下は `glab` で読む[セルフホスト GitLab のホスト](github.html#自前ホスティングの-gitlab)（`gitlabHosts` — 反映は次回起動時） |
+| **Pull request repos** | 横断 PR/Issue ビューが集約するリポ（`owner/repo`） |
+| **Google account** | Calendar 連携用の Google サインイン（RemoteHost の Connect とは別物） |
+| **Sessions and background tasks** | 返信を[まとめで終わらせるか](#append-system-prompt)（`appendSystemPrompt`、既定 ON — ディレクトリ側の設定が優先）、[決めたことの記録を残すか](#decision-digest)（`decisionDigest`、既定 OFF）、[定期の開発ログ](#all-keys)とその間隔（`worklogEnabled`、既定 OFF — 実行のたびにトークンを消費します） |
+| **Sessions that survived a restart** | 以前のサーバから動き続けているターミナルを、**全ディレクトリ横断**で一覧。もう開かないプロジェクトのセッションや、素のシェルを見て終了できる唯一の場所です。各行に「どこで動いているか・何なのか（キーに紐づく会話が無ければ `shell or unknown`）・どれだけ放置されているか・終了して失うものがあるか」が出ます。**stop** はそのセッションだけを終了し、transcript のある会話はあとで再開できます。ターミナルが掴んでいる行は代わりに `● open` と出て、そちらで閉じます。この節では `sessionIdleReapDays`（何日放置したらサーバが自動で終了するか）も変更でき、その対象になる行には **ends at next start** と出ます |
+| **Cost (estimated)** | Session / Today / Month の推定コスト表示 |
 | **Help & user guide** | このガイドへのリンク集 |
 
 ## 設定が効かないとき — まずここを見る {#dir-settings-preview}
@@ -145,6 +185,170 @@ Anthropic のまま別のモデルを指定できます。→ [OpenRouter で別
 ```
 
 すべて `#rrggbb`。作業中/要対応の状態色は、これらの背景色より優先されます（アイドル時に反映）。
+
+`headerTextColor` を省くと、ヘッダーの文字（パス・タイトル・モデル/コンテキストやトークンのチップ）は
+`headerColor` から読みやすい色が導出されます。
+
+`headerColor` と `headerTextColor` は **アイドル時**の組み合わせで、効くのは「その色が実際に出ているとき」
+だけです。作業中・完了・要対応のセルはヘッダー背景をテーマの状態色に置き換えるので、その間の文字は
+テーマの色に戻ります。あなたのヘッダー色に合わせて選んだ文字色は、テーマが混ぜた状態色の上では読めないためです。
+
+状態ごとに色を変えたいときは、その状態を名指しします。
+
+```json
+{
+  "headerColor": "#0b2545",
+  "headerStatusColors": {
+    "working": "#6d28d9",
+    "done": { "background": "#166534" },
+    "blocked": { "background": "#7c2d12", "text": "#ffe8a3" }
+  }
+}
+```
+
+指定できるのは `working` / `done` / `blocked` だけです（`idle` はありません。`headerColor` がアイドルそのものです）。
+名指ししなかった状態はテーマの状態色のままです。**`text` を省けば背景から読める色が導出される**ので、
+背景だけ指定して読めなくなることはありません。
+
+自分の色をそのまま保ちたいときは `"headerStatusTint": "none"`。**作業中**と**完了**の間も `headerColor` が
+残り、状態はセルの枠線・ステータスドット・ピルが伝えます。**要対応（blocked）には意図的に効きません** —
+答えるまで何も進まない唯一の状態なので、`headerStatusColors.blocked` で別の色を指定しない限り
+テーマの amber を保ちます。
+
+どちらのキーも `~/.mulmoterminal/config.json` に書けます。そこでは全ディレクトリの既定値になり、
+`.mulmoterminal.json` がどちらかを書いていれば、そのディレクトリではそちらが優先されます。
+
+### `repo.json` を持つリポジトリ {#repo-json}
+
+[`repo.json`](../../repo-json.html) は**オープンなリポジトリメタデータの規格**です。リポジトリの
+ルートに置く小さな1ファイルで、どのツールからも読めます。MulmoTerminal もこれを読むので、
+このアプリの存在を知らないプロジェクトでも、名前・色・アイコンの付いたセルになります。
+
+```json
+{
+  "name": "diffusion-lab",
+  "description": "Training and evaluation for latent diffusion models",
+  "icon": "docs/logo.png",
+  "color": "#7c3aed"
+}
+```
+
+- **`name`** → バッジ
+- **`icon`** → セルのアイコン。文字列でも、サイズ付きの配列でも可。使える中で最良のものが選ばれます
+- **`color`** → **7色すべて**。ヘッダーはその色そのもの、バッジ・枠・ステータスドット・ボタン・
+  セル本体はその色相から導出、ヘッダーの文字色はコントラストから導出（宣言しません）。
+  `color.background` はセル本体を直接指定します
+- **`extensions.mulmoterminal`** → オープン規格に無い、このアプリ固有のもの。`theme` /
+  `orderPriority` / `sound` など、このページの他のキー
+
+3つのファイルは一般 → 具体の順に重なります。
+
+```
+repo.json  →  .mulmoterminal.json  →  .mulmoterminal.local.json
+プロジェクト     このアプリの設定        この checkout
+```
+
+下の層が設定したキーを、上の層が置き換えます。`repo.json` だけで完結してもよく、逆に
+`.mulmoterminal.json` の色は `repo.json` の色に勝ちます — ブランド色を一日中見ていたくない
+プロジェクトで、自分の配色を保つのはこの方法です。
+
+### 同じリポジトリを何本も clone しているとき（`.mulmoterminal.local.json`） {#local-config}
+
+1つのリポジトリを `acme` / `acme2` / `acme3` と並行して開いているとき、プロジェクトとしては
+同じものなので、**違うべきなのはグリッドで見分けるための色だけ**です。共有ファイルの隣に
+`.mulmoterminal.local.json` を置きます。
+
+```jsonc
+// .mulmoterminal.json — プロジェクトの設定。色も含めて単体で完結しているので、
+// clone を1本しか持たない人はこれだけでよい。コミットして構わない
+{
+  "name": "acme-web",
+  "theme": "nord",
+  "badgeColor": "#1b3479",
+  "headerColor": "#2d4ea9",
+  "headerTextColor": "#ffffff",
+  "orderPriority": 30
+}
+
+// .mulmoterminal.local.json — この clone だけ。.gitignore に入れる
+{
+  "badgeColor": "#27b4a8",
+  "headerColor": "#4ed0c5",
+  "orderPriority": 65
+}
+```
+
+- **local が勝つ（キー単位）。** local に書いていないキーは共有ファイルの値のままです
+- **キーごと丸ごと置き換え。深いマージはしません。** local の `colors` は共有側の `colors` を
+  丸ごと置き換えます。1キー = 1つの意図であり、2つのファイルから組み立てないと分からない
+  パレットより、1か所で読み切れる方が予測しやすいからです
+- **検証は同じように効きます。** local は規則を迂回する手段ではありません。`#rrggbb` でない色は
+  共有ファイルに書いたときと同じように落とされます
+- **相対パスの意味も同じ**（`icon` / `sound` / `addDirs`）。ファイルではなくディレクトリ基準で
+  解決されます
+- **どちらか片方だけでも動きます。** local だけの clone もあり得ますし、片方が壊れていても
+  もう片方は生きたままです
+- **どちらを書き換えてもライブリロードします。** 自分の clone の色を変えれば即座に反映されます
+
+設定 → [設定が効かないときは](#dir-settings-preview) が両方のパスと、local が持っていったキーの
+一覧を出します。「変えたのにセルが違う」ときの答えはたいていこれです
+
+### プロジェクトのアイコン（`icon`） {#dir-icon}
+
+`icon` は名前バッジの隣に**画像**を出します。プロジェクトのロゴを置いておけば、文字を読む前に
+どのセルか分かります。
+
+```jsonc
+{
+  "icon": "docs/logo.png",                  // このディレクトリ内のファイル
+  // "icon": "https://example.com/logo.svg" // URL でも
+  // "icon": "data:image/png;base64,iVBO…"  // 画像を直接埋め込んでも
+}
+```
+
+出る場所は、**セルのヘッダー**、拡大時の **cockpit ロスター**と**フィルムストリップのサムネイル**、
+**ランチャのディレクトリチップ**、そして[スマホ](phone.md)の**ターミナル一覧とターミナル画面**。
+起動前も起動後も、PC でもスマホでも、同じ絵で見分けられます。
+
+- **パスはこのディレクトリからの相対**です。絶対パスや `../` で外に出るものは拒否されます
+  （`sound` と同じ扱い。開いたプロジェクトがマシン上の別の場所を指せないようにするためです）
+- **形式**: PNG / JPEG / **GIF（アニメーションはそのまま動きます）** / WebP / AVIF / SVG / ICO / BMP。
+  これ以外の拡張子は無視されます
+- **画像はリポジトリにコミットしておく**のがおすすめです。clone した直後から、また
+  [worktree](#worktree-inherit) を切った直後からアイコンが付きます（`icon` は書いたままの文字列で
+  引き継がれるので、同じ相対パスが worktree 側でも解決します）
+- 解決できなくなったアイコン（ファイル名変更、URL 先がダウン）は、単に表示されません。実際に何が
+  適用されたかは 設定 → [設定が効かないときは](#dir-settings-preview) で確認できます
+- ヘッダー**ボタン**の `icon` とは別物です。あちらは
+  [Material Symbols](https://fonts.google.com/icons) のアイコン名で、画像ではありません
+
+### favicon は勝手に拾われます {#auto-dir-icon}
+
+たいていの場合 `icon` を書く必要はありません。**未設定**のディレクトリは、そのリポジトリが
+既に持っているアイコンを表示します。
+
+1. `public/favicon.svg` → `favicon.svg`
+2. `public/apple-touch-icon.png` → `apple-touch-icon.png`
+3. `public/favicon.png` → `favicon.png`
+4. `public/favicon.ico` → `favicon.ico`
+5. web manifest（`public/site.webmanifest` / `public/manifest.json` / ルートの同名）の
+   `maskable` でない最大のアイコン
+
+最初に見つかったものが勝ちます。並び順は「よくある順」ではなく「14px で描いたときに崩れない順」です。
+`docs/logo.png` や `assets/logo.*` は**あえて探しません** — 「ロゴ」は README 用の横長バナーであることも
+多く、それを 14px 四方に押し込むとただの染みになるからです。
+
+切り方は2つあり、意味が違います。
+
+- **`"icon": false`**（プロジェクトのファイル）— *そのプロジェクト*のセルにアイコンを出さない。
+  worktree にも引き継がれます
+- **`autoDirIcon: false`**（`~/.mulmoterminal/config.json`）または
+  設定 → *Directory appearance* のチェックボックス — 全体で off。挙動そのものが不要ならこちらです。
+  全リポジトリに `"icon": false` を書いて回るのは違います
+
+**書き間違えたキーは favicon にフォールバックしません。** `"icon": "logo.png"` の指す先が無い場合、
+セルにはアイコンが出ません（意図的です — 壊れた設定は壊れて見えるべきなので）。
+設定 → [設定が効かないときは](#dir-settings-preview) に、落ちたキーとして出ます。
 
 ### このディレクトリの通知音
 
@@ -233,14 +437,20 @@ auto（注目度順）と manual（移動ボタンで手動）と並びます。
 
 ### worktree はこのファイルを引き継ぐ {#worktree-inherit}
 
-`.mulmoterminal.json` は通常 gitignore されているので、プロジェクトから切った
-[worktree](glossary.html#git-worktree) には何も入っていませんでした。色も名前もモデルも順位も無く、
-グリッドの末尾に灰色のセルが1つ増えるだけ — 無関係なプロジェクトに見えていました。
+> worktree の作り方・制約・片付けは [worktree で作業を隔離する](worktree.html)へ。ここはその
+> **設定ファイルの引き継ぎ規則**です。
 
-いまは新しい worktree に、プロジェクトの設定から作った専用のコピーが置かれます。
+プロジェクトから切った [worktree](glossary.html#git-worktree) には何も入っていませんでした。色も名前も
+モデルも順位も無く、グリッドの末尾に灰色のセルが1つ増えるだけ — 無関係なプロジェクトに見えていました。
 
-- **同一性はそのままコピー** — `name` / `theme` / `colors` / `fontSize` / `fontFamily` /
-  `provider` / `model`。同じプロジェクト、同じターミナル、同じモデルです
+いまは新しい worktree に、プロジェクトの設定から作った専用のコピーが置かれます。書き込み先は
+**`.mulmoterminal.local.json`**（[前述](#local-config)）で、リポジトリがコミットした共有設定の上に重なり、
+worktree の `git status` を汚しません。
+
+- **同一性はそのままコピー** — `name` / `icon` / `theme` / `colors` / `fontSize` / `fontFamily` /
+  `provider` / `model`。同じプロジェクト、同じターミナル、同じモデルです。`icon` は解決後のファイルでは
+  なく**書いたままのパス**で渡るので、リポジトリにコミットされたロゴなら worktree 側でも見つかります
+  （gitignore されている画像なら、worktree には出ないだけです）
 - **セルの色は色相を少しずつ回す** — `badgeColor` / `headerColor` / `headerTextColor` /
   `cellColor` / `cellBorderColor` / `dotColor` / `buttonColor`。1本ごとに 12 度ずつ進むので、
   並べるとグラデーションになります。「このプロジェクトだ」と分かり、かつ「どの worktree か」も分かる状態です。
@@ -249,14 +459,21 @@ auto（注目度順）と manual（移動ボタンで手動）と並びます。
   プロジェクトが順位を宣言しているときだけで、未設定なら worktree も未設定のままです
 - **`sound` / `sounds` / `addDirs` は引き継ぎません**。これらはプロジェクトのディレクトリ内のパスを指しており、
   worktree にその実体はありません。`addDirs` にいたっては worktree 基準で解決され、黙って別のフォルダを許可してしまいます
+- **[`worktreeEnv`](#worktree-env) はそのまま引き継ぎます**。これは値ではなく「宣言」だからで、
+  worktree は宣言をもとに自分専用のポートと DB 名を予約します。引き継がないと、その worktree だけが
+  相変わらず 3000 を取り合うことになります。
 
 書き込まないケースが2つあります。どちらも意図的です。
 
-- **プロジェクトの config が gitignore されていない場合。** worktree の `git status` に未追跡ファイルとして出てしまいます。
-  これは単に汚いだけではありません。MulmoTerminal は未コミットの変更がある worktree の削除を拒否するので、
-  掃除できない worktree になります。リポジトリの `.gitignore` に `.mulmoterminal.json` を足せば、次の worktree から色が付きます
-- **worktree に既にファイルがある場合**（リポジトリにコミットされている、または自分で書いた）。そのファイルが答えなので、
-  MulmoTerminal が上書きすることはありません
+- **そのリポジトリでどちらのファイルも gitignore されていない場合。** 書いたファイルが worktree の
+  `git status` に未追跡ファイルとして出てしまいます。これは単に汚いだけではありません。MulmoTerminal は
+  未コミットの変更がある worktree の削除を拒否するので、掃除できない worktree になります。リポジトリの
+  `.gitignore` に `.mulmoterminal.local.json` を足せば、次の worktree から色が付きます。
+  このファイルが無かった頃の設定（`.mulmoterminal.json` を ignore している）もそのまま動きます —
+  そちらはフォールバックとして使われます
+- **worktree に既に local ファイルがある場合**（自分で書いた、または前回の作成で書かれた）。そのファイルが答えなので、
+  MulmoTerminal が上書きすることはありません。**共有**設定がコミットされていても止まりません — それは local が
+  上に重なる相手だからです
 
 コピーは作成時に1度だけ取られ、以後は worktree のものです。あとからプロジェクト側の色を変えても、
 既存の worktree は与えられた色のままです。変えたいときは worktree 側のファイルを編集するか削除してください。
@@ -266,7 +483,12 @@ auto（注目度順）と manual（移動ボタンで手動）と並びます。
 MulmoTerminal の「**拡張**」の柱がここ。稼働中ターミナルのヘッダーを、**小さな DSL** で自分のワークフローに合わせて成形できます。
 どんな開発者でも、よく使う操作をワンクリックにし、見たい情報だけを出せる——それがこの仕組みの狙いです。
 
-**ボタン**（`buttons`）— 稼働中セッションに効く操作ボタン。表示は `icon`（Material Symbol 名）＋ `label`、`order` で並び順を指定できます。
+> **はじめての 1 個は [ヘッダーをカスタマイズする](header.html) へ。** スクリーンショット付きで、
+> ヘッダーの読み方から順に説明しています。ここは**全フィールドのリファレンス**です。
+
+**ボタン**（`buttons`）— 稼働中セッションに効く操作ボタン。**描かれるのは `icon`（Material Symbol 名）だけ**で、
+`label` は**ホバーで出るツールチップ**（と読み上げ名）になります。画面に文字は出ないので、`label` は
+そのボタンが何をするか分かる文にしてください。`icon` も `emoji` も無いときは `bolt` が出ます。`order` で並び順を指定できます。
 未設定なら**組み込みの既定セット**が表示されます: **Insert a file path**・**Open this branch's PR**（git リポかつ PR がある時のみ）。`buttons` をどこかで書くと既定セットは**丸ごと置き換え**られます（マージ**されません**）。つまり自分のリストを書けば——**短い**リストでも——並べ替え・削減・差し替えができます。
 
 *Reveal in the file manager*・*Browse files in the app*・*New terminal here*・*Open on GitHub* も以前は既定ボタンでした。今は**パスメニューの項目**です（ターミナルのヘッダー行にあるディレクトリのパスをクリック）。どれも「このディレクトリに対して何かする」で、それはパス自身が表していることなので、常設アイコン4つ分の場所に見合いませんでした。設定としては何も変わっていません。自分で書けば従来どおりボタンとして動きます——メニューは固定なので、その場合は両方に出ます。
@@ -283,7 +505,7 @@ MulmoTerminal の「**拡張**」の柱がここ。稼働中ターミナルの�
 ```
 
 - `run: "input"` … 稼働中の Claude/Codex に `text` を送信（例 `/compact`）。
-- `run: "open"` … `url`（ブラウザ, http/https のみ）/ `reveal`（OSのファイルマネージャ: Finder/Explorer/xdg-open）/ `files`（アプリ内エクスプローラ）/ `pickFile`（OSのファイル選択でパス挿入）/ `terminal`（そのディレクトリで新しい端末セルを開く）/ `pr`（現在ブランチの PR をブラウザで開く）/ `view`（`diff`/`prs`/`wiki`/`collections`/`accounting`）。
+- `run: "open"` … 1 ボタンに 1 つだけ書きます。複数書いた場合は**次の順で最初の 1 つだけ**が効きます: `pr`（現在ブランチの PR。サーバ側で `url` に解決されるため、`url` を併記しても PR が勝つ）/ `url`（ブラウザ, http/https のみ）/ `reveal`（OSのファイルマネージャ: Finder/Explorer/xdg-open）/ `files`（アプリ内エクスプローラ）/ `view`（`prs`/`wiki`/`collections`/`accounting`。`diff` も受け付けるが専用画面が無く、現状はファイルビューにフォールバックする）/ `terminal`（そのディレクトリで新しい端末セルを開く）/ `pickFile`（OSのファイル選択でパス挿入）。
 - `run: "shell"` … `cmd` をコマンドセルで実行（サーバ側で id 解決 + `${変数}` はシェルエスケープ、コマンドはブラウザに渡らない）。
 - `${変数}` … `dir` `dirName` `branch` `repo` `remoteUrl` `ahead` `behind` `dirty` `agent` `model` `task` `session`。
 - `when` … `isGitRepo` / `agent == …` / `repo == …`（`&&` / `||`、`&&` が優先）。
@@ -294,8 +516,11 @@ MulmoTerminal の「**拡張**」の柱がここ。稼働中ターミナルの�
 { "chips": ["ctx", "git", { "label": "env", "text": "⎇ ${branch}", "when": "isGitRepo" }] }
 ```
 
-- 組み込み `dir` / `git` / `work` / `diff` / `ctx` / `usage` / `status` / `tools` … 並べた順に表示、書かなければ非表示。
-- カスタム `{ label, text, when }` … 読み取り専用テキスト（`text` は `${変数}` 展開）。
+- **並べ替え・非表示にできるのは `git` / `work` / `diff` / `ctx` / `usage` / [`env`](#worktree-env) の 6 つだけ**です。書いた順に並び、書かなければ出ません。
+- `dir`（プロジェクトバッジ）/ `status`（状態ドット）/ `tools`（2 段目のツール履歴）は**セルの構造**なので、
+  書いても効かず、書かなくても消えません。スキーマは受け付けるためエラーにはならず、黙って無視されます。
+- カスタム `{ label, text, when }` … 読み取り専用テキスト。**出るのは `text`**（`${変数}` 展開あり）で、
+  `label` はボタンと同じく**ツールチップ**です。
 
 #### `work` — そのセルが今どの PR / issue をやっているか {#work-chip}
 
@@ -316,7 +541,7 @@ MulmoTerminal の「**拡張**」の柱がここ。稼働中ターミナルの�
 
 ### Skill メニューの絞り込み（`skills`）
 
-ヘッダーの **Skill**（雷のアイコン） はそのディレクトリで使えるスキル（`<project>/.claude/skills` と `~/.claude/skills`）を一覧します。working dir（プロジェクト）のスキルが先頭、その後にユーザースコープ。選ぶと**今のセッション**でそのスキルを実行します（Claude は `/<slug>`、Codex は `Use the "<slug>" skill.`）。
+ヘッダーの **Skill**（雷のアイコン） はそのディレクトリで使えるスキル（`<project>/.claude/skills` と `~/.claude/skills`）を一覧します。working dir（プロジェクト）のスキルが先頭、その後にユーザースコープ。選ぶと**今のセッション**でそのスキルを実行します（Claude は `/<slug>`、他のエージェントは `Use the "<slug>" skill.`）。
 
 `skills` を書くと**その slug だけを、その並び順で**表示する許可リストになります。**書かなければ全部**表示。
 
@@ -620,6 +845,11 @@ Shift+Enter が改行ではなく*送信*になってしまう場合だけ**で�
 
 ### 設定方法
 
+手っ取り早いのは **Settings → Terminal keys** で、両モードが挙動の言葉で並んでいます。このタブには
+すぐ反映されますが、スマホのリモートビューは次回のサーバ起動で拾います（下の手順 3）。
+
+手で書く場合:
+
 1. `~/.mulmoterminal/config.json` を開き（無ければ作成）、トップレベルにキーを追加します。逆向きの
    割り当てなら次の通り:
    ```json
@@ -693,14 +923,15 @@ Shift+Enter が改行ではなく*送信*になってしまう場合だけ**で�
 
 ## ターミナルのフォント — 日本語が崩れるとき（`fontFamily`） {#font-family}
 
-全ターミナルが描画に使うフォントです。**設定モーダルに UI はありません**——
+全ターミナルが描画に使うフォントです。**Settings → Terminal font** で設定できます。あるいは
 `~/.mulmoterminal/config.json` に CSS の font-family スタックを書きます。
 
 ```json
 { "fontFamily": "'Cica', 'ＭＳ ゴシック', monospace" }
 ```
 
-書いたら **`mulmoterminal` を再起動**し、ブラウザのタブを再読み込みしてください。グローバル設定は
+設定モーダルから変えた場合は開いているターミナルにすぐ反映されます。**手で書いた**場合は
+**`mulmoterminal` を再起動**し、ブラウザのタブを再読み込みしてください。グローバル設定は
 サーバ起動時に一度だけ読まれるため、手編集は再起動するまでブラウザに届きません——[`keymap`](#keymap) や
 [`terminalSubmit`](#terminal-submit) と同じ注意点で、「設定したのに効かない」の典型的な原因です。
 **ディレクトリごと**の指定（[後述](#per-dir)）はサーバ再起動こそ不要ですが、ファイル監視で拾われる
@@ -749,7 +980,9 @@ PuTTY や iTerm2 が昔からそうなっている挙動で、Windows Terminal �
 { "copyOnSelect": true }
 ```
 
-設定ファイルのみで、設定モーダルにはありません。反映にはサーバの再起動が必要です。
+**Settings → Terminal keys** にチェックボックスがあり、こちらは即座に反映されます。ファイルを手で
+書いた場合は**サーバを再起動してから、タブを再読み込み**してください（このファイルはサーバ起動時に
+一度だけ読まれ、ブラウザはその値をページ読み込み時にサーバから受け取ります）。
 
 [`copy` のキーバインド](#keymap)とは併用できます。キーボードで選択したものをコピーしたい場合など、
 キーからも使いたければ `copy` の割り当ては残したままで構いません。
@@ -1006,6 +1239,8 @@ macOS は `Option` を代替文字やアクセントの入力に使うため、`
 { "cockpitLines": { "summary": 6, "prompt": 2, "response": 3 } }
 ```
 
+**Settings → Waiting rows** の 3 つのステッパーからも変えられます。
+
 | 項目 | 打ち切る対象 | 既定 |
 |---|---|---|
 | `summary` | そのセッションが今なにをしているか | `2` |
@@ -1041,6 +1276,94 @@ macOS は `Option` を代替文字やアクセントの入力に使うため、`
 
 そのディレクトリで次に開くセッションから反映されます。
 
+## worktree ごとのポートと DB 名（`worktreeEnv`） {#worktree-env}
+
+worktree が隔離するのは **ファイル** です。**ポート**は隔離されません。worktree A で `yarn dev`、
+worktree B でも `yarn dev` をやると、2つめは 3000 を取れずに落ちます。ローカル DB も同じで、
+5つの worktree が同じ DB を見ていれば、migration を走らせた1つが残りの4つを壊します。
+
+「各ワーキングツリーが自分専用に持つべきもの」を宣言すると、MulmoTerminal がツリーごとに
+重複しない値を予約し、そのツリーのターミナルに環境変数として渡します。
+
+```json
+{
+  "worktreeEnv": {
+    "PORT": { "kind": "port", "base": 3000 },
+    "API_PORT": { "kind": "port", "base": 4000 },
+    "DB_NAME": { "kind": "slug", "prefix": "myapp_" }
+  }
+}
+```
+
+プロジェクト本体の checkout が先に予約したとき（普通はそうなります — worktree を切る前に開いて
+いるので）、その checkout が `base` そのものを取り、worktree はその上の番号を取ります。
+
+| ディレクトリ | `PORT` | `DB_NAME` |
+|---|---|---|
+| `~/src/myapp`（checkout 本体） | `3000` | `myapp_myapp` |
+| `…/worktrees/myapp-a1b2c3d4/fix-login` | `3010` | `myapp_fix_login` |
+| `…/worktrees/myapp-a1b2c3d4/add-search` | `3020` | `myapp_add_search` |
+
+`base` そのものは **最初に予約したディレクトリ**が取ります。同じリポジトリの **2つ目の clone**
+は同じ `base` を宣言するので、その次の空き（3010）になります — これが狙いどおりで、
+その 2 つの checkout も worktree 同士と同じように 3000 を取り合っていました。
+
+- **`kind: "port"`** — 空いている TCP ポート。`base` + **10** の倍数です。刻みが 1 でなく 10 なのは、
+  多くの dev サーバが「そのポートが埋まっていたら次のポートへ」勝手にずれるから（vite の既定動作）。
+  1 刻みだと、そのずれた先が隣の worktree の枠に着地してしまいます。
+- **`kind: "slug"`** — worktree の task 名（worktree でなければフォルダ名）から作った名前に、
+  指定した `prefix` を付けたもの。小文字 `[a-z0-9_]`、63文字で切ります。Postgres のデータベース名 /
+  スキーマ名、SQLite のファイル名、コンテナ名などにそのまま使えます。
+- **MulmoTerminal は DB を作りません。** 他とぶつからない名前を渡すところまでです。
+  その名前をどう使うかは各プロジェクトの `migrate` スクリプト側の仕事です。
+- 変数名は自由です。`PORT` / `VITE_PORT` / `NEXT_PUBLIC_PORT` など、シェルが export できる名前なら
+  何でも。1ディレクトリにつき 16 個まで。
+
+### 番号は動きません {#worktree-env-stable}
+
+値は **一度予約したら固定** で、`~/.mulmoterminal/worktree-env.jsonl` に記録されます。
+セルを開き直しても、サーバを再起動しても、マシンを再起動しても、同じツリーには同じ番号が返ります
+（その予約をしたときの宣言が変わっていない限り）。
+
+これは親切心ではありません。もし起動のたびにポートを測り直すと、**そのツリー自身の dev サーバ**が
+掴んでいるせいで「使用中」と判定され、番号がずれます。自分自身から逃げることになります。
+さらに tmux セッションに再アタッチするセルは環境変数を読み直さないので、動いた値は
+実際に走っているプロセスと食い違ったままになります。
+
+**測るのは、最初に配るときの1回だけ**です。マシン上の他のものが既に掴んでいるポートは、
+そこで飛ばされます。
+
+MulmoTerminal のサーバを 2 つ並べて動かしていると、「予約を読む」と「予約を書く」の一瞬の間に
+両方が同じ値を選ぶことはあり得ます。これは lock で防ぐのではなく、**書いた直後に検出**します。
+追記のみのファイルを両方が同じように読むので、**先に載っているほうが勝ち**という判定が一致し、
+負けたほうが解放して次の値を取ります。衝突は起きえますが、**残りません**。
+
+予約は worktree を **削除したとき**（Close → 削除）に解放されます。ディレクトリが単に無くなった
+予約も、その時点で値を押さえなくなります。**宣言を書き換えても解放されます** — `base` を変えれば
+次のセッションで割り当て直し、変数をリネーム / 削除すれば、その値は他のツリーに回ります。
+
+### そのツリーが何をもらったか見る {#worktree-env-chip}
+
+セルのヘッダに `env` チップとして出ます（`:3010`）。**ポートはクリックすると dev サーバが開きます**
+（新しいタブ）。変数名はホバーで出ます。
+
+そのディレクトリの **すべてのセル** に出ます — エージェントのセル、Shell、launch コマンド、
+Run コマンド。とくに効くのは launcher のセルで、`yarn dev` を走らせているのはそこだからです。
+
+既定のチップに入っていますが、`worktreeEnv` を宣言していないプロジェクトでは**何も描画しません**。
+なので有効化する操作は不要で、使わない人には何も見えません。位置を自分で決めたい場合は
+[`chips`](#header) に並べてください（例: `"chips": ["git", "env", "ctx"]`）。
+
+### 補足
+
+- 値はそのディレクトリの **すべてのターミナル** に届きます。Claude セル、Codex セル、Shell、
+  launch コマンド、Run メニューのコマンド — `yarn dev` を走らせたものがポートを受け取ります。
+- 継承した環境変数の **上に** 乗ります。MulmoTerminal 自身が使う変数は、同名の宣言より優先されます。
+- 宣言しなければ何も変わりません。`worktreeEnv` が無ければ予約も変数設定も起きません。
+  例外は **以前は宣言していた** ディレクトリだけで、古い予約の解放が 1 行追記されます
+  （その値が他のツリーに回るように）。
+- そのディレクトリの **次のセッション** から効きます。
+
 ## 別のモデルで動かす（プロバイダ） {#providers}
 
 Claude Code は Anthropic 互換のバックエンドなら何にでも接続できます。接続先は `config.json` の
@@ -1059,6 +1382,109 @@ Claude Code は Anthropic 互換のバックエンドなら何にでも接続で
 
 → **手順・検証済みモデル一覧・モデルの追加方法・トラブルシューティングは
 [OpenRouter で別のモデルを使う](providers.html) にまとめてあります。**
+
+## 自分のコマンドで Claude Code を起動する（`customAgents`） {#custom-agents}
+
+*プロバイダは HTTP で繋ぐバックエンドでした。こちらはもう一方のケース、**コマンドを実行して**
+モデルに繋ぐ場合です。*
+
+`ollama launch claude --model nemotron-3-ultra:cloud --` はローカルのモデルで Claude Code を
+起動するコマンドです。これをランチャチップに登録することもできますが、それでは
+ただの「ターミナルで動くコマンド」で、再開できる履歴もコスト表示もコンテキスト残量も
+「入力待ち」状態も GUI ツールもありません。**カスタムエージェント**は同じコマンドラインを
+実行し、そこに **Claude Code 自身の引数を付け足す**ので、セルは本物のセッションになります。
+
+空きセル上部の **Agent Picker**（Claude / Codex / Antigravity / Grok / Shell のトグル）に並びます。
+
+```json
+{
+  "customAgents": [
+    {
+      "id": "nemotron",
+      "label": "Nemotron",
+      "agent": "claude",
+      "command": "ollama launch claude --model nemotron-3-ultra:cloud --"
+    }
+  ]
+}
+```
+
+| キー | 中身 | 制限 |
+|---|---|---|
+| `id` | 内部の識別子。後から変えると**別のエージェント**になるので、改名したいときは label のほうを変えてください | `^[a-z0-9][a-z0-9_-]{0,31}$` — 小文字の英数字・`-`・`_`、最大 32 文字、先頭は `-`/`_` 不可。`claude` / `codex` / `antigravity` / `grok` / `shell` は使えません |
+| `label` | ボタンの表示名 | 24 文字 |
+| `agent` | **何として**起動するか（＝誰の引数を付け足すか） | `"claude"` のみ。**必須** |
+| `command` | 実行するコマンドライン。この後ろに Claude Code の引数が付きます | 500 文字 |
+
+制限の効き方は 2 種類あり、どちらも画面には何も出ません。
+
+- `id` や `agent` が不正、`label` や `command` が空、`id` の重複 → **その項目ごと捨てられます**
+  （ボタンが出ません）。
+- `label` や `command` が長すぎる場合 → 捨てられずに**上限で切り詰められます**。
+  切り詰められたコマンドは、そのまま「別のコマンド」として実行されるので厄介です。
+
+最大 8 件。9 件目以降は無視されます。`config.json` のみで Settings に UI はないため、サーバ起動中に編集したら
+**再起動**＋タブのリロードが必要です。
+
+ピッカーが決めるのは**新しく始める**セッションの起動方法です。*OR RESUME HERE* から会話を
+再開した場合は、ピッカーの表示に関係なく**そのセッションが最初に起動したときのエージェント**が
+そのまま使われます（プロバイダ／モデルの選択と同じ規則）。どのセッションがどのエージェントで
+始まったかはディスクに記録されるので、セルを閉じても、セッションを終了しても、サーバを
+再起動しても残ります。
+
+### 自分のコマンドと Claude Code の引数の境目
+
+実際に起動されるのは、あなたのコマンドの後ろに Claude Code の argv がまるごと付いたものです。
+
+```
+ollama launch claude --model nemotron-3-ultra:cloud -- \
+  --session-id <uuid> --settings <hooks> --permission-mode … --mcp-config … --allowedTools …
+```
+
+つまり、あなたのコマンドは **Claude Code の引数が始まる位置で引数の解釈をやめる**必要が
+あります。上の末尾の `--` がその役目で、`ollama` は `--model nemotron-3-ultra:cloud` までを
+自分のものとして受け取り、`--` 以降はそのまま素通しします。
+
+ここから 2 つ言えます。
+
+- **`--model` が 2 つあっても衝突しません。** 書いたほうは `--` の前なので `ollama` のもの、
+  起動フォームの MODEL 選択は `--` の後ろなので Claude Code のものです。
+- **後ろの引数を飲み込んでしまうコマンドは、静かにセッションを壊します。**
+  `--session-id` が届かなければ再開できず、`--settings` が届かなければセルが
+  working / waiting を表示せず、`--mcp-config` が届かなければ GUI ツールが使えません。
+  カスタムエージェントのセルが起動はするのに灰色のままなら、原因はこれです。
+
+コマンドは**シェルを通さず、書かれたまま**実行されます。引用符は解釈しますが、`$HOME`・`~`・
+パイプ・`&&` は展開されません。シェルの記法を使いたいならランチャコマンド（チップ）の出番です。
+
+### ボタンが出てこないとき
+
+読み込み時に弾かれた項目は、単に「無い」状態になります。ファイルを保存し忘れたのと
+見分けがつきません。可能性の高い順に:
+
+1. **`agent: "claude"` が無い。** 必須です。コマンドラインのどこにも「`--` の向こう側が
+   どの CLI か」は書かれていないので、MulmoTerminal は推測しません。
+2. **`id` が名前として無効**（大文字・空白が入っている、組み込みの 4 つと同じ、など）。
+3. **サーバを再起動していない**／タブをリロードしていない。
+
+何が受け付けられたかは、ファイルとアプリが解釈した結果を比べれば分かります。
+
+```sh
+curl -s "http://localhost:34567/api/config" | jq .customAgents
+```
+
+ファイルにあってこの出力に無い項目が、弾かれたものです。
+
+### ランチャコマンドとの違い
+
+|  | カスタムエージェント（Agent Picker） | ランチャコマンド（チップ） |
+|---|---|---|
+| 実行するもの | あなたのコマンド **+ Claude Code の引数** | あなたのコマンドを書かれたまま |
+| セルの中身 | 本物のエージェントセッション（再開・コスト・コンテキスト・入力待ち） | ただのターミナル |
+| GUI ツール | 通常の Claude セルと同じく使える | 自分のコマンドで指定した場合のみ |
+| シェル記法（`$VAR`・パイプ） | 使えない | 使える |
+
+→ `/mulmoterminal-model` が上の落とし穴込みで書いてくれます。
 
 ## この PR はどのクローンの作業か（`prWorkdirFooter`） {#pr-workdir-footer}
 
@@ -1084,8 +1510,9 @@ MulmoTerminal は各タスクを `~/.mulmoterminal/worktrees/` 以下の worktre
 }
 ```
 
-次に作成する PR から反映されます。**再起動は不要**です（この設定は設定モーダルに項目が無いため、
-PR 作成のたびにファイルから読み直しています）。
+**Settings → GitHub and GitLab** のチェックボックスでも切り替えられます。どちらの場合も次に作成する
+PR から反映され、**再起動は不要**です（PR 作成のたびにファイルから読み直しているので、隣で動いている
+別の MulmoTerminal からも変更が見えます）。
 
 補足:
 
@@ -1111,6 +1538,8 @@ MulmoTerminal は起動する Claude セッション全部に、**返信の最�
   "appendSystemPrompt": false
 }
 ```
+
+**Settings → Sessions and background tasks** のチェックボックスでも切り替えられます。
 
 **次に起動するセッションから**反映されます。サーバの再起動は要りませんが、**動いているセッションは
 そのまま**です（この指示はセッション起動時に一度だけ渡すため）。切ったことを確かめるには、セルを
@@ -1141,6 +1570,8 @@ MulmoTerminal は起動する Claude セッション全部に、**返信の最�
 ```json
 { "issueWorkComments": true }
 ```
+
+**Settings → GitHub and GitLab** のチェックボックスでも有効にできます。
 
 有効にすると、1 つの issue につき**コメントは 1 つ**で、それを更新し続けます。着手すると投稿されます。
 
@@ -1206,6 +1637,7 @@ posted by MulmoTerminal
 { "decisionDigest": true }
 ```
 
+- **Settings → Sessions and background tasks** のチェックボックスでも有効にできます。
 - 書き出し先は `~/.mulmoterminal/decisions/<project>.md` で、**リポジトリの中には書きません**。
 - 更新は**サーバ起動時と 6 時間ごと**。対象はこのホストが実際に作業しているディレクトリだけです。
 - エージェント側は同梱スキル **`mulmoterminal-decisions`** 経由で読みます。他のスキルと同じく
@@ -1218,8 +1650,9 @@ posted by MulmoTerminal
 
 **既定は off**。vision 段階のアイデアであり、放っておけば存在しないファイルを書くためです。
 
-このキーは **Settings に画面がありません**。`~/.mulmoterminal/config.json` だけにあり、この
-ファイルはサーバ起動時に一度だけ読まれます。書き換えたら **`mulmoterminal` を再起動**してください。
+**Settings → Sessions and background tasks** のチェックボックスで切り替えられます。
+`~/.mulmoterminal/config.json` を手で書き換えた場合は **`mulmoterminal` を再起動**してください
+（このファイルはサーバ起動時に一度だけ読まれます）。
 
 ## よく使うコマンドを Run メニューに（`script.json`）
 
@@ -1265,16 +1698,20 @@ posted by MulmoTerminal
 | `launchers` | グリッドセルの「OR LAUNCH」に並ぶ起動コマンド。自分で足したものだけ — 素のシェルはランチャの **Shell** トグルが担当 |
 | `quickCommands` | **スマホ**のターミナル表示にチップとして並ぶ定型文（`{ label, text, agents? }`）。タップすると `text` が入力欄に入るだけで、**送信されるのは送信ボタンを押したとき**。`agents` で `"claude"` / `"codex"` / `"shell"` に絞れる（省略＝全種別）。設定画面の **Phone quick commands** で編集 |
 | `prRepos` | 横断 PR/Issue ビューの対象リポ |
-| `gitlabHosts` | 自前ホスティングの GitLab のホスト名（例 `["gitlab.example.com"]`）。URL からは forge の種類が分からないので、宣言してはじめて `prRepos` のそのホストのエントリが `glab` で読まれる。`glab auth login --hostname <host>` が前提。設定画面は無く config.json のみなので、手で書いたら再起動（→ [自前ホスティングの GitLab](github.html#自前ホスティングの-gitlab)） |
+| `gitlabHosts` | 自前ホスティングの GitLab のホスト名（例 `["gitlab.example.com"]`）。URL からは forge の種類が分からないので、宣言してはじめて `prRepos` のそのホストのエントリが `glab` で読まれる。`glab auth login --hostname <host>` が前提。Settings → **GitHub and GitLab** で編集でき、どちらの場合も反映は次回起動時（→ [自前ホスティングの GitLab](github.html#自前ホスティングの-gitlab)） |
 | `repoDirs` | 同じリポのクローンを複数並べているとき、そのリポの作業をどれで始めるか: `{ "acme/web": "/Users/you/src/web" }`。保存されるのは**選択だけ**で、どのクローンがあるかは `cwdPresets` から毎回導出するのでクローンを増やしても二重管理にならない。そのリポのクローンでなくなったエントリは無視される |
+| `userMcpServers` | 自分の HTTP MCP サーバ（`{ id, url }`）。GUI MCP をフルで持つセッションにマージされる。Settings → **MCP servers** で編集可 |
+| `issueWorkComments` | 作業中の issue にセルがコメントするか — 1 つだけ投稿し、PR の作成・マージに合わせて編集する。**既定 OFF**（他人の issue に書き込むため → [issue に「やっています」と書く](#issue-work-comments)） |
 | `buttons` / `chips` | ヘッダーのボタン/チップ（プロジェクト設定とマージ。→ [ヘッダーのカスタマイズ](#header)） |
 | `providers` | Anthropic 互換の接続先（→ [OpenRouter で別のモデルを使う](providers.html)） |
+| `customAgents` | Claude Code を起動する自分のコマンド。Agent Picker に並びます（→ [カスタムエージェント](#custom-agents)） |
 | `soundFile` | 全種類共通のフォールバック通知音（音声ファイルの絶対パス。設定モーダルからも変更可） |
 | `soundKinds` | どの瞬間に鳴らすか。**書かなければ** `["finished","waiting"]`、2.2 で増えた4種は opt-in、`[]` で無音（→ [通知音](#sounds)） |
 | `sounds` | 種類ごとの音。例 `{ "waiting": "preset:coin" }` — `preset:<id>` か絶対パス。未指定の種類は `soundFile` を使う（→ [通知音](#sounds)） |
 | `pushEnabled` | Web Push の master スイッチ（既定 `false` → [スマホ通知](notifications.html)） |
 | `pushKinds` | どの瞬間に飛ばすか：`"finished"`（ターン完了）と `"waiting"`（質問して停止）。**書かなければ両方**、`[]` でどれも飛ばさない（→ [どの瞬間に飛ぶか](notifications.html#kinds)） |
-| `worklogEnabled` / `worklogIntervalHours` | 定期 dev-work ログ（既定 OFF / 6 時間） |
+| `sessionIdleReapDays` | **誰も attach しておらず、出力も無い**ターミナルを、何日放置したらサーバが次回起動時に終了するか（既定 7 日、`0` で無効、0〜365）。会話は失われない — transcript があれば tmux セッション無しで再開できる。失うのはプロセスとスクロールバック。Settings → **Sessions that survived a restart** の、対象一覧のすぐ横で変更可 |
+| `worklogEnabled` / `worklogIntervalHours` | 定期 dev-work ログ — 保存済みディレクトリの最近の作業を週次の wiki ページにまとめる（既定 OFF / 6 時間、1〜168 に丸め）。実行のたびに LLM セッションを起こすのでトークンを消費する。Settings → **Sessions and background tasks** で編集可 |
 | `decisionDigest` | このプロジェクトで既に決めたことを Markdown にまとめ、エージェントが聞き直す前に読む。**既定 off**（→ [このプロジェクトで既に決めたこと](#decision-digest)） |
 | `terminalSubmit` | どのバイトを**送信**／**改行**とみなすか — `"cr"`（既定）または `"esc-cr"`（→ [Enter — 送信と改行](#terminal-submit)） |
 | `themes` | 自分で定義した配色。Settings のテーマ選択に並ぶ（→ [自分の配色を作る](#custom-themes)） |
@@ -1299,7 +1736,7 @@ posted by MulmoTerminal
 
 | 変数 | 既定 | 役割 |
 |---|---|---|
-| `CLAUDE_CWD` / `--cwd` | 実行したディレクトリ（`npx mulmoterminal@latest`。サーバを直接起動した場合のみ `~/mulmoclaude`） | 既定の作業ディレクトリ（PTY の cwd）。決まり方は `--cwd` > 環境変数 `CLAUDE_CWD` > 実行したディレクトリ の順。**ここと同じディレクトリで起動した Claude のセルだけが GUI MCP をフルで持ちます**（→ [どのディレクトリで起動するか](basics.html#launch-dir)） |
+| `CLAUDE_CWD` / `--cwd` | 実行したディレクトリ（`npx mulmoterminal@latest`。サーバを直接起動した場合のみ `~/mulmoclaude`） | 既定の作業ディレクトリ（PTY の cwd）。決まり方は `--cwd` > 環境変数 `CLAUDE_CWD` > 実行したディレクトリ の順。**ここと同じディレクトリで起動した Claude / Codex のセッションが、GUI ツールを全部持ちます**（Antigravity と Grok、Shell やそれ以外の起動コマンドは対象外。→ [どのディレクトリで起動するか](basics.html#launch-dir)） |
 | `PORT` | `34567` | サーバのポート |
 | `MULMOTERMINAL_HOST` | `127.0.0.1` | サーバが待ち受けるインターフェース（→ [下記](#bind-host)） |
 | `MULMOTERMINAL_ALLOWED_ORIGINS` | *(なし)* | ターミナルに接続してよいブラウザのオリジンを追加（カンマ区切り）。`MULMOTERMINAL_HOST` を広げたときにだけ必要（→ [下記](#bind-host)） |

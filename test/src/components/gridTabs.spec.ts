@@ -16,6 +16,7 @@ import {
   runCommand,
   runScriptInNewCell,
   insertCellAfter,
+  revealCell,
   shellCell,
   sessionCell,
   launchInCell,
@@ -516,6 +517,59 @@ describe("setSession / setCwd / toggleExpand", () => {
   it("always allows collapsing, even down to one cell", () => {
     const stranded = make([cell(0, U(0)), cell(1)], { expanded: 0 });
     expect(toggleExpand(stranded, 0).expanded).toBeNull();
+  });
+});
+
+// What starts a cell is MOUNTING, and a cell mounts only on the page the grid shows — so for an
+// auto-start cell the page is not cosmetic. insertCellAfter can only page by the manual index.
+describe("revealCell (page at where the cell is actually shown)", () => {
+  const ten = () => make(running(10), { page: 1 });
+
+  it("pages at the cell's position in the DISPLAY order, not its manual one", () => {
+    const manualLast = ten();
+    const reordered = [9, ...Array.from({ length: 9 }, (_, i) => i)]; // uid 9 sorted to the front
+    expect(revealCell(manualLast, 9, reordered).page).toBe(0);
+  });
+
+  it("agrees with the manual page when nothing was re-ordered", () => {
+    const order = Array.from({ length: 10 }, (_, i) => i);
+    expect(revealCell(ten(), 9, order).page).toBe(1);
+  });
+
+  // A uid the order doesn't carry (a full grid refused the insert) must not move the user.
+  it("leaves the page alone for a uid the order does not hold", () => {
+    expect(revealCell(ten(), 99, [0, 1, 2]).page).toBe(1);
+  });
+});
+
+// `autoStart` is a cell the grid already knows what to run — the phone's launch request (#831).
+// Between the request and the server's session id it is the only thing telling the rest of the
+// grid that this cell is not an abandoned launcher, which is what #1535 turned on.
+describe("autoStart (a cell told to run on mount)", () => {
+  const starting = (uid: number): Cell => ({ uid, session: null, cwd: "/w", autoStart: true });
+
+  it("counts toward the cap like any other running cell", () => {
+    expect(runningCount([cell(0, U(0)), starting(1), cell(2)])).toBe(2);
+  });
+
+  // The one that costs the terminal: flipping pages before the session id lands would otherwise
+  // delete the cell the phone just asked for, as an abandoned trailing launcher.
+  it("survives a page switch", () => {
+    expect(switchPage(make([...running(9), starting(9)], { page: 1 }), 0).cells).toHaveLength(10);
+  });
+
+  it("is not the launch cell '+' cancels", () => {
+    expect(cancelableLaunchUid(make([...running(2), starting(2)]))).toBeNull();
+    expect(addCell(make([...running(2), starting(2)])).cells).toHaveLength(4); // appended, not cancelled
+  });
+
+  // One-shot: the cell has answered. Left set, closing that session later would leave an empty
+  // launcher permanently counted as occupied.
+  it("is cleared once the session arrives", () => {
+    const s = setSession(make([starting(0)]), 0, U(5));
+    expect(s.cells[0].session).toBe(U(5));
+    expect(s.cells[0].autoStart).toBeUndefined();
+    expect("autoStart" in s.cells[0]).toBe(false); // absent, not undefined — it round-trips through JSON
   });
 });
 

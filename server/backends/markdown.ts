@@ -15,13 +15,13 @@
 //     and PDF export needs no image-resolution step.
 import fs from "fs";
 import path from "path";
-import { randomUUID } from "node:crypto";
 import { marked } from "marked";
 import { renderMarpDeck, fillImagePlaceholders } from "@mulmoclaude/markdown-plugin";
 import type { MarkdownHostApp, ExportPdfOptions } from "@mulmoclaude/markdown-plugin";
 import { publishFileChange } from "./fileChange.js";
 import { generateImage } from "./image-gen.js";
-import { buildDocPath } from "./docPath.js";
+import { buildDocPath, newDocId, DOCS_DIR } from "./docPath.js";
+import { hasErrnoCode } from "../errors.js";
 import { markdownByPath } from "./openPath.js";
 
 // Set once at boot (server/index.ts) — workspace = CLAUDE_CWD. File-change
@@ -43,6 +43,27 @@ const MARKDOWN_PDF_CSS = `
   pre { background: #f3f4f6; padding: .75rem; border-radius: .375rem; overflow-x: auto; } code { background: #f3f4f6; padding: .1rem .3rem; border-radius: .25rem; }
   table { border-collapse: collapse; width: 100%; } th, td { border: 1px solid #e5e7eb; padding: .5rem .75rem; } a { color: #2563eb; } img { max-width: 100%; height: auto; }
 `;
+
+const DOC_CREATE_ATTEMPTS = 5;
+
+/** Write `markdown` to a document path nothing else holds, and return that path.
+ *  `wx` refuses an existing file, so a taken name re-rolls instead of replacing a
+ *  document nobody was told about — the create path used to overwrite silently and
+ *  report success (#1623). `nextId` is a parameter so a test can force the collision. */
+export async function createDoc(prefix: string, markdown: string, nextId: () => string = newDocId): Promise<string> {
+  for (let attempt = 0; attempt < DOC_CREATE_ATTEMPTS; attempt++) {
+    const rel = buildDocPath(prefix, new Date(), nextId());
+    const abs = absFor(rel);
+    await fs.promises.mkdir(path.dirname(abs), { recursive: true });
+    try {
+      await fs.promises.writeFile(abs, markdown, { flag: "wx" });
+      return rel;
+    } catch (err) {
+      if (!hasErrnoCode(err) || err.code !== "EEXIST") throw err;
+    }
+  }
+  throw new Error(`could not create a document under ${DOCS_DIR}: ${DOC_CREATE_ATTEMPTS} generated names were all taken`);
+}
 
 export const markdownHostApp: MarkdownHostApp = {
   // Any `.md` the tool was pointed at — a repo's README, `docs/design.md`, an
@@ -68,10 +89,7 @@ export const markdownHostApp: MarkdownHostApp = {
   },
 
   async saveNewDoc(prefix, markdown) {
-    const rel = buildDocPath(prefix, new Date(), randomUUID().slice(0, 8));
-    const abs = absFor(rel);
-    await fs.promises.mkdir(path.dirname(abs), { recursive: true });
-    await fs.promises.writeFile(abs, markdown);
+    const rel = await createDoc(prefix, markdown);
     // Publish the create too (previously an unpublished gap) so a View already
     // open on this path live-refreshes instead of going stale.
     await publishFileChange(rel);

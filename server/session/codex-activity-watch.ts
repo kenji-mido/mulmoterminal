@@ -25,12 +25,42 @@ export interface CodexActivityDeps {
    *  first turn isn't missed; a resumed one would otherwise REPLAY every past turn and
    *  leave the cell flagged from history rather than from what is happening now. */
   startAtEnd: boolean;
+  /** Reattach only (with startAtEnd): if the skipped content leaves a turn OPEN — its last
+   *  boundary is a start without an end — report that one boundary before tailing. The
+   *  process behind a reattach is still RUNNING, so an open turn is current fact, not
+   *  history: without this a server restarted mid-turn shows an idle cell until the turn's
+   *  END arrives (#1538 review). A trailing COMPLETED stays unreported — re-flagging a
+   *  days-old finish is the replay startAtEnd exists to prevent. And it must stay false
+   *  for a cold resume, where the process is NEW: a trailing start there means the OLD
+   *  process died mid-turn, and the resumed one is idle. */
+  restoreOpenTurn?: boolean;
   sleep: (ms: number) => Promise<void>;
 }
 
 export async function watchCodexActivity(deps: CodexActivityDeps): Promise<void> {
   let offset = deps.startAtEnd ? await startingOffset(deps) : 0;
   let pending = "";
+  // Against the SAME offset the tail starts from, so a boundary cannot fall between the
+  // restore read and the first poll — it is either in [0, offset) and restored, or after
+  // and tailed.
+  if (deps.restoreOpenTurn && offset > 0) {
+    const skipped = await deps.readSlice(0, offset);
+    // The writer is still ALIVE on this path, so the snapshot can land mid-record. Whatever
+    // follows the last newline is a record still being written: it is carried as the tail's
+    // pending fragment — parsed once its remainder is flushed — never judged as a line here.
+    // Both halves of that matter: a torn task_complete judged here would be ignored AND its
+    // suffix alone is unparseable on the first poll, so the completion would be lost for good
+    // and a restored working flag would stick until some later turn (#1538 review).
+    const lastNewline = skipped.lastIndexOf("\n");
+    pending = skipped.slice(lastNewline + 1);
+    const whole = turnBoundaries(
+      skipped
+        .slice(0, lastNewline + 1)
+        .split("\n")
+        .filter((l) => l.trim()),
+    );
+    if (whole.at(-1) === "started") deps.onBoundary("started");
+  }
   while (deps.isAlive()) {
     await deps.sleep(CODEX_ACTIVITY_POLL_MS);
     if (!deps.isAlive()) return;

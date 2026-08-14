@@ -8,7 +8,7 @@ import { SESSION_ID_RE } from "../config/env.js";
 import { existingWorkspaceFromQuery } from "../config/workspace.js";
 import { normalizeAgent, workspaceForRoute } from "./routeParams.js";
 import { getHeaderConfig, getIssueWorkComments } from "../config/config-routes.js";
-import { publicDirConfig, dirSoundFor, loadDirConfig, dirConfigDetail, MISSING_DIR_CONFIG_DETAIL } from "../config/dir-config.js";
+import { publicDirConfig, dirSoundFor, loadDirConfig, dirIconFor, dirConfigDetail, MISSING_DIR_CONFIG_DETAIL } from "../config/dir-config.js";
 import { readSoundPreset } from "../config/sound-presets.js";
 import { isNotifyKind } from "../../common/notifyKinds.js";
 import { buildHeaderContext, loadHeaderConfig } from "../config/header-context.js";
@@ -86,6 +86,34 @@ async function prPhaseHandler(req: Request, res: Response): Promise<void> {
 }
 
 const positiveInt = (v: unknown): number | null => (isIssueNumber(v) ? v : null);
+
+// Stream a directory's icon image (#1421). Like /api/dir-sound, the path never comes from the
+// request — it is read from that dir's .mulmoterminal.json and confined to the dir — so there is
+// no traversal surface. 404 when the directory sets no icon, or sets a remote URL, which the
+// browser loads itself and never asks us for.
+function dirIconHandler(req: Request, res: Response): void {
+  const cwd = workspaceForRoute(req.query.cwd, res);
+  if (cwd === null) return;
+  // dirIconFor, not the raw setting: an auto-detected favicon (#1428) is served through this
+  // route too, so the two must not disagree about which file the directory's icon is.
+  const icon = dirIconFor(cwd);
+  if (!icon || icon.source !== "file") {
+    res.status(404).end();
+    return;
+  }
+  // The type comes from OUR extension map rather than express's sniffing, and `nosniff` holds the
+  // browser to it. `sandbox` is what makes SVG safe to allow at all: an <img> never runs its
+  // scripts, but this URL can also be opened directly, and a unique origin means a logo someone
+  // pasted into a repo cannot script the app it is displayed in.
+  res.setHeader("Content-Type", icon.mime);
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  res.setHeader("Content-Security-Policy", "sandbox");
+  // dotfiles:"allow" for the same reason the sound route allows them — a hidden
+  // <cwd>/.mulmoterminal/ is a conventional place to keep this.
+  res.sendFile(icon.path, { dotfiles: "allow" }, (err) => {
+    if (err && !res.headersSent) res.status(404).end();
+  });
+}
 
 export function mountDirRoutes(app: Express): void {
   // GRID-ONLY (dev_tool): the `script.json` entries a cell's launcher offers for its
@@ -194,4 +222,6 @@ export function mountDirRoutes(app: Express): void {
       if (err && !res.headersSent) res.status(404).end();
     });
   });
+
+  app.get("/api/dir-icon", dirIconHandler);
 }

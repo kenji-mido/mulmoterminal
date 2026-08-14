@@ -3,7 +3,10 @@ import { mount, flushPromises } from "@vue/test-utils";
 import { nextTick } from "vue";
 import TerminalCell from "../../../src/components/TerminalCell.vue";
 import { CELL_CHIP_BTN, CELL_CHIP_ICON } from "../../../src/components/cellChromeClasses";
+import { SUNK_CELL } from "../../../src/components/cellParked";
 import { TOOL_GROUPS } from "../../../common/toolGroups";
+import { setHeaderStatusDefaults } from "../../../src/composables/headerStatusColors";
+import { DEFAULT_HEADER_STATUS_TINT } from "../../../common/headerStatusColors";
 
 // Capture the "sessions" pub/sub callback and the reconnect handler so tests can push
 // activity and simulate a dropped-then-restored socket directly.
@@ -42,6 +45,10 @@ vi.mock("../../../src/components/Terminal.vue", () => ({
   },
 }));
 
+// GET /api/session/:id itself — NOT its sub-routes (/memo, /terminate) and not the other polls a
+// cell runs, which a "everything else" counter would fold in and make a refresh test read high.
+const SESSION_DETAIL_RE = /\/api\/session\/[^/?]+(\?|$)/;
+
 const promptText = (w: ReturnType<typeof mount>) => w.find('[data-testid="cell-prompt"]').text();
 const dotClass = (w: ReturnType<typeof mount>) => w.find(".cell-dot").classes();
 
@@ -69,6 +76,9 @@ beforeEach(() => {
   captured = null;
   reconnect = null;
   mockFetch();
+  // A module singleton, so a test that sets a global default would otherwise leak it into every
+  // test that runs after it (setHeaderStatusDefaults, #1617).
+  setHeaderStatusDefaults({}, DEFAULT_HEADER_STATUS_TINT);
 });
 
 function mountCell(
@@ -82,14 +92,18 @@ function mountCell(
     openSessionIds?: string[];
     openCwds?: string[];
     expanded?: boolean;
+    collectionsAvailable?: boolean;
     zoomed?: boolean;
     reorderable?: boolean;
+    initialAgent?: "claude" | "codex" | "antigravity" | "grok";
   } = {},
 ) {
   return mount(TerminalCell, {
     props: {
       uid: 1,
+      ...(opts.initialAgent ? { initialAgent: opts.initialAgent } : {}),
       expanded: opts.expanded ?? false,
+      collectionsAvailable: opts.collectionsAvailable ?? false,
       zoomed: opts.zoomed ?? false,
       reorderable: opts.reorderable ?? false,
       initialSessionId,
@@ -867,6 +881,110 @@ describe("TerminalCell", () => {
     expect(badge.text()).toBe("Opus · ctx 35%"); // 70k / 200k
   });
 
+  // An agy cell is the case that has no other way back: agy mints its conversation id after the
+  // spawn, so the seed fetch can only answer "no model" — and with no hooks and no activity
+  // tracker it never finishes a turn, which is the cell's only other badge refresh. The server
+  // publishes when it captures the id (spawn-antigravity.ts); this is the other half.
+  it("re-reads the badges on a push while the model is still unknown", async () => {
+    const id = "55555555-5555-5555-5555-555555555555";
+    let model: string | null = null;
+    let detailReads = 0;
+    globalThis.fetch = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/scripts")) return { ok: true, json: async () => ({ cwd: "/p", scripts: [] }) };
+      if (u.includes("/api/sessions")) return { ok: true, json: async () => ({ sessions: [] }) };
+      if (SESSION_DETAIL_RE.test(u)) detailReads++;
+      return { ok: true, json: async () => ({ working: false, waiting: false, lastPrompt: null, context: { model, contextTokens: 0 } }) };
+    }) as unknown as typeof fetch;
+
+    const w = mountCell(id, { initialAgent: "antigravity" });
+    await flushPromises();
+    expect(w.find('[data-testid="model-badge"]').exists()).toBe(false); // agy has not created the conversation yet
+    // The seed applies activity BEFORE badges, so a re-ask hung off that path would fire here for
+    // the answer it already has — on every non-claude cell, every load.
+    expect(detailReads).toBe(1);
+
+    model = "Gemini 3.6 Flash (High)"; // the capture landed, so the transcript now names it
+    captured?.({ id, working: false, waiting: false });
+    await flushPromises();
+    await nextTick();
+    expect(w.find('[data-testid="model-badge"]').text()).toBe("Gemini 3.6 Flash");
+
+    // And it stops: a known model is not asked for again on the next push.
+    const settled = detailReads;
+    captured?.({ id, working: false, waiting: false });
+    await flushPromises();
+    expect(detailReads).toBe(settled);
+  });
+
+  // agy's and grok's context readings move every turn, and neither agent has a turn end to hang a
+  // refresh on — so without this the percentage is frozen at whatever it was when the cell first
+  // asked. Claude and codex both settle a turn, and must not become pollers.
+  it("re-reads an untracked cell's badges on a timer, and no tracked agent's", async () => {
+    vi.useFakeTimers();
+    try {
+      const id = "55555555-5555-5555-5555-555555555555";
+      let detailReads = 0;
+      globalThis.fetch = vi.fn(async (url: string) => {
+        const u = String(url);
+        if (u.includes("/api/scripts")) return { ok: true, json: async () => ({ cwd: "/p", scripts: [] }) };
+        if (u.includes("/api/sessions")) return { ok: true, json: async () => ({ sessions: [] }) };
+        if (SESSION_DETAIL_RE.test(u)) detailReads++;
+        return {
+          ok: true,
+          json: async () => ({
+            working: false,
+            waiting: false,
+            lastPrompt: null,
+            context: { model: "Gemini 3.6 Flash", contextTokens: 1000, contextWindow: 256_000 },
+          }),
+        };
+      }) as unknown as typeof fetch;
+
+      for (const untracked of ["antigravity", "grok"] as const) {
+        const w = mountCell(id, { initialAgent: untracked });
+        await vi.advanceTimersByTimeAsync(1);
+        const afterMount = detailReads;
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(detailReads, untracked).toBeGreaterThan(afterMount);
+        w.unmount();
+      }
+
+      for (const tracked of ["claude", "codex"] as const) {
+        const w = mountCell(id, { initialAgent: tracked });
+        await vi.advanceTimersByTimeAsync(1);
+        const settled = detailReads;
+        await vi.advanceTimersByTimeAsync(60_000);
+        expect(detailReads, tracked).toBe(settled);
+        w.unmount();
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Claude's badges ride along with the summary the route already folds, and this is the busiest
+  // route in the app — a push must not turn every claude cell into a poller.
+  it("does not re-read the badges on a push for a claude cell", async () => {
+    const id = "55555555-5555-5555-5555-555555555555";
+    let detailReads = 0;
+    globalThis.fetch = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/scripts")) return { ok: true, json: async () => ({ cwd: "/p", scripts: [] }) };
+      if (u.includes("/api/sessions")) return { ok: true, json: async () => ({ sessions: [] }) };
+      if (SESSION_DETAIL_RE.test(u)) detailReads++;
+      return { ok: true, json: async () => ({ working: false, waiting: false, lastPrompt: null, context: { model: null, contextTokens: 0 } }) };
+    }) as unknown as typeof fetch;
+
+    const w = mountCell(id);
+    await flushPromises();
+    const settled = detailReads;
+    captured?.({ id, working: true, waiting: false });
+    await flushPromises();
+    expect(detailReads).toBe(settled);
+    expect(w.find('[data-testid="model-badge"]').exists()).toBe(false);
+  });
+
   it("renders configured chips: hides an omitted built-in, keeps a listed one, and shows custom text", async () => {
     const id = "55555555-5555-5555-5555-555555555555";
     globalThis.fetch = vi.fn(async (url: string) => {
@@ -901,6 +1019,12 @@ describe("TerminalCell", () => {
     expect(w.find('[data-testid="cell-hdr-chip"]').text()).toBe("prod"); // custom chip renders its substituted text
     expect(w.find('[data-testid="cell-usage"]').exists()).toBe(true); // usage is listed
     expect(w.find('[data-testid="model-badge"]').exists()).toBe(false); // ctx omitted from the list → hidden despite context set
+    // Both sit ON the header the directory paints with `headerColor`, so their ink names
+    // --cell-header-fg before the theme's dim. The literal chain rather than the constant: the
+    // variable is the contract with cellHeaderStyle.ts, and naming `text-dim` outright is what
+    // left them unreadable on a saturated header (#1591).
+    expect(w.find('[data-testid="cell-usage"]').classes()).toContain("text-[var(--cell-header-fg,var(--text-dim))]");
+    expect(w.find('[data-testid="cell-hdr-chip"]').classes()).toContain("text-[var(--cell-header-fg,var(--text-dim))]");
   });
 
   it("renders duplicate built-in chips without key collisions", async () => {
@@ -1653,6 +1777,117 @@ describe("TerminalCell", () => {
     expect(w.find('[data-testid="ccx-remove"]').attributes("disabled")).toBeUndefined(); // released
   });
 
+  // #1549's rule, on the same route: `git worktree remove` runs for seconds with the confirmation
+  // still on screen, and the button said nothing — so a second click terminated the pty again and
+  // fired a second removal at a path the first one was already taking apart.
+  it("holds Remove (Removing…) for the whole removal, and posts it once", async () => {
+    const gate = deferred<{ ok: boolean; status: number; json: () => Promise<unknown> }>();
+    let removes = 0;
+    globalThis.fetch = vi.fn((url: string) => {
+      const u = String(url);
+      if (u.includes("/api/worktrees/remove")) {
+        removes += 1;
+        return gate.promise;
+      }
+      if (u.includes("/api/worktrees/diff")) return Promise.resolve({ ok: true, json: async () => cleanWtDiff });
+      if (u.includes("/api/sessions")) return Promise.resolve({ ok: true, json: async () => ({ sessions: [] }) });
+      return Promise.resolve({ ok: true, json: async () => ({ working: false, waiting: false, lastPrompt: null }) });
+    }) as unknown as typeof fetch;
+    const w = mountCell("66666666-6666-6666-6666-666666666666", { initialCwd: WT_CWD });
+    await flushPromises();
+    await w.find(".cell-close").trigger("click");
+    await flushPromises(); // the close() diff refresh releases the button
+    const remove = () => w.find('[data-testid="ccx-remove"]');
+    await remove().trigger("click");
+    await flushPromises();
+    // The dialog hands over to the whole-cell spinner (#1551), so the second click has no button
+    // left to land on — the handler's own guard is what the count below is really testing.
+    expect(w.find('[data-testid="cell-removing"]').exists()).toBe(true);
+    await w.find(".cell-close").trigger("click");
+    await flushPromises();
+    expect(removes).toBe(1);
+    gate.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
+    await flushPromises();
+    expect(w.find('[data-testid="cell-launch"]').exists()).toBe(true);
+    expect(w.find('[data-testid="cell-removing"]').exists()).toBe(false);
+  });
+
+  // #1551: the button read `Removing…` while the cell around it — header, chips, terminal — went on
+  // looking live for the several seconds `git worktree remove` takes. The whole cell now says so.
+  it("greys the whole cell and spins over it while the worktree is being removed", async () => {
+    const gate = deferred<{ ok: boolean; status: number; json: () => Promise<unknown> }>();
+    globalThis.fetch = vi.fn((url: string) => {
+      const u = String(url);
+      if (u.includes("/api/worktrees/remove")) return gate.promise;
+      if (u.includes("/api/worktrees/diff")) return Promise.resolve({ ok: true, json: async () => cleanWtDiff });
+      if (u.includes("/api/sessions")) return Promise.resolve({ ok: true, json: async () => ({ sessions: [] }) });
+      return Promise.resolve({ ok: true, json: async () => ({ working: false, waiting: false, lastPrompt: null }) });
+    }) as unknown as typeof fetch;
+    const w = mountCell("66666666-6666-6666-6666-666666666666", { initialCwd: WT_CWD });
+    await flushPromises();
+    await w.find(".cell-close").trigger("click");
+    await flushPromises();
+    expect(w.find(".cell-inner").classes()).not.toContain(SUNK_CELL);
+    // Absent, NOT `inert="false"` — Vue treats it as Booleanish, and an element carrying
+    // inert="false" is inert (the trap TerminalGrid's zoom-main hit on #1333).
+    expect(w.find(".cell-inner").attributes("inert")).toBeUndefined();
+
+    await w.find('[data-testid="ccx-remove"]').trigger("click");
+    await flushPromises();
+    const busy = w.find('[data-testid="cell-removing"]');
+    expect(busy.exists()).toBe(true);
+    expect(busy.text()).toContain("Removing");
+    expect(busy.attributes("role")).toBe("status");
+    // The body fades through the same one class parked cells use, and the spinner sits OUTSIDE it —
+    // a busy indicator inside the layer it is dimming would be dimmed by it.
+    expect(w.find(".cell-inner").classes()).toContain(SUNK_CELL);
+    expect(w.find(".cell-inner").find('[data-testid="cell-removing"]').exists()).toBe(false);
+    // The veil stops the mouse and nothing else, so the body is made inert too — otherwise Tab
+    // walks into the header buttons and xterm's textarea behind it, and a screen reader reads a
+    // cell that is being deleted (Codex, #1552).
+    expect(w.find(".cell-inner").attributes("inert")).toBeDefined();
+    // …and it covers the header, which the confirmation overlay never did.
+    expect(busy.classes()).toContain("inset-0");
+    expect(w.find('[data-testid="cell-close-confirm"]').exists()).toBe(false);
+  });
+
+  // Raised by Codex and CodeRabbit on #1550: the removal terminates the pty BEFORE it calls the
+  // route, so anything that dismisses the confirmation mid-flight takes the failure off the screen
+  // with it. Since #1551 the dialog hands over to the busy overlay, so the buttons are gone — but
+  // `cancelClose` still has to refuse, or Escape would clear `closeConfirm` underneath and the
+  // failure would come back to a confirmation that is no longer rendered.
+  it("lets nothing dismiss the confirmation once the removal has started", async () => {
+    const gate = deferred<{ ok: boolean; status: number; json: () => Promise<unknown> }>();
+    globalThis.fetch = vi.fn((url: string) => {
+      const u = String(url);
+      if (u.includes("/api/worktrees/remove")) return gate.promise;
+      if (u.includes("/api/worktrees/diff")) return Promise.resolve({ ok: true, json: async () => cleanWtDiff });
+      if (u.includes("/api/sessions")) return Promise.resolve({ ok: true, json: async () => ({ sessions: [] }) });
+      return Promise.resolve({ ok: true, json: async () => ({ working: false, waiting: false, lastPrompt: null }) });
+    }) as unknown as typeof fetch;
+    const w = mountCell("66666666-6666-6666-6666-666666666666", { initialCwd: WT_CWD });
+    await flushPromises();
+    await w.find(".cell-close").trigger("click");
+    await flushPromises();
+    await w.find('[data-testid="ccx-remove"]').trigger("click");
+    await flushPromises();
+
+    document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await w.find(".cell-close").trigger("click"); // the header button is not under the overlay
+    await flushPromises();
+    expect(w.find('[data-testid="cell-removing"]').exists()).toBe(true);
+    expect(w.find('[data-testid="cell-launch"]').exists()).toBe(false);
+
+    // …and the failure lands on a confirmation that is back, un-faded and dismissible again.
+    gate.resolve({ ok: false, status: 500, json: async () => ({ ok: false, reason: "failed" }) });
+    await flushPromises();
+    expect(w.find('[data-testid="cell-removing"]').exists()).toBe(false);
+    expect(w.find(".cell-inner").classes()).not.toContain(SUNK_CELL);
+    expect(w.find('[data-testid="cell-close-confirm"]').exists()).toBe(true);
+    expect(w.find('[data-testid="ccx-warn"]').text()).toContain("Couldn't remove");
+    expect(w.find('[data-testid="ccx-close-cell"]').attributes("disabled")).toBeUndefined();
+  });
+
   it("keeps the confirm open with an error when the remove fails (no false success)", async () => {
     globalThis.fetch = vi.fn(async (url: string) => {
       const u = String(url);
@@ -1775,6 +2010,29 @@ describe("TerminalCell", () => {
     expect(w.find(".cell-actions .cell-close").exists()).toBe(true);
   });
 
+  // The whole chain, on the cell the user actually presses it on: button -> CellChromeButtons'
+  // emit -> the cell's chromeEvents object -> the cell's own emit -> the grid, which opens the
+  // pane. It was broken at the third step from #1573 until the button was first tried by hand:
+  // `chromeEvents` had no `toggle-collections` key, so the emit was dropped inside the cell and
+  // nothing reached the grid. See cellChromeForwarding.spec for why the list is derived now.
+  it("forwards the collections toggle out of an enlarged cell, so the grid can open the pane", async () => {
+    const w = mountCell("11111111-1111-1111-1111-111111111111", { initialCwd: "/home/me/proj", expanded: true, collectionsAvailable: true });
+    await flushPromises();
+    await w.find(`[aria-label="Show this folder's collections"]`).trigger("click");
+    expect(w.emitted("toggle-collections")).toHaveLength(1);
+  });
+
+  // A directory that never registered the `data` MCP group has no collection tools, so the pane
+  // would be a door onto a room the agent beside it cannot enter. Hidden, not disabled — there is
+  // nothing for a disabled button to explain.
+  it("offers no collections button where the directory has no collection tools", async () => {
+    const w = mountCell("11111111-1111-1111-1111-111111111111", { initialCwd: "/home/me/proj", expanded: true });
+    await flushPromises();
+    expect(w.find(`[aria-label="Show this folder's collections"]`).exists()).toBe(false);
+    // The neighbouring buttons are untouched — this hides ONE control, not the header.
+    expect(w.find('[aria-label="Show tools"]').exists()).toBe(true);
+  });
+
   it("shows the restore label + icon when the cell is expanded", async () => {
     const w = mountCell("11111111-1111-1111-1111-111111111111", { initialCwd: "/home/me/proj", expanded: true });
     await flushPromises();
@@ -1874,6 +2132,128 @@ describe("TerminalCell", () => {
     const style = w.find(".cell-header").attributes("style") ?? "";
     expect(style).toContain("--cell-header-bg: #112233");
     expect(style).toContain("--cell-header-fg: #ffffff");
+  });
+
+  // The issue's own reproduction: `headerColor` alone (#1591). An idle cell shows that colour, so a
+  // readable ink is derived for it; a WORKING one has replaced the background with the status tint
+  // (HEADER_STATUS), and an ink derived for the directory's colour would land on that instead.
+  it("derives a header text colour from headerColor alone — but only while the cell is idle", async () => {
+    const dirConfigOnly = (working: boolean) =>
+      vi.fn(async (url: string) => {
+        const u = String(url);
+        if (u.includes("/api/dir-config")) return { ok: true, json: async () => ({ headerColor: "#e8341c" }) };
+        if (u.includes("/api/sessions")) return { ok: true, json: async () => ({ sessions: [] }) };
+        return { ok: true, json: async () => ({ working, waiting: false, lastPrompt: null }) };
+      }) as unknown as typeof fetch;
+
+    globalThis.fetch = dirConfigOnly(false);
+    const idle = mountCell("11111111-1111-1111-1111-111111111111", { initialCwd: "/home/me/hdr-derive-idle" });
+    await flushPromises();
+    const idleStyle = idle.find(".cell-header").attributes("style") ?? "";
+    expect(idleStyle).toContain("--cell-header-bg: #e8341c");
+    expect(idleStyle).toContain("--cell-header-fg: #000000"); // WCAG picks black on this red, and pure — see cellHeaderStyle.spec.ts
+
+    globalThis.fetch = dirConfigOnly(true);
+    const busy = mountCell("22222222-2222-2222-2222-222222222222", { initialCwd: "/home/me/hdr-derive-busy" });
+    await flushPromises();
+    // NEITHER variable, not just the ink (#1617). The status classes now read the background
+    // through `var(--cell-header-bg, <wash>)`, so emitting the directory's colour here would paint
+    // it over the wash — and the ink would then be the one thing left describing a colour nobody
+    // can see. Both absent hands the whole header back to the theme, which pairs them.
+    const busyStyle = busy.find(".cell-header").attributes("style") ?? "";
+    expect(busyStyle).not.toContain("--cell-header-bg");
+    expect(busyStyle).not.toContain("--cell-header-fg");
+  });
+
+  // The reporter's case in #1591, which the derivation above could not reach: a directory that
+  // DECLARED its ink for a dark header, measured at 1.15:1 once a light theme washed the header
+  // pale blue underneath it.
+  it("drops a declared headerTextColor too while a status owns the background", async () => {
+    const declared = (working: boolean) =>
+      vi.fn(async (url: string) => {
+        const u = String(url);
+        if (u.includes("/api/dir-config")) return { ok: true, json: async () => ({ headerColor: "#8e44ad", headerTextColor: "#ffffff" }) };
+        if (u.includes("/api/sessions")) return { ok: true, json: async () => ({ sessions: [] }) };
+        return { ok: true, json: async () => ({ working, waiting: false, lastPrompt: null }) };
+      }) as unknown as typeof fetch;
+
+    globalThis.fetch = declared(false);
+    const idle = mountCell("33333333-3333-3333-3333-333333333333", { initialCwd: "/home/me/hdr-declared-idle" });
+    await flushPromises();
+    expect(idle.find(".cell-header").attributes("style") ?? "").toContain("--cell-header-fg: #ffffff");
+
+    globalThis.fetch = declared(true);
+    const busy = mountCell("44444444-4444-4444-4444-444444444444", { initialCwd: "/home/me/hdr-declared-busy" });
+    await flushPromises();
+    expect(busy.find(".cell-header").attributes("style") ?? "").not.toContain("--cell-header-fg");
+  });
+
+  // The GLOBAL half of the feature, which nothing else reaches: every other test here configures a
+  // directory. A cell that consulted only its own `.mulmoterminal.json` — the shape this component
+  // had before #1617 — would pass all of them, so this is the one that says the global default is
+  // wired to a cell at all. (Observed during Claude review; not flagged by Codex.)
+  it("takes the per-status colours from the global config when the directory names none", async () => {
+    setHeaderStatusDefaults({ working: "#166534" }, "background");
+    globalThis.fetch = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/dir-config")) return { ok: true, json: async () => ({ headerColor: "#8e44ad" }) };
+      if (u.includes("/api/sessions")) return { ok: true, json: async () => ({ sessions: [] }) };
+      return { ok: true, json: async () => ({ working: true, waiting: false, lastPrompt: null }) };
+    }) as unknown as typeof fetch;
+    const w = mountCell("66666666-6666-6666-6666-666666666666", { initialCwd: "/home/me/hdr-global-default" });
+    await flushPromises();
+    const style = w.find(".cell-header").attributes("style") ?? "";
+    expect(style).toContain("--cell-header-bg: #166534");
+    expect(style).toContain("--cell-header-fg: #ffffff"); // derived from the global background
+  });
+
+  // The tint is the OTHER global key, and it falls back by a separate expression. Deleting that
+  // fallback failed nothing until this existed — the test above covers the colours and would have
+  // stayed green.
+  it("takes the tint mode from the global config too", async () => {
+    setHeaderStatusDefaults({}, "none");
+    globalThis.fetch = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/dir-config")) return { ok: true, json: async () => ({ headerColor: "#8e44ad" }) };
+      if (u.includes("/api/sessions")) return { ok: true, json: async () => ({ sessions: [] }) };
+      return { ok: true, json: async () => ({ working: true, waiting: false, lastPrompt: null }) };
+    }) as unknown as typeof fetch;
+    const w = mountCell("88888888-8888-8888-8888-888888888888", { initialCwd: "/home/me/hdr-global-tint" });
+    await flushPromises();
+    // "none" globally means a working cell keeps the directory's own colour instead of the wash.
+    expect(w.find(".cell-header").attributes("style") ?? "").toContain("--cell-header-bg: #8e44ad");
+  });
+
+  // And the direction of the override, which the same wiring decides: a directory that names its
+  // own block replaces the global one rather than merging into it.
+  it("lets a directory's own block outrank the global one", async () => {
+    setHeaderStatusDefaults({ working: "#166534" }, "background");
+    globalThis.fetch = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/dir-config")) return { ok: true, json: async () => ({ headerStatusColors: { working: "#ffe8a3" } }) };
+      if (u.includes("/api/sessions")) return { ok: true, json: async () => ({ sessions: [] }) };
+      return { ok: true, json: async () => ({ working: true, waiting: false, lastPrompt: null }) };
+    }) as unknown as typeof fetch;
+    const w = mountCell("77777777-7777-7777-7777-777777777777", { initialCwd: "/home/me/hdr-dir-outranks" });
+    await flushPromises();
+    expect(w.find(".cell-header").attributes("style") ?? "").toContain("--cell-header-bg: #ffe8a3");
+  });
+
+  // And what the user configures INSTEAD: a colour for that status, whose ink is derived from it.
+  it("paints a configured working colour, with an ink derived from it", async () => {
+    globalThis.fetch = vi.fn(async (url: string) => {
+      const u = String(url);
+      if (u.includes("/api/dir-config")) {
+        return { ok: true, json: async () => ({ headerColor: "#8e44ad", headerStatusColors: { working: "#ffe8a3" } }) };
+      }
+      if (u.includes("/api/sessions")) return { ok: true, json: async () => ({ sessions: [] }) };
+      return { ok: true, json: async () => ({ working: true, waiting: false, lastPrompt: null }) };
+    }) as unknown as typeof fetch;
+    const w = mountCell("55555555-5555-5555-5555-555555555555", { initialCwd: "/home/me/hdr-status-configured" });
+    await flushPromises();
+    const style = w.find(".cell-header").attributes("style") ?? "";
+    expect(style).toContain("--cell-header-bg: #ffe8a3");
+    expect(style).toContain("--cell-header-fg: #1b2430");
   });
 
   it("applies cellColor/cellBorderColor/dotColor/buttonColor as cell-root CSS vars", async () => {
@@ -2391,15 +2771,15 @@ describe("TerminalCell launch target — the OS default shell (#1114)", () => {
     }) as unknown as typeof fetch;
   }
 
-  const pick = (w: ReturnType<typeof mount>, agent: string) => w.find(`[data-testid="cell-target-${agent}"]`).trigger("click");
+  const pick = (w: ReturnType<typeof mount>, agent: string) => w.find(`[data-testid="agent-picker-${agent}"]`).trigger("click");
 
-  it("offers Claude / Codex / Antigravity / Shell, with Claude picked", async () => {
+  it("offers every built-in agent then Shell, with Claude picked", async () => {
     const w = mountCell(null);
     await flushPromises();
     const row = w.find('[role="radiogroup"]');
-    expect(row.findAll('[role="radio"]').map((b) => b.text())).toEqual(["Claude", "Codex", "Antigravity", "Shell"]);
-    expect(w.find('[data-testid="cell-target-claude"]').attributes("aria-checked")).toBe("true");
-    expect(w.find('[data-testid="cell-target-shell"]').attributes("aria-checked")).toBe("false");
+    expect(row.findAll('[data-testid="agent-picker-label"]').map((b) => b.text())).toEqual(["Claude", "Codex", "Antigravity", "Grok", "Muse", "Shell"]);
+    expect(w.find('[data-testid="agent-picker-claude"]').attributes("aria-checked")).toBe("true");
+    expect(w.find('[data-testid="agent-picker-shell"]').attributes("aria-checked")).toBe("false");
   });
 
   it("starts the OS default shell in the typed dir — no configured launcher needed", async () => {
@@ -2416,7 +2796,7 @@ describe("TerminalCell launch target — the OS default shell (#1114)", () => {
     expect(w.find('[data-testid="cell-launch"]').exists()).toBe(true);
   });
 
-  // The other launch button in the same form. The selector has to decide here too, or one pick
+  // The other launch button in the same form. The Agent Picker has to decide here too, or one pick
   // opens a shell from the dir field and an agent from the chip beside it.
   it("starts a shell from a directory chip's launch button too", async () => {
     const w = mountCell(null, { presets: [{ label: "proj", path: "/home/me/proj" }] });

@@ -11,7 +11,8 @@ import { useCollectionBrowse, browseGotoIndex } from "../composables/useCollecti
 import { filesGotoIndex } from "../composables/useFilesView";
 import { useAccountingView, accountingViewOpen } from "../composables/useAccountingView";
 import { useWikiBrowse, wikiGotoIndex, wikiGotoTag } from "../composables/useWikiBrowse";
-import { usePrsView, prsGotoIndex } from "../composables/usePrsView";
+import { useGithubView, githubGotoIndex } from "../composables/useGithubView";
+import { useRoomsView, roomsViewOpen } from "../composables/useRoomsView";
 import { useSoundEnabled } from "../composables/useSoundEnabled";
 import { audioBlocked } from "../composables/audioUnlockState";
 import { soundButtonState } from "./soundButtonState";
@@ -50,7 +51,8 @@ const hasSummary = computed(() => summary.value.show);
 const { view: browseView } = useCollectionBrowse();
 const { isOpen: accountingOpen } = useAccountingView();
 const { isOpen: wikiOpen } = useWikiBrowse();
-const { isOpen: prsOpen } = usePrsView();
+const { isOpen: prsOpen } = useGithubView();
+const { isOpen: roomsOpen } = useRoomsView();
 const { enabled: soundEnabled, toggle: toggleSound } = useSoundEnabled();
 const soundButton = computed(() => soundButtonState(soundEnabled.value, audioBlocked.value));
 const { badge: updateBadge } = useUpdateStatus();
@@ -100,6 +102,7 @@ const inContent = computed(() => CONTENT_ROUTES.has(String(route.name)));
 const accountingActive = computed(() => accountingOpen.value);
 const wikiActive = computed(() => wikiOpen.value);
 const prsActive = computed(() => prsOpen.value);
+const roomsActive = computed(() => roomsOpen.value);
 function showGrid(): void {
   void router.push("/terminals");
 }
@@ -128,7 +131,12 @@ function showWorklog(): void {
   wikiGotoTag(WORKLOG_TAG);
 }
 function showPrs(): void {
-  prsGotoIndex();
+  githubGotoIndex();
+}
+// Beside PRs rather than behind the Collections door, for the same reason PRs is: a room is the
+// record of what the terminals in the grid said to each other, not workspace content.
+function showRooms(): void {
+  roomsViewOpen();
 }
 </script>
 
@@ -145,8 +153,10 @@ function showPrs(): void {
         <!-- The way IN to the workspace's own data, beside the views it is a peer of — the content
              surfaces used to be reachable only from the single view (#886), which left them with
              no door at all once that view goes. One button here rather than four: the rest appear
-             below once you are inside, so the row a terminal user sees does not grow by four. -->
-        <LauncherButton icon="apps" title="Collections" label="Collections" :active="collectionsActive" @click="showCollections" />
+             below once you are inside, so the row a terminal user sees does not grow by four.
+             Same `database` icon as the cell header's collections pane (CellChromeButtons.vue), so
+             the door and the pane read as one thing wherever you meet them. -->
+        <LauncherButton icon="database" title="Collections" label="Collections" :active="collectionsActive" @click="showCollections" />
       </span>
       <!-- The other content surfaces, revealed by being IN the section rather than always present.
            Same reasoning as the fence above: everything here acts within the view you are in. -->
@@ -165,6 +175,7 @@ function showPrs(): void {
            Collections door, which is why they are not in CONTENT_ROUTES. -->
       <template v-if="onGridRoute">
         <LauncherButton icon="call_merge" title="Pull requests" label="Pull requests" :active="prsActive" @click="showPrs" />
+        <LauncherButton icon="forum" title="Rooms — round-table conversations" label="Rooms" :active="roomsActive" @click="showRooms" />
         <LauncherButton
           icon="history_edu"
           title="Worklog — the dev work log in the wiki (#worklog)"

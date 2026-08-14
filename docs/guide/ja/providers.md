@@ -3,7 +3,7 @@ title: Claude Code を別のモデルで動かす（OpenRouter / ローカル）
 nav_title: 他のモデル
 layout: default
 parent: 日本語
-nav_order: 10
+nav_order: 14
 description: OpenRouter などの Anthropic 互換バックエンドを登録して、Claude Code を Claude 以外のモデルで動かす手順。
 ---
 
@@ -127,8 +127,15 @@ console.log("added openrouter to " + file);
 どのディレクトリでもいいので、Claude のセッションに `mulmoterminal の設定に OpenRouter を追加して` と
 頼めば、同梱の `mulmoterminal-config` スキルが既存の設定を保ったまま書いてくれます（**鍵は書きません**）。
 
-**モデルは書きません。** この `id` のプロバイダを登録した時点で、[検証済みの 27 モデル](#verified)が
-選択肢に出ます。書くのは、その一覧に**無いモデルを足したいとき**だけです（→ [モデルを足す](#add-models)）。
+**`id` が `openrouter` のときは、モデルを書きません。** この `id` のプロバイダを登録した時点で、
+[検証済みの 27 モデル](#verified)が選択肢に出ます。書くのは、その一覧に**無いモデルを足したいとき**
+だけです（→ [モデルを足す](#add-models)）。
+
+**それ以外の `id` では `models` が必須です。** 検証済み一覧は OpenRouter のもので、`id` がちょうど
+`openrouter` のときだけ付きます。`deepseek`・`moonshot`・社内ゲートウェイなどで登録したプロバイダは
+モデルがゼロの状態から始まり、**モデルが 1 つも無いプロバイダは MODEL の選択肢に出ません**——
+プロバイダだけ指定してモデルを指定しないセッションは起動を拒否されるからです。動かしたいモデル id を
+列挙してください（→ [モデルを足す](#add-models)）。
 
 | キー | 意味 |
 |---|---|
@@ -137,7 +144,7 @@ console.log("added openrouter to " + file);
 | `baseUrl` | **末尾に `/v1` を付けない**（下の注意を参照） |
 | `tokenEnv` | 鍵が入っている環境変数の**名前**。鍵そのものではありません |
 | `maxOutputTokens` | 任意。省略時 16000 |
-| `models` | 任意。組み込み一覧に**無い**モデルを足すときだけ（→ [モデルを足す](#add-models)） |
+| `models` | **`id` が `openrouter` 以外なら必須**（プリセットが付くのはその id だけ）。`openrouter` では、組み込み一覧に**無い**モデルを足すときだけ（→ [モデルを足す](#add-models)） |
 
 ### `baseUrl` に `/v1` を付けてはいけない
 {: .no_toc }
@@ -201,6 +208,19 @@ id に使えるのは英数と `. _ : / - ~` だけです（`providers` の `id`
 `~anthropic/claude-opus-latest` のような「常に最新」エイリアスも使えます）。空白や先頭のダッシュなど
 形が違う値を書くと、そのディレクトリのセッションは**起動を拒否します** — 黙って別のモデルで動き出す方が
 危険なためです。色やテーマなど他の設定はそのまま読み込まれます。
+
+モデル id は末尾に **`[1m]`** を付けられます。1M コンテキストウィンドウを要求する Claude Code 自身の
+記法で、エイリアスにもフルネームにも付けられます:
+
+```json
+{ "model": "claude-opus-5[1m]" }
+```
+
+サフィックスは書いたまま `claude --model` に渡ります。読んで剥がすのは Claude Code 自身なので、
+MulmoTerminal 側は一切解釈しません。ブラケット記法はこれ 1 つだけで、`[2m]` や `[200k]` は弾かれます。
+また末尾以外には置けません。どのモデルで実際に効くかは
+[Extended context](https://code.claude.com/docs/en/model-config#extended-context) を参照してください。
+**provider の `id`** には付けられません。
 
 ### 再開したときの挙動
 {: .no_toc }
@@ -323,7 +343,9 @@ yarn tsx scripts/model-trials.ts --provider openrouter --trials 3 qwen/qwen3-cod
 | `404 No endpoints available …` | そのモデルが [Privacy 設定](https://openrouter.ai/settings/privacy)で除外されている |
 | 返事が空、固まったように見える | `maxOutputTokens` が小さすぎる。16000 以上に |
 | ツールを使わず、文章だけ返ってくる | そのモデルの限界。上の一覧か `model-trials.ts` で確認を |
-| モデル選択欄が出ない | `providers` が未登録（[2 章](#2-接続先を登録する必須)）か、鍵が無い。フォームの「Use another model…」から不足箇所を確認できます |
+| モデル選択欄が出ない | `providers` が未登録（[2 章](#2-接続先を登録する必須)）か、鍵が無いか、選べるモデルが 1 つも無い。MODEL ラベル横のリンク（「Needs attention」／「Use another model…」）に不足箇所が出ます |
+| 登録したはずの接続先が MODEL の一覧に出ない | モデルがゼロ。プリセットが付くのは `id` が `openrouter` のときだけなので、[`models` を列挙](#add-models)してください |
+| `models` を書いたのに 1 つも選べない | 書いた id が全部弾かれている。モデル id に使えるのは英数と `. _ : / - ~`（と末尾の `[1m]`）だけで、`{"id": "…"}` のようなオブジェクトや空白入りの値は捨てられます。捨てた id はサーバのログに出ます |
 | ヘッダーにモデル名が出ない | 設定の `chips` に `ctx` が入っていない |
 
 ---
@@ -334,6 +356,16 @@ yarn tsx scripts/model-trials.ts --provider openrouter --trials 3 qwen/qwen3-cod
 - セッションに渡す鍵は、コマンドライン引数ではなく**パーミッション 0600 のファイル**経由で渡されます（`ps` で他ユーザーに見えないため）
 - 鍵が解決できないときは**起動を拒否**します。意図しないバックエンドにプロンプトが流れないためです
 - プロバイダを使うセッションでは `ANTHROPIC_API_KEY` を子プロセスから**取り除きます**（残っていると認証トークンより優先されてしまうため）
+
+## URL ではなく「コマンド」でモデルに繋ぐ場合 {#custom-agents}
+
+ここまでは、ベース URL と鍵で指定できるバックエンドの話でした。そうではなく
+**何かを実行して**モデルに繋ぐ場合 — `ollama launch claude --model … --`、ラッパースクリプト、
+もう一つ入れた Claude Code — は、プロバイダではなく**カスタムエージェント**の出番です。
+自分のコマンドが Agent Picker に並び、そこに Claude Code 自身の引数が付くので、セルは
+本物のセッション（再開・コスト・コンテキスト・GUI ツール）のままです。
+
+→ [カスタムエージェント](config.html#custom-agents)
 
 ## ローカル LLM をローカルで動かす（claude-ollama）
 

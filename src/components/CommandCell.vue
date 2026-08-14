@@ -136,6 +136,7 @@ function copyPrompt() {
     :files-open="filesOpen"
     :right-pane="rightPane"
     :canvas-available="canvasAvailable"
+    :collections-available="collectionsAvailable"
     :home="home"
     :cwd="command.cwd"
     :default-cwd="defaultCwd"

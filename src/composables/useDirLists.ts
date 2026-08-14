@@ -1,7 +1,9 @@
 import { ref, shallowRef } from "vue";
 import type { PartialWorkerStatus } from "../../common/workerStatus";
 import type { PartialSessionOccupancy, SessionOccupancy } from "../../common/sessionOccupancy";
+import type { PartialSessionRunning } from "../../common/sessionRunning";
 import { isTerminalAgent, type TerminalAgent } from "../../common/sessionAgent";
+import { agentSessionListUrl } from "../../common/agentSessionList";
 import { isRecord, optionalBoolean } from "../../common/isRecord";
 import { isUnknownArray } from "../../common/isUnknownArray";
 import { jsonBody } from "../jsonBody";
@@ -23,7 +25,7 @@ import { fetchWithTimeout } from "../utils/fetchWithTimeout";
 /** A row the launcher can resume into a cell. `hidden` / `failed` / `attached` come from shared
  *  wire types the server fills — see common/workerStatus.ts and common/sessionOccupancy.ts for
  *  why they are OPTIONAL on this side. */
-export interface ResumableSession extends PartialWorkerStatus, PartialSessionOccupancy {
+export interface ResumableSession extends PartialWorkerStatus, PartialSessionOccupancy, PartialSessionRunning {
   id: string;
   title: string;
   mtime: number;
@@ -86,7 +88,11 @@ const isResumableSession = (row: unknown): row is ResumableSession =>
   // said), but a PRESENT one of the wrong type would be asserted as a boolean and read as truthy.
   optionalBoolean(row.hidden) &&
   optionalBoolean(row.failed) &&
-  optionalBoolean(row.attached);
+  optionalBoolean(row.attached) &&
+  // The key the stop button POSTs to. Checked as strictly as the booleans and for a sharper reason:
+  // a number or an object asserted as a string here would be sent to `/api/session/:id/terminate`
+  // as whatever it stringifies to.
+  (row.runningKey === undefined || row.runningKey === null || typeof row.runningKey === "string");
 
 const isRunnableScript = (row: unknown): row is RunnableScript =>
   isRecord(row) && typeof row.index === "number" && typeof row.label === "string" && typeof row.command === "string";
@@ -150,13 +156,33 @@ function useDirList<T>(url: (dir: string) => string, parse: (body: ListBody, dir
   return { value, loading, forget, load };
 }
 
-// Existing sessions for a directory, so an empty cell can resume one instead of starting fresh.
-export const useResumableSessions = () =>
-  useDirList<ResumableList>(
-    (dir) => `/api/sessions?cwd=${encodeURIComponent(dir)}`,
+/**
+ * Existing sessions for a directory, so an empty cell can resume one instead of starting fresh.
+ *
+ * Per AGENT as well as per directory (#1417): every agent keeps its history in its own store, so
+ * the picked agent decides which route answers (common/agentSessionList.ts). Before this it was
+ * always Claude's, whatever the Agent Picker said — so picking Codex offered Claude conversations,
+ * and clicking one connected the codex endpoint to a key that only ever named a Claude transcript.
+ *
+ * The agent is read when the URL is built, which happens synchronously inside `load` before its
+ * first await — so a switch mid-flight cannot make one request fetch under another's agent, and
+ * the superseded response is dropped by the request token the same way a stale directory's is.
+ */
+export const useResumableSessions = () => {
+  let agent: TerminalAgent = "claude";
+  const list = useDirList<ResumableList>(
+    (dir) => agentSessionListUrl(agent, dir),
     (body, dir) => ({ sessions: rowsOf(body.sessions, isResumableSession), cwd: dirOf(body.cwd, dir) }),
     () => ({ sessions: [], cwd: null }),
   );
+  return {
+    ...list,
+    load: (dir: string | null, forAgent: TerminalAgent): Promise<void> => {
+      agent = forAgent;
+      return list.load(dir);
+    },
+  };
+};
 
 // The runnable scripts (script.json) for a directory — the launch form's chips and the running
 // terminal's Run menu offer the same list.

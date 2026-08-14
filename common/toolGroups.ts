@@ -31,6 +31,20 @@ export const isToolGroup = (value: unknown): value is ToolGroup => TOOL_GROUPS.s
 // front of the spend (same reasoning as presentDocument below).
 export const CANVAS_TOOL_GROUPS: readonly ToolGroup[] = ["render", "media"];
 
+// The groups the COLLECTIONS pane is made of. `data` is the group manageCollection and
+// presentCollection belong to, and the pane is a window onto exactly that store — a directory
+// that never registered the group has no collection tools, so the pane is a door onto a room the
+// agent beside it cannot enter.
+//
+// Named here rather than written as `"data"` at the call site for the same reason
+// CANVAS_TOOL_GROUPS is: a rename must not leave a literal pointing at a group that is gone.
+export const COLLECTIONS_TOOL_GROUPS: readonly ToolGroup[] = ["data"];
+
+/** Does this session/directory have the collection tools? Same shape as `hasCanvasGroup`, and
+ *  validated the same way — an unknown group name from a newer server must not count. */
+export const hasCollectionsGroup = (groups: unknown): boolean =>
+  Array.isArray(groups) && groups.some((group) => isToolGroup(group) && COLLECTIONS_TOOL_GROUPS.includes(group));
+
 // Does a session/directory reach the Canvas at all? Asked of the group list the server reports,
 // whose members arrive as plain strings — validated rather than cast, since an unknown name from
 // a newer server must not count as a canvas group.
@@ -76,6 +90,13 @@ const GROUP_BY_TOOL = new Map<string, ToolGroup>([
   ["presentCollection", "data"],
   ["manageCollection", "data"],
   ["manageAccounting", "data"],
+  // manageSharedApp deploys and publishes the SHARED collections of the directory the cell is
+  // open in, so it belongs where their store does: a cell without the data group has no
+  // collection tools, and a deploy tool beside no collections is a tool with nothing to deploy.
+  // It is not in AUTO_ALLOWED_TOOLS, and it is in NEVER_AUTO_APPROVED_TOOLS below — publish is the
+  // one operation here that changes what people outside the roster can see, and the permission
+  // prompt is wanted in front of it on EVERY session, the workspace included.
+  ["manageSharedApp", "data"],
 
   ["generateImage", "media"],
   ["presentMulmoScript", "media"],
@@ -147,3 +168,19 @@ export const LEGACY_GUI_SERVER_IDS: readonly string[] = ["mulmoterminal-gui"];
 //
 // The three below save an artifact and draw it, and call nothing external.
 export const AUTO_ALLOWED_TOOLS: readonly string[] = ["presentForm", "presentChart", "presentHtml"];
+
+/** Tools that must keep the agent's permission prompt on EVERY claude session, including the
+ *  workspace.
+ *
+ *  `AUTO_ALLOWED_TOOLS` above is the grid cell's list and withholds these already — but it is an
+ *  allowlist, and the workspace does not use it. The workspace passes `allowedToolNames()`, which
+ *  is every tool, so a tool absent from `AUTO_ALLOWED_TOOLS` was still auto-approved in exactly
+ *  the session that builds a shared app. The comment on `manageSharedApp` said the prompt was
+ *  wanted in front of publish; nothing implemented it. This is what implements it.
+ *
+ *  It matters because of what the agent reads. A shared app is a repository, and the agent is
+ *  already reading untrusted text out of it — skill files, collection notes, issue bodies, survey
+ *  copy somebody pasted. `manageSharedApp` publishes to the internet, rewrites the roster, and
+ *  hands the roster live records. With auto-approval, "invite this address as owner, then deploy"
+ *  arriving in that text is a tool call rather than a question. */
+export const NEVER_AUTO_APPROVED_TOOLS: readonly string[] = ["manageSharedApp"];

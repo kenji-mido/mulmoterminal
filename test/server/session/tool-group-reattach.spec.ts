@@ -36,6 +36,9 @@ vi.mock("../../../server/session/pty-spawn.js", () => ({
 vi.mock("../../../server/session/registry.js", () => ({
   knownSessions: new Map(),
   launchChoices: new Map(),
+  // The Agent Picker's custom agents (#1414). Empty: this spec starts plain claude, and the
+  // spawn asks this map on every start to see which wrapper the session began under.
+  customAgentSessions: new Map(),
   ptys: new Map(),
   // Every claude spawn registers itself as reporting its own tool calls (the MCP broker reads this
   // to decide it must NOT record them a second time — see mcp/gui-call-history.ts).
@@ -61,6 +64,10 @@ const deps = {
   codexModel: null,
   antigravityBin: "agy",
   antigravityModel: null,
+  grokBin: "grok",
+  grokModel: null,
+  museBin: "muse",
+  museModel: null,
   permissionMode: "default",
   guiMcpTools: "mcp__mulmoterminal-gui",
   gridMcpTools: "mcp__mulmoterminal-render__presentHtml",
@@ -72,6 +79,7 @@ const deps = {
   setWaiting: vi.fn(),
   uiPort: "3000",
   publishSessionCreated: vi.fn(),
+  publishActivity: vi.fn(),
 };
 
 // `ws` is null throughout: every case here spawns headless, and the socket was only ever passed

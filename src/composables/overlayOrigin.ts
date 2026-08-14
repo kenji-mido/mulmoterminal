@@ -27,7 +27,9 @@ export const CONTENT_ROUTES = new Set([
   "feedDetail",
 ]);
 
-const OVERLAY_ROUTES = new Set([...CONTENT_ROUTES, "prs"]);
+// Rooms sit with PRs rather than with the content: a room is the record of what the terminals in
+// the grid said to each other, not something the workspace holds independently of them.
+const OVERLAY_ROUTES = new Set([...CONTENT_ROUTES, "github", "rooms", "roomView"]);
 
 /** The route an open overlay should return to. */
 export function overlayReturnPath(): string {

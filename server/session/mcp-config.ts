@@ -9,6 +9,8 @@
 import type { UserMcpServer } from "../config/config-schema.js";
 import { toolGroupServerId, GUI_SERVER_ID, type ToolGroup } from "../../common/toolGroups.js";
 import { isWorkspaceCwd } from "../config/env.js";
+import { agentCarriesFullGuiMcp } from "../../common/guiMcpAgents.js";
+import type { SessionAgent } from "../../common/sessionAgent.js";
 import type { GuiMcpServer } from "../agents/codex-args.js";
 
 export interface McpConfigInput {
@@ -37,9 +39,16 @@ const DEFAULT_HOST = "127.0.0.1";
  * before any of this. Named and exported rather than left inline because that last sentence is the
  * invariant the whole design is written around, and an invariant nothing can assert is just a hope.
  *
- * It lives HERE, next to the two payload builders, because all three agents now ask it — claude's
- * argv, codex's `-c` overrides, and the launcher chip's rewritten command line. It was a local
- * detail of spawn-claude.ts while claude was the only caller.
+ * It lives HERE, next to the two payload builders, because both agents that can receive a
+ * per-spawn config ask it — claude's argv and codex's `-c` overrides. It was a local detail of
+ * spawn-claude.ts while claude was the only caller.
+ *
+ * The AGENT is the third fact, and leaving it implicit is what #1423 was: antigravity reaches MCP
+ * through a config file it reads itself, so it never had a URL to be handed and never called this
+ * — but the launcher form, which could not see which spawn calls what, asked the cwd alone and
+ * promised an antigravity session in the workspace every tool while hiding the toggles that were
+ * its only real way to get one. The membership now lives in common/guiMcpAgents.ts so the form and
+ * this predicate cannot disagree about a fourth agent later.
  *
  * This is also WHY THE TOOL NAMES DIFFER between cells, which looks like a bug until you know it:
  * true carries every tool under one generated server id (`mt`), so the agent sees
@@ -47,7 +56,11 @@ const DEFAULT_HOST = "127.0.0.1";
  * group ids, so the SAME tool is `mcp__mulmoterminal-render__presentChart`. Neither name is stale.
  * See common/toolGroups.ts for why the two ids are not unified, and README's "MCP server ids".
  */
-export const carriesFullGuiMcp = (attachGuiMcp: boolean, cwd: string | undefined): boolean => attachGuiMcp || isWorkspaceCwd(cwd);
+// `agent` is REQUIRED, deliberately undefaulted: a default would be one agent's answer handed to a
+// caller that never considered the question, which is the shape that produced #1423 in the first
+// place.
+export const carriesFullGuiMcp = (attachGuiMcp: boolean, cwd: string | undefined, agent: SessionAgent): boolean =>
+  agentCarriesFullGuiMcp(agent) && (attachGuiMcp || isWorkspaceCwd(cwd));
 
 // The counterpart for GRID cells, which are handed no --mcp-config at all: their GUI tools
 // come from the user's OWN per-folder MCP config (`claude mcp add -s local`, `.mcp.json`),
@@ -61,6 +74,13 @@ export const carriesFullGuiMcp = (attachGuiMcp: boolean, cwd: string | undefined
 export function guiMcpEnv(sessionId: string, port: string | number): Record<string, string> {
   return { MULMOTERMINAL_PORT: String(port), MULMOTERMINAL_SESSION_ID: sessionId };
 }
+
+// There is deliberately no muse counterpart to `guiMcpEnv`, and the absence is worth a line
+// because writing one is the obvious first move: muse reaches its tools through a PLUGIN, and a
+// plugin's MCP server is started with a curated environment that carries nothing of ours — so a
+// variable set here would be silently dropped between the spawn and the bridge. What muse's spawn
+// sets instead is the flag muse ITSELF reads (musePluginEnv), and the session's entitlement is
+// recorded in memory for the bridge to ask for (server/session/bridge-session.ts).
 
 // The same two surfaces, spelled for CODEX, which takes them as `-c mcp_servers.<id>.url=` at
 // spawn instead of reading a config file. It has no `${VAR}` expansion, so unlike the template

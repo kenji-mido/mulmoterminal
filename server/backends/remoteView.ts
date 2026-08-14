@@ -36,7 +36,8 @@ import {
 } from "@mulmoclaude/core/collection/server";
 import type { CollectionCustomView, CollectionItem, CollectionSchema } from "@mulmoclaude/core/collection";
 
-import { resolveThumbnail } from "./thumbnailStore.js";
+import { thumbnailResolverFor } from "./thumbnailStore.js";
+import type { ProjectScope } from "../infra/project-root.js";
 
 // Resolves a workspace image path to a downscaled JPEG `data:` URL, or null when
 // it can't (path escapes the workspace, missing, or undecodable).
@@ -91,7 +92,17 @@ export const createBuildRemoteView =
     return { kind: "ok", view: { id: view.id, label: view.label, ...(view.icon ? { icon: view.icon } : {}), target: "mobile" }, srcdoc, bytes };
   };
 
-export const buildRemoteView = createBuildRemoteView({ readCustomViewHtml, readCustomViewI18n });
+/** Bound to one project root. The engine reads (view HTML, i18n, records, thumbnails) all
+ *  resolve against the scope the REQUEST named — binding at construction is what keeps the
+ *  root next to the call instead of threading it through every dep signature. */
+export const buildRemoteViewFor = (scope: ProjectScope) =>
+  createBuildRemoteView({
+    readCustomViewHtml: (collection, file) => readCustomViewHtml(collection, file, scope),
+    // Bound too, and not by symmetry: a view that declares `i18n` reads it through this dep,
+    // and an unbound one falls back to the ambient root — which under explicit-root mode is a
+    // throw, so a TRANSLATED mobile view would fail to build while an untranslated one worked.
+    readCustomViewI18n: (collection, file, locale) => readCustomViewI18n(collection, file, locale, scope),
+  });
 
 /** The message a failure kind nobody wrote a branch for gets.
  *
@@ -107,7 +118,11 @@ function unhandledFailure(result: never, slug: string): string {
 export function remoteViewFailureMessage(result: Exclude<RemoteViewBuildResult, { kind: "ok" }>, slug: string): string {
   if (result.kind === "view-not-found") return `custom view '${result.viewId}' not found on collection '${slug}'`;
   if (result.kind === "not-mobile") return `custom view '${result.viewId}' is not a mobile view — declare target: "mobile" in its views[] entry`;
-  if (result.kind === "file-missing") return `view file '${result.file}' not found — author it at data/skills/${slug}/${result.file}`;
+  // Names `.claude/skills`, not the workspace's `data/skills` staging tree. A view now belongs to
+  // whichever FOLDER the collection is in, and outside the managed workspace there is no staging
+  // mirror to write into — telling the author to use one would send them to a path nothing reads
+  // back (and, in a git-tracked project, one that must not exist at all).
+  if (result.kind === "file-missing") return `view file '${result.file}' not found — author it at .claude/skills/${slug}/${result.file}`;
   if (result.kind === "too-large")
     return `mobile view srcdoc is ${result.bytes} bytes — over the ${REMOTE_VIEW_MAX_BYTES}-byte command-channel budget; slim the HTML`;
   return unhandledFailure(result, slug);
@@ -218,7 +233,12 @@ async function updateViaView(
   return { kind: "ok", op: "update", item };
 }
 
-export const mutateRemoteView = createMutateRemoteView({ storeFor, enrichItems, resolveThumbnail });
+export const mutateRemoteViewFor = (scope: ProjectScope) =>
+  createMutateRemoteView({
+    storeFor: (collection) => storeFor(collection, scope),
+    enrichItems: (collection, items) => enrichItems(collection, items, scope),
+    resolveThumbnail: thumbnailResolverFor(scope),
+  });
 
 // ── Item pages (getItems) ──
 // A mobile view's record page: derive computed fields → slice/project (the same
@@ -299,7 +319,12 @@ export const createRemoteViewItems =
     return { kind: "ok", page, inlined, omitted };
   };
 
-export const remoteViewItems = createRemoteViewItems({ listRecords: (collection) => storeFor(collection).list(), enrichItems, resolveThumbnail });
+export const remoteViewItemsFor = (scope: ProjectScope) =>
+  createRemoteViewItems({
+    listRecords: (collection) => storeFor(collection, scope).list(),
+    enrichItems: (collection, items) => enrichItems(collection, items, scope),
+    resolveThumbnail: thumbnailResolverFor(scope),
+  });
 
 /** Message per non-ok item-page kind, thrown by the channel handler. */
 export function remoteViewItemsFailureMessage(result: Exclude<RemoteViewItemsResult, { kind: "ok" }>, slug: string): string {

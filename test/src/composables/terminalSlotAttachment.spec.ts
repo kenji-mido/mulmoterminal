@@ -95,3 +95,74 @@ describe("slot attachment", () => {
     expect(resizeFrames(ws)).toEqual([]);
   });
 });
+
+// Slot keys are positional (`cell-<uid>`, renumbered from array position on every grid parse)
+// while the slot map outlives components — so a view can be handed a slot another cell filled: an
+// HMR reload of GridView, or the ghost a closed cell used to leave. Reusing it silently showed a
+// claude cell some earlier shell's terminal and persisted the wrong pairing (#1533). A view that
+// names a session gets THAT session or a reconnect; only a view with no opinion keeps the reuse.
+describe("a slot inherited by a view asking for a different session", () => {
+  beforeEach(() => {
+    FakeWebSocket.instances.length = 0;
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    conn.release(KEY);
+    vi.restoreAllMocks();
+  });
+
+  const withSession = (sessionId: string | null) => ({ ...target, sessionId });
+
+  it("reconnects under the requested session instead of reusing the slot's", () => {
+    conn.attach(KEY, withSession("shell-1"), {}, document.createElement("div"));
+    expect(FakeWebSocket.instances).toHaveLength(1);
+
+    const seen: string[] = [];
+    conn.attach(KEY, withSession("claude-2"), { onSession: (id) => seen.push(id) }, document.createElement("div"));
+
+    expect(FakeWebSocket.instances).toHaveLength(2); // a new socket, not the inherited one
+    expect(FakeWebSocket.instances.at(-1)?.url).toContain("session=claude-2");
+    // The replay must not write the inherited session back into the parent's persisted state.
+    expect(seen).toEqual(["claude-2"]);
+  });
+
+  it("keeps the reuse for the same session", () => {
+    conn.attach(KEY, withSession("s-1"), {}, document.createElement("div"));
+    conn.attach(KEY, withSession("s-1"), {}, document.createElement("div"));
+    expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+
+  // The repair path: a parent that never learned the id (persisted `session: null`) remounts and
+  // is told the slot's session via the replay. The guard must not turn that into a reconnect.
+  it("keeps the reuse, and the replay, for a view with no opinion", () => {
+    conn.attach(KEY, withSession("s-1"), {}, document.createElement("div"));
+    const seen: string[] = [];
+    conn.attach(KEY, withSession(null), { onSession: (id) => seen.push(id) }, document.createElement("div"));
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(seen).toEqual(["s-1"]);
+  });
+
+  // The same cell paging away and back before its id arrives — the window an auto-start cell
+  // (the phone's launch request, #1535) lives in. BOTH sides have no opinion: the slot has not
+  // learned an id and the remounted view is a fresh launch, so this must stay the reuse. A
+  // reconnect here would spawn a SECOND agent and orphan the first, which is what the cell's
+  // relaunch-on-mount was reviewed as doing (CodeRabbit on #1557) — it does not.
+  it("keeps the reuse when neither the slot nor the remounted view knows the session yet", () => {
+    conn.attach(KEY, withSession(null), {}, document.createElement("div"));
+    conn.detach(KEY, null);
+    conn.attach(KEY, withSession(null), {}, document.createElement("div"));
+    expect(FakeWebSocket.instances).toHaveLength(1);
+  });
+
+  // A slot that has not learned an id is not a blank slate (review on #1534): it belongs to a
+  // fresh launch whose socket may still be connecting, and its `session` frame — the OLD cell's —
+  // would land on whatever view holds the slot. A view naming a concrete session reconnects.
+  it("reconnects when the inherited slot has not learned a session yet", () => {
+    conn.attach(KEY, withSession(null), {}, document.createElement("div")); // a fresh launch's slot
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    conn.attach(KEY, withSession("claude-2"), {}, document.createElement("div"));
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(FakeWebSocket.instances.at(-1)?.url).toContain("session=claude-2");
+  });
+});

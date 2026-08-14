@@ -57,6 +57,7 @@ vi.mock("../../../src/components/PluginFrame.vue", () => ({
   }),
 }));
 
+const { activeCollectionProjectId } = await import("../../../src/composables/collectionSurface");
 const GuiPanel = (await import("../../../src/components/GuiPanel.vue")).default;
 
 function mountPanel() {
@@ -68,6 +69,21 @@ function mountPanel() {
     })),
   );
   return mount(GuiPanel, { props: { sessionId: "s1", sendTextMessage: () => true } });
+}
+
+/** The panel with a directory, i.e. the shape the grid actually renders. The project list is
+ *  answered too, so the scope resolves — asynchronously, which is the point of the test below. */
+function mountPanelIn(cwd: string) {
+  const body = (url: string): unknown => {
+    if (url.includes("/api/collection-projects")) return { projects: [{ id: "proj-1", label: "proj", cwd }] };
+    if (url.includes("/api/tools")) return { tools: [] };
+    return { toolResults: [] };
+  };
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => ({ ok: true, json: async () => body(url) })),
+  );
+  return mount(GuiPanel, { props: { sessionId: "s1", sendTextMessage: () => true, cwd } });
 }
 
 // Deliver a result the way the server does — on the session channel.
@@ -139,6 +155,19 @@ describe("GuiPanel — collapsing repeated cards", () => {
     await push(plain("p1"));
     await push(plain("p2"));
     expect(rendered(wrapper)).toEqual(["p1", "p2"]);
+  });
+
+  // A card SELF-FETCHES its collection by slug, and which project that resolves to is the
+  // PANEL's scope — the canvas shows one session's cards, and that session has a directory.
+  // Without this the fetch went to the workspace and a collection living in the session's own
+  // folder came back "not found" while the tool call had succeeded.
+  it("scopes collection requests to the session's directory while it is open", async () => {
+    const panel = mountPanelIn("/proj");
+    await flushPromises();
+    expect(activeCollectionProjectId()).toBe("proj-1");
+    // …and gives the scope back when it goes away, so the next surface is not left holding it.
+    panel.unmount();
+    expect(activeCollectionProjectId()).toBeNull();
   });
 
   it("remounts the view on a re-presentation, so the card refetches", async () => {

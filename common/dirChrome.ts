@@ -3,6 +3,8 @@
 // all extend this, so a field added on one side can't go missing on the other.
 // `theme` and `colors` stay out of it — each side declares them with its own type
 // (the server keeps the validated strings, the client narrows them to xterm's ITheme).
+import type { HeaderStatusColors, HeaderStatusTint } from "./headerStatusColors.js";
+
 export interface DirChrome {
   name: string | null;
   badgeColor: string | null;
@@ -11,6 +13,11 @@ export interface DirChrome {
   // palette) — these tint the chrome around the terminal, not the terminal itself.
   headerColor: string | null;
   headerTextColor: string | null;
+  // What the header shows once a status REPLACES that background — working / done / blocked
+  // (common/headerStatusColors.ts). null means "not configured here", so a directory that says
+  // nothing falls through to the global default rather than asserting the built-in over it.
+  headerStatusColors: HeaderStatusColors | null;
+  headerStatusTint: HeaderStatusTint | null;
   // The cell frame + accents (grid cell): body background, border, the idle status
   // dot, and the header's icon buttons. Hex #rrggbb or null for the theme default.
   cellColor: string | null;
@@ -40,6 +47,8 @@ export const EMPTY_DIR_CHROME: Readonly<DirChrome> = {
   badgeColor: null,
   headerColor: null,
   headerTextColor: null,
+  headerStatusColors: null,
+  headerStatusTint: null,
   cellColor: null,
   cellBorderColor: null,
   dotColor: null,

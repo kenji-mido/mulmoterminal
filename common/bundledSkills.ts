@@ -22,6 +22,7 @@ export const BUNDLED_SKILL_NAMES = [
   "mulmoterminal-notify",
   "mulmoterminal-bug-report",
   "mulmoterminal-decisions",
+  "mulmoterminal-shared-app",
 ] as const;
 
 export type BundledSkillName = (typeof BUNDLED_SKILL_NAMES)[number];

@@ -14,7 +14,7 @@ const base: ClaudeArgsInput = {
   allowedTools: "mcp__gui__a,mcp__gui__b",
   // What a default spawn resolves to (appended-prompt.ts). The builder treats it as opaque
   // text; the real constant is used here so the asserted argv is the one that ships.
-  appendedPrompt: SESSION_SUMMARY_PROMPT,
+  appendedPrompt: { kind: "inline", text: SESSION_SUMMARY_PROMPT },
 };
 
 const cfg = (over: Partial<ClaudeArgsInput> = {}): ClaudeArgsInput => ({ ...base, ...over });
@@ -160,6 +160,19 @@ describe("appended system prompt", () => {
     ["every section is switched off", null],
     ["nothing was resolved at all", undefined],
   ])("omits the flag entirely when %s", (_case, appendedPrompt) => {
-    expect(buildClaudeArgs(cfg({ appendedPrompt }))).not.toContain("--append-system-prompt");
+    const args = buildClaudeArgs(cfg({ appendedPrompt }));
+    // Both spellings: the file form is a separate flag, so checking only the inline one would
+    // pass on an argv that still carried the prompt (#1516).
+    expect(args).not.toContain("--append-system-prompt");
+    expect(args).not.toContain("--append-system-prompt-file");
+  });
+
+  // The file form names a path, so it needs the OTHER flag — passing a path under
+  // `--append-system-prompt` would append the literal string "C:\\…\\x-prompt.txt".
+  it("names the file flag when the prompt travels as a path", () => {
+    const args = buildClaudeArgs(cfg({ appendedPrompt: { kind: "file", path: "C:\\s\\x-prompt.txt" } }));
+    expect(args).toContain("--append-system-prompt-file");
+    expect(args[args.indexOf("--append-system-prompt-file") + 1]).toBe("C:\\s\\x-prompt.txt");
+    expect(args).not.toContain("--append-system-prompt");
   });
 });

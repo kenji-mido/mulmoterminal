@@ -5,6 +5,7 @@
 // wording. Trailing controls — the roster's ⋮ reorder menu, or a thumbnail's expand/close —
 // go in the default slot.
 import { computed } from "vue";
+import DirIcon from "./DirIcon.vue";
 import { formatCwd } from "./cwdDisplay";
 import { CELL_DIR_PATH, DIR_TRUNCATE_FRONT } from "./cellChromeClasses";
 import { headerStyleFor } from "./cellHeaderStyle";
@@ -12,21 +13,26 @@ import { HOVER_TIP_ID, useHoverTipAnchor } from "../composables/useHoverTip";
 import { phaseDisplay, WORK_WORD, type PrPhase, type WorkPhase } from "./rosterPhase";
 import { textTip } from "./tipContent";
 import type { AttentionStatus } from "./attentionStatus";
-import { agentBadge } from "../../common/sessionAgent";
+import AgentMark from "./AgentMark.vue";
+import { isTerminalAgent, type TerminalAgent } from "../../common/sessionAgent";
 
 const props = withDefaults(
   defineProps<{
     status: AttentionStatus;
-    agent: string;
+    // What the row is running, or null when nothing does yet (an empty cell) — see rosterAgent()
+    // in GridView.vue for how a cell answers this.
+    agent: string | null;
     cwd: string | null;
     home: string | null;
     headerColor: string | null;
     headerTextColor: string | null;
+    // The directory's `icon` image (#1421), already resolved to something an <img> can load.
+    iconUrl?: string | null;
     workPhase?: WorkPhase | null;
     phase?: PrPhase;
     dirLength?: number;
   }>(),
-  { workPhase: null, phase: "none", dirLength: 44 },
+  { iconUrl: null, workPhase: null, phase: "none", dirLength: 44 },
 );
 
 const STATUS_WORD: Record<AttentionStatus, string> = { working: "running", blocked: "waiting", done: "done", idle: "idle" };
@@ -58,10 +64,18 @@ const phaseInfo = computed(() => phaseDisplay(props.phase ?? "none"));
 // word, and a path truncated from the front.
 const { described: phaseDescribed, show: showPhaseTip, hide: hidePhaseTip } = useHoverTipAnchor(() => textTip(phaseInfo.value?.title));
 const { described: dirDescribed, show: showDirTip, hide: hideDirTip } = useHoverTipAnchor(() => textTip(props.cwd));
-// Null for claude (the default, so nearly every row) and for a shell, which is not an agent.
-const badge = computed(() => agentBadge(props.agent));
+const agentMark = computed<TerminalAgent | null>(() => (props.agent !== null && isTerminalAgent(props.agent) ? props.agent : null));
+// Same non-agent icon as the Agent Picker. Anything else — an empty cell, a session kind this
+// build does not know — gets no mark at all: the status dot and the directory still identify the
+// row, and defaulting to Claude's burst would tell the reader a launcher is an agent session.
+const agentSymbol = computed(() => (props.agent === "shell" ? "terminal" : null));
+// Names the mark for assistive tech, which cannot read a drawn glyph. The title says the same
+// thing on hover.
+const agentName = computed(() => agentMark.value ?? (agentSymbol.value ? "shell" : null));
 const phaseColor = computed(() => PHASE_CLASS[props.phase ?? "none"] ?? "text-[#9aa4b2]");
 const dirText = computed(() => formatCwd(props.cwd, props.home, props.dirLength ?? 44) || "—");
+// `true`: this bar is tinted with the directory's colour in every status (the status is the dot and
+// the badge), so a text colour derived from that tint is the one that lands on it.
 const barStyle = computed(() => headerStyleFor(props.headerColor, props.headerTextColor));
 </script>
 
@@ -71,6 +85,8 @@ const barStyle = computed(() => headerStyleFor(props.headerColor, props.headerTe
     class="flex min-w-0 items-center gap-1.5 bg-[var(--cell-header-bg,transparent)] px-2.5 py-1.5 text-[var(--cell-header-fg,inherit)]"
     :style="barStyle"
   >
+    <!-- Leads the bar, ahead of the status dot — the browser-tab position (see TerminalCell). -->
+    <DirIcon :src="iconUrl" />
     <span data-testid="cockpit-dot" class="h-2 w-2 flex-none rounded-full" :class="DOT_CLASS[status]" aria-hidden="true" />
     <span data-testid="cockpit-badge" class="flex-none rounded-full px-1.5 py-px text-[10px] font-bold" :class="BADGE_CLASS[status]">{{ badgeWord }}</span>
     <span
@@ -85,7 +101,19 @@ const barStyle = computed(() => headerStyleFor(props.headerColor, props.headerTe
       @focusout="hidePhaseTip"
       >{{ phaseInfo.label }}</span
     >
-    <span v-if="badge" class="flex-none rounded-[4px] border border-border px-1 text-[10px] text-[#9ab]">{{ badge.full }}</span>
+    <span
+      v-if="agentName"
+      data-testid="cockpit-agent-icon"
+      class="inline-flex h-[18px] w-[18px] flex-none items-center justify-center rounded-[4px] border border-border text-[#9ab]"
+      role="img"
+      :title="agentName"
+      :aria-label="agentName"
+    >
+      <AgentMark v-if="agentMark" :agent="agentMark" />
+      <!-- A Material Symbol is a LIGATURE, so the icon's name is real text inside the row; hidden
+           here for the same reason the Agent Picker hides it, so only the aria-label is read. -->
+      <span v-else class="material-symbols-outlined text-[13px]" aria-hidden="true">{{ agentSymbol }}</span>
+    </span>
     <span
       data-testid="cockpit-dir"
       class="min-w-0 flex-auto text-[11px] text-[var(--cell-header-fg,var(--text-dim))]"

@@ -3,7 +3,7 @@ title: Claude Code を並列で動かすツールの比較（他の選択肢も�
 nav_title: 他の選択肢との比較
 layout: default
 parent: 日本語
-nav_order: 11
+nav_order: 15
 description: Claude Code / Codex を複数同時に走らせるツール — Vibe Kanban、Nimbalyst、Parallel Code、Conductor、Claude Squad、そして Claude Code 本体の claude agents。どれがどの困りごとに向くかを、作っている側から正直に書きます。
 ---
 

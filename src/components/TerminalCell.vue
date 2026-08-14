@@ -3,16 +3,19 @@ import { ref, computed, nextTick, watch, onMounted, onUnmounted, useTemplateRef 
 import TerminalView from "./Terminal.vue";
 import { usePubSub } from "../composables/usePubSub";
 import { useImeAwareEnter } from "../composables/useImeAwareEnter";
+import { useBusyAction } from "../composables/useBusyAction";
 import { useCellChrome } from "../composables/useCellChrome";
 import { useGitStatus } from "../composables/useGitStatus";
 import { useWorkItem } from "../composables/useWorkItem";
 import { dismissWorkCommentFailure, visibleWorkCommentFailure } from "../composables/workCommentNotice";
-import { formatCwd, worktreeLabel } from "./cwdDisplay";
+import { formatCwd } from "./cwdDisplay";
+import { worktreeLabel } from "../../common/worktreePath";
 import { isSameDirPath } from "../../common/dirPathKey";
 import DirBadge from "./DirBadge.vue";
+import DirIcon from "./DirIcon.vue";
 import { isCellContext, isCellUsage, type CellContext, type CellUsage } from "./cellPayload";
 import { asTerminalAgent, type TerminalAgent } from "../../common/sessionAgent";
-import type { LaunchAgent } from "../../common/launchAgent";
+import { customAgentIdOf, type AgentPick, type CustomAgent } from "../../common/customAgents";
 import { unsavedWork } from "./unsavedWork";
 import { shouldPromptTidy } from "./mergedTidy";
 import { usageBadge } from "./cellDisplay";
@@ -22,6 +25,7 @@ import { preferredLaunchDir, shouldSyncLaunchDir } from "./launchDir";
 import CellLaunchForm from "./CellLaunchForm.vue";
 import GitBranchChip from "./GitBranchChip.vue";
 import WorkItemChip from "./WorkItemChip.vue";
+import WorktreeEnvChip from "./WorktreeEnvChip.vue";
 import CellTidyPrompt from "./CellTidyPrompt.vue";
 import WorkCommentNotice from "./WorkCommentNotice.vue";
 import ModelContextBadge from "./ModelContextBadge.vue";
@@ -49,6 +53,7 @@ import {
   CELL_CHIP_BTN,
   CELL_CHIP_ICON,
   CELL_DIR_PATH,
+  CELL_HEADER_INK_DIM,
   CELL_MENU_ITEM,
   CELL_DOT,
   CELL_HEADER_MAIN,
@@ -58,10 +63,16 @@ import {
   DIR_TRUNCATE_FRONT,
 } from "./cellChromeClasses";
 import { CELL_STATUS, DOT_STATUS, HEADER_STATUS } from "./cellStatusClasses";
-import { handoffTargets, pullLastTurn, type HandoffTarget } from "../composables/useHandoff";
+import { headerStatusStyleFor } from "./cellHeaderStyle";
+import { mergeHeaderStatusColors } from "../../common/headerStatusColors";
+import { globalHeaderStatusColors, globalHeaderStatusTint } from "../composables/headerStatusColors";
+import { handoffTargets, pullLastTurn, slotLabel, type HandoffTarget } from "../composables/useHandoff";
 import { runOneExchange, liveCrossTalkDeps } from "../composables/useCrossTalk";
+import { runRoundTable, liveRoundTableDeps, memberFromTarget, type TableMember } from "../composables/useRoundTable";
+import { roundTableMessage } from "../composables/roundTableRules";
+import RoundTableMenu from "./RoundTableMenu.vue";
 import { outcomeMessage } from "../composables/exchangeRules";
-import { worktreeFailureMessage } from "./cellChromeRules";
+import { worktreeFailureMessage, worktreeRequestFailure } from "./cellChromeRules";
 import { isRecord } from "../../common/isRecord";
 import { isUnknownArray } from "../../common/isUnknownArray";
 import { jsonBody } from "../jsonBody";
@@ -93,10 +104,15 @@ const props = defineProps<
     initialCwd: string | null;
     // The persisted agent for this cell; absent (or "claude") resumes as a normal Claude session.
     initialAgent?: TerminalAgent | null | undefined;
+    // Start `initialAgent` in `initialCwd` on mount rather than opening the launcher form. Set by
+    // the grid for a cell it already knows what to run — the phone's launch request (#831).
+    autoStart?: boolean;
     defaultCwd: string | null;
     presets: CwdPreset[];
     // Configured launch commands (shell/codex/…) offered next to Claude in this launcher.
     launchers?: Launcher[];
+    // The user's own ways of starting Claude Code, offered in this cell's Agent Picker (#1414).
+    customAgents?: CustomAgent[];
     // Session ids open in other grid cells. Resuming one of them would detach that
     // cell, so the launcher flags such rows and confirms before opening.
     openSessionIds?: string[];
@@ -135,23 +151,27 @@ const { chromeProps, chromeEvents } = cellChromeBinding(props, emit, () => void 
 // starts empty and lazy-launches when the user picks a dir and clicks Start.
 const launched = ref(props.initialSessionId !== null);
 const sessionId = ref<string | null>(props.initialSessionId);
-// What the launch form's selector will start here. "shell" is the OS default shell, which is a
+// What the launch form's AGENT PICKER will start here. "shell" is one of its options and is a
 // LAUNCHER, not an agent: the parent replaces this cell with a launcher cell, so it never becomes
 // the `agent` below.
-const launchTarget = ref<LaunchAgent>(asTerminalAgent(props.initialAgent));
+const pickedAgent = ref<AgentPick>(asTerminalAgent(props.initialAgent));
+// The custom agent this cell was started from, or null for a built-in (#1414). It rides alongside
+// `agent`, which stays "claude" for a custom one: a wrapper decides which command line starts
+// Claude Code, not what the session IS — see common/customAgents.ts.
+const customAgentId = computed<string | null>(() => customAgentIdOf(pickedAgent.value));
 // The agent this cell runs (Claude by default). Fixed once launched; restored from the
 // persisted cell on reload so a codex / antigravity cell reconnects to its WS endpoint.
-// Derived from the selector so ONE pick drives both — two refs holding the same choice is the
+// Derived from the picker so ONE pick drives both — two refs holding the same choice is the
 // kind of pair that drifts. asTerminalAgent maps "shell" to claude, which nothing reads: a shell
 // launch leaves this cell instead of running in it.
-const agent = computed<TerminalAgent>(() => asTerminalAgent(launchTarget.value));
+const agent = computed<TerminalAgent>(() => asTerminalAgent(pickedAgent.value));
 const connectKey = ref(0);
 
 // The directory this terminal runs in (shown in the header, sent to the server).
 const cwd = ref<string | null>(props.initialCwd ?? props.defaultCwd);
 // Per-directory overrides (<cwd>/.mulmoterminal.json): pins this cell's terminal
 // palette and shows a project badge. Re-fetched when the effective cwd changes.
-const { config: dirConfig, cellStyle, headerStyle } = useCellChrome(cwd);
+const { config: dirConfig, cellStyle } = useCellChrome(cwd);
 // Whether this cell IS the workspace, for the header badge. Same lexical comparison the launcher
 // chip makes (`launchChips`), so a cell launched from the WORKSPACE chip is badged WORKSPACE.
 const isWorkspace = computed(() => isSameDirPath(cwd.value, props.defaultCwd));
@@ -219,9 +239,11 @@ const context = ref<CellContext | null>(null);
 // below, so with no config the header is exactly as before. When configured, the built-ins listed here
 // (git/diff/ctx/usage) render in that order — others are hidden — and custom chips render as text. `dir`,
 // the project badge, the status dot/activity, and the row-2 tools timeline stay structural.
-const { chips: headerChips } = useHeaderButtons({ cwd, session: sessionId, agent, model: computed(() => context.value?.model ?? null) });
-const ROW1_BUILTIN_CHIPS = new Set(["git", "work", "diff", "ctx", "usage"]);
-const DEFAULT_CELL_CHIP_IDS = ["git", "work", "diff", "ctx", "usage"];
+const { chips: headerChips, env: worktreeEnv } = useHeaderButtons({ cwd, session: sessionId, agent, model: computed(() => context.value?.model ?? null) });
+const ROW1_BUILTIN_CHIPS = new Set(["git", "work", "diff", "ctx", "usage", "env"]);
+// `env` is in the defaults and costs nothing to a project that declares no `worktreeEnv`: the
+// chip renders nothing when there are no values, so this only shows up where it was asked for.
+const DEFAULT_CELL_CHIP_IDS = ["git", "work", "diff", "ctx", "usage", "env"];
 interface CellChipView {
   key: string;
   builtin: string | null;
@@ -289,6 +311,20 @@ function applyActivity(d: ActivityPush) {
   if (!memoEditing.value) memo.value = next.memo;
 }
 
+// A cell whose model is still unknown asks again when a push says something changed. codex and agy
+// file their logs under an id the agent mints AFTER the spawn, so the seed fetch at mount can only
+// answer "nobody" — and for agy nothing else would ever re-ask, since it has no hooks and no
+// activity tracker to finish a turn (its spawner publishes precisely to reach this line). Claude is
+// excluded: its badges come from the summary the route already folds, so a push adds nothing and
+// this is the busiest route in the app. Self-limiting either way — once a model is known, it stops.
+//
+// Called from the PUSH path only, never from a seed: loadInitial applies activity BEFORE badges, so
+// asking there would see `context` still empty and fire a second fetch for the answer already in
+// its hand — on every non-claude cell, every load.
+function refreshBadgesIfModelUnknown() {
+  if (agent.value !== "claude" && !context.value?.model) void refreshUsage();
+}
+
 // This session's detail, or nothing to apply. Nothing covers three cases the callers all
 // treat the same: the read failed (best-effort — pub/sub fills it in on the next event), the
 // server refused, or the cell has since closed or switched session, in which case applying
@@ -314,8 +350,11 @@ function activityPushOf(d: Record<string, unknown>): ActivityPush {
 
 async function fetchSessionDetail(id: string): Promise<Record<string, unknown> | null> {
   try {
-    const q = cwd.value ? `?cwd=${encodeURIComponent(cwd.value)}` : "";
-    const res = await fetchWithTimeout(`/api/session/${id}${q}`);
+    // The agent goes along because the two header badges are read from ITS log, not Claude's
+    // (#1465) — and grok's is partitioned by directory, so the cwd is part of that lookup too.
+    const params = new URLSearchParams({ agent: agent.value });
+    if (cwd.value) params.set("cwd", cwd.value);
+    const res = await fetchWithTimeout(`/api/session/${id}?${params}`);
     if (!res.ok) return null;
     const data = await jsonBody(res);
     return id === sessionId.value ? data : null;
@@ -347,8 +386,8 @@ watch(
     if (!next || next === sessionId.value) return;
     sessionId.value = next;
     launched.value = true;
-    // `agent` is derived from launchTarget, so the identity is adopted by setting the target.
-    launchTarget.value = asTerminalAgent(props.initialAgent);
+    // `agent` is derived from the picked agent, so the identity is adopted by setting that.
+    pickedAgent.value = asTerminalAgent(props.initialAgent);
     cwd.value = props.initialCwd ?? props.defaultCwd;
     working.value = false;
     waiting.value = false;
@@ -423,10 +462,28 @@ watch(
   },
 );
 
+// An agy or grok cell has no turn to end. Claude publishes a Stop hook and codex has an activity
+// tracker, so both re-read their badges the moment a turn settles; NOTHING calls setWorking for
+// these two, so a reading taken when the cell first asked is the only one it ever gets — `ctx 1%`
+// for the rest of the session, which is worse than no reading at all. Nor does the push path save
+// them: `refreshBadgesIfModelUnknown` needs an activity push, and an agent that never sets a flag
+// never sends one. This is the substitute, and it is deliberately slow — per cell, per minute:
+// agy pays one indexed sqlite row plus a 64 KB head read, grok two small JSON reads plus a fold
+// resumed at the byte the last poll stopped on. Delete each the day its agent gets an activity
+// tracker.
+const UNTRACKED_BADGE_AGENTS = new Set(["antigravity", "grok", "muse"]);
+const UNTRACKED_BADGE_POLL_MS = 60_000;
+let badgePoll: ReturnType<typeof setInterval> | null = null;
+
 onMounted(() => {
   unsubscribe = subscribe("sessions", (d) => {
-    if (isActivityMsg(d) && d.id === sessionId.value) applyActivity(d);
+    if (!isActivityMsg(d) || d.id !== sessionId.value) return;
+    applyActivity(d);
+    refreshBadgesIfModelUnknown();
   });
+  badgePoll = setInterval(() => {
+    if (UNTRACKED_BADGE_AGENTS.has(agent.value) && sessionId.value) void refreshUsage();
+  }, UNTRACKED_BADGE_POLL_MS);
   // A dropped socket misses the pushes sent while it was down, and this cell's status is
   // derived state that pub/sub only replays room membership for — not the missed events. So
   // on reconnect re-seed from the authoritative snapshot (guarded by activityGen), or a turn
@@ -443,6 +500,7 @@ onUnmounted(() => {
   unsubscribe?.();
   unsubscribeCanvas?.();
   offReconnect?.();
+  if (badgePoll) clearInterval(badgePoll);
 });
 
 // Set when the user starts a FRESH session from the launcher, so the next server
@@ -467,23 +525,34 @@ function launchIn(dir: string | null) {
 // life of the cell so a relaunch in the same cell repeats the choice.
 const launchChoice = ref<LaunchChoice | null>(null);
 
-// Start what the selector picked, in `dir`. EVERY launch in the form goes through here: the
-// selector decides for the dir field, for a preset chip, and for a worktree alike, and a rule
+// Start what the Agent Picker picked, in `dir`. EVERY launch in the form goes through here: the
+// picker decides for the dir field, for a preset chip, and for a worktree alike, and a rule
 // that has to hold at three call sites belongs in one of them.
-function startTarget(dir: string | null) {
-  if (launchTarget.value === "shell") emit("launch", { launcher: shellLauncher(), cwd: dir });
+function startPickedAgent(dir: string | null) {
+  if (pickedAgent.value === "shell") emit("launch", { launcher: shellLauncher(), cwd: dir });
   else launchIn(dir);
 }
+
+// The cell was opened with its agent and directory already decided (the phone's launch request),
+// so start it rather than showing the launcher for someone at the desktop to press Start.
+//
+// On MOUNT, once — never a watcher on the prop. Closing a session returns this same component to
+// the launch form without unmounting it (`teardown`), so a watcher would relaunch under the user.
+onMounted(() => {
+  if (props.autoStart && !launched.value && props.initialCwd) launchIn(props.initialCwd);
+});
 
 // Attach to a session the form listed, in the cwd those rows were fetched for (not the
 // possibly-changed input).
 //
-// `resumeAgent` is what the session IS, which a worktree row knows and the selector may disagree
+// `resumeAgent` is what the session IS, which the row knows and the Agent Picker may disagree
 // with: connecting a live codex id to /ws because the picker still says Claude runs the wrong
-// endpoint against a real session. Absent (the resume list, all Claude) leaves the pick alone.
+// endpoint against a real session. Both kinds of row send it — a worktree row, whose session may be
+// any agent, and a resume row, which since #1417 lists the PICKED agent's own conversations rather
+// than always Claude's. Absent (an older caller) leaves the pick alone.
 function resumeSession({ id, cwd: dir, agent: resumeAgent }: { id: string; cwd: string | null; agent?: TerminalAgent }) {
   if (resumeAgent) {
-    launchTarget.value = resumeAgent;
+    pickedAgent.value = resumeAgent;
     emit("agent", resumeAgent); // the grid persists which agent this cell runs
   }
   cwd.value = dir;
@@ -499,15 +568,21 @@ function resumeSession({ id, cwd: dir, agent: resumeAgent }: { id: string; cwd: 
 async function openDir() {
   if (!cwd.value) return;
   try {
-    await fetchWithTimeout("/api/open-dir", {
+    const res = await fetchWithTimeout("/api/open-dir", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ path: cwd.value }),
     });
-  } catch {
-    // best-effort — opening a folder is non-critical
+    // A host with no file manager to call (a bare Linux box, WSL without interop) used to look
+    // exactly like a successful reveal — the route said ok and nothing appeared (#1447).
+    if (!res.ok) showAskMsg(openDirFailureText(await jsonBody(res), res.status));
+  } catch (e) {
+    showAskMsg(`Could not open the folder: ${e instanceof Error ? e.message : String(e)}`);
   }
 }
+
+const openDirFailureText = (body: Record<string, unknown>, status: number): string =>
+  typeof body.error === "string" && body.error.length > 0 ? body.error : `Could not open the folder (HTTP ${status}).`;
 
 // The server reports where the PTY actually runs (it may have rejected the
 // requested dir). Adopt it as the truth — display and persist the effective cwd.
@@ -633,6 +708,13 @@ async function askCell(target: HandoffTarget) {
   if (error) showAskMsg(error);
 }
 
+// Only ONE automation may type into terminals at a time. Both loops submit with pasteAndSubmit
+// and both decide "is this reply ours" by correlating on the tail of what they sent — so two
+// running together interleave their writes and each can take the other's turn as its own answer.
+// They used to gate only on themselves, which left both orders reachable from this one menu
+// (Codex review on #1456).
+const automating = computed(() => exchanging.value || tableRunning.value);
+
 // One automatic exchange: our turn goes out, their answer comes back, both submitted.
 // `exchangeStop` is the only way a running exchange ends early, so it is also what the
 // cell unmounting sets — a loop typing into terminals must not outlive its cell.
@@ -645,7 +727,7 @@ function stopExchange() {
 
 async function exchangeWith(target: HandoffTarget) {
   askMenuOpen.value = false;
-  if (!sessionId.value || exchanging.value) return;
+  if (!sessionId.value || automating.value) return;
   exchanging.value = true;
   exchangeStop = false;
   const self = { key: `cell-${props.uid}`, source: { sessionId: sessionId.value, cwd: cwd.value, agent: agent.value } };
@@ -659,6 +741,41 @@ async function exchangeWith(target: HandoffTarget) {
   if (message) showAskMsg(message);
 }
 
+// A round table: the same machinery as one exchange, run round N cells until the group says it is
+// done or the budget runs out (#1456). `tableStop` is the only way a running table ends early, so
+// it is what unmounting sets too — a loop typing into terminals must not outlive its cell.
+const tableRunning = ref(false);
+// The room the running table writes to, so the picker can offer to open it while it fills up.
+const tableRoom = ref<string | null>(null);
+let tableStop = false;
+
+function stopTable() {
+  tableStop = true;
+}
+
+// The menu deliberately stays OPEN: it is where both of the things you want next live — stop, and
+// read the conversation as it fills up. It still closes on the next click outside.
+async function startTable(targets: HandoffTarget[], budget: number, room: string) {
+  if (!sessionId.value || automating.value) return;
+  tableRunning.value = true;
+  tableRoom.value = room;
+  tableStop = false;
+  // The SAME label shape the other seats get. It was a bare `#0` while everyone else read
+  // `#1 · codex · …/proj`, so the framing told codex "Also at the table: #0" and named something
+  // the reader could not identify (seen in the first live run).
+  const source = { sessionId: sessionId.value, cwd: cwd.value, agent: agent.value };
+  const key = `cell-${props.uid}`;
+  const self: TableMember = { key, label: slotLabel({ key, ...source }, props.home), source };
+  const { outcome, turnsTaken } = await runRoundTable(
+    [self, ...targets.map(memberFromTarget)],
+    room,
+    budget,
+    liveRoundTableDeps(() => tableStop),
+  );
+  tableRunning.value = false;
+  showAskMsg(`${roundTableMessage(outcome)} · ${turnsTaken} turn${turnsTaken === 1 ? "" : "s"}`);
+}
+
 function onAskOutside(e: MouseEvent) {
   if (askWrap.value && !(e.target instanceof Node && askWrap.value.contains(e.target))) askMenuOpen.value = false;
 }
@@ -668,6 +785,7 @@ watch(askMenuOpen, (open) => {
 });
 onUnmounted(() => {
   document.removeEventListener("mousedown", onAskOutside);
+  tableStop = true;
   if (askMsgTimer) clearTimeout(askMsgTimer);
   exchangeStop = true; // never leave an exchange typing into terminals after this cell is gone
 });
@@ -676,6 +794,12 @@ onUnmounted(() => {
 // remounted (stable key), so the dir/diff state is reset explicitly — otherwise the
 // launch form would still show the closed session's directory.
 function teardown() {
+  // FIRST, and here rather than only in onUnmounted: closing a cell does not unmount this
+  // component — it goes back to the launch form — so an automation started from it would keep
+  // polling and could submit another turn into the OTHER cells after the user closed this one
+  // (Codex review on #1456). Both loops read their flag before every submit.
+  exchangeStop = true;
+  tableStop = true;
   const id = sessionId.value; // capture before the reset below nulls it
   termRef.value?.terminate();
   // Reap on the server over HTTP too — the WS `terminate` only reaches the server while
@@ -729,6 +853,9 @@ async function close() {
     teardown();
     return;
   }
+  // The header's own close button is not covered by the overlay. Re-entering while a removal runs
+  // would clear the error the removal is about to write.
+  if (closeBusy.value !== null) return;
   closeError.value = null;
   closeConfirm.value = true;
   // Refresh dirty/ahead before the Remove button is enabled, so a fast click can't
@@ -737,11 +864,36 @@ async function close() {
   await loadDiff();
   closeChecking.value = false;
 }
+
+// Nothing dismisses the confirmation once the removal has started. The pty is terminated before the
+// route is even called, so a dialog that closes here would claim the worktree was kept while it is
+// being deleted — and would take its failure off the screen with it (Codex and CodeRabbit, #1550).
+// Guarded in the shared function rather than on the button, because Escape reaches it too.
 function cancelClose() {
+  if (closeBusy.value !== null) return;
   closeConfirm.value = false;
   closeChecking.value = false;
   closeError.value = null;
 }
+
+// `git worktree remove` on a large repository takes seconds, and the confirmation stays on screen
+// for all of them — so the button holds itself and says so, rather than terminating the pty and
+// firing a second removal on the next impatient click (#1549's rule, same route).
+const { busy: closeBusy, run: runCloseAction } = useBusyAction();
+const REMOVE_KEY = "remove";
+
+// `git worktree remove` runs for seconds on a large repository, and until #1551 the only thing
+// saying so was a 12px label inside the dialog — the cell itself, header and all, went on looking
+// live. This is what fades it and puts the spinner over it.
+const removingWorktree = computed(() => closeBusy.value === REMOVE_KEY);
+
+// The three things this one button is doing at any moment: waiting for an accurate dirty/ahead
+// count, running the removal, or offering it.
+const removeButtonLabel = computed(() => {
+  if (closeChecking.value) return "Checking…";
+  if (removingWorktree.value) return "Removing…";
+  return hasUnsaved.value ? "Discard & remove" : "Remove worktree";
+});
 
 async function removeAndClose() {
   const dir = cwd.value;
@@ -749,6 +901,10 @@ async function removeAndClose() {
     teardown();
     return;
   }
+  await runCloseAction(REMOVE_KEY, () => requestRemove(dir));
+}
+
+async function requestRemove(dir: string) {
   closeError.value = null;
   termRef.value?.terminate(); // free the worktree dir first (Windows locks a process's cwd)
   try {
@@ -762,7 +918,7 @@ async function removeAndClose() {
       SLOW_COMMAND_TIMEOUT_MS,
     );
     if (res.ok) return teardown();
-    closeError.value = "Couldn't remove the worktree — it may need manual cleanup.";
+    closeError.value = `Couldn't remove the worktree: ${worktreeRequestFailure(await jsonBody(res), res.status)} — it may need manual cleanup.`;
   } catch {
     closeError.value = "Couldn't reach the server to remove the worktree.";
   }
@@ -805,11 +961,30 @@ const statusClass = computed(() => STATUS_CLASS[status.value]);
 // used to live in the .cell.is-* / .cell-header.is-* rules is in cellStatusClasses.ts.
 const cellStatusClass = computed(() => CELL_STATUS[status.value]);
 const headerStatusClass = computed(() => HEADER_STATUS[status.value]);
+// The directory's header colours — computed here rather than taken from useCellChrome because only
+// this cell's header background is REPLACED by a status tint, so what it paints depends on the
+// status and on what the user configured for that status (common/headerStatusColors.ts).
+//
+// The global config is the fallback for each of the two KEYS, not for each status inside them: a
+// directory that names any `headerStatusColors` replaces the global block entire, so the statuses
+// it leaves out fall through to the theme rather than to the global entry for that status
+// (mergeHeaderStatusColors states why, and a spec pins it).
+const headerStyle = computed(() =>
+  headerStatusStyleFor(status.value, {
+    headerColor: dirConfig.value.headerColor,
+    headerTextColor: dirConfig.value.headerTextColor,
+    statusColors: mergeHeaderStatusColors(globalHeaderStatusColors.value, dirConfig.value.headerStatusColors),
+    tint: dirConfig.value.headerStatusTint ?? globalHeaderStatusTint.value,
+  }),
+);
 // Set aside, and not stopped waiting for an answer (see cellParked.ts). Enlarging it does NOT
 // bring it back — that is how you look at a parked session without waking it.
 const parked = computed(() => props.parked === true);
 const sunk = computed(() => isCellSunk(parked.value, status.value));
-const sunkClass = computed(() => (sunk.value ? SUNK_CELL : ""));
+// Both reasons the cell body is faded — set aside, and on its way out (#1551) — resolved to ONE
+// class. Two opacity utilities on one element are settled by Tailwind's output order rather than
+// by intent, which is the rule SUNK_CELL's own comment sets.
+const fadedClass = computed(() => (sunk.value || removingWorktree.value ? SUNK_CELL : ""));
 const togglePark = () => emit("park", !parked.value);
 // Typing into it is the un-parking gesture. Guarded on `parked` so an awake cell does not ask the
 // grid to rewrite its state on every keystroke.
@@ -1081,7 +1256,26 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
          one property covers the whole cell. Opacity alone: the status branches own the borders,
          backgrounds and ink, and two utilities for one property are settled by Tailwind's
          output order rather than by intent. -->
-    <div class="cell-inner" :class="[CELL_INNER, sunkClass]">
+    <!-- A worktree being deleted, over the WHOLE cell — a sibling of `.cell-inner` rather than a
+         child, so it is not dimmed by the layer it is dimming, and so it reaches the header, which
+         the close-confirm overlay inside never did. -->
+    <div
+      v-if="removingWorktree"
+      data-testid="cell-removing"
+      class="absolute inset-0 z-[30] flex flex-col items-center justify-center gap-2 bg-[color-mix(in_srgb,var(--bg-base)_70%,transparent)]"
+      role="status"
+      :aria-label="`Removing worktree ${headerDir}`"
+    >
+      <span class="material-symbols-outlined animate-spin text-[30px] text-secondary" aria-hidden="true">progress_activity</span>
+      <span class="max-w-full truncate px-3 font-sans text-[12px] text-secondary">Removing {{ headerDir }}…</span>
+    </div>
+    <!-- `inert` while the removal runs, not just faded: the veil above stops the mouse and nothing
+         else, so Tab still walked into the header buttons and the terminal's own textarea behind
+         it, and a screen reader still read a cell that is being deleted (Codex, #1552).
+         `|| undefined` rather than the boolean — `inert` is Booleanish to Vue, so `false` reaches
+         the DOM as inert="false", which is an inert element (the trap TerminalGrid's zoom-main
+         hit on #1333). -->
+    <div class="cell-inner" :class="[CELL_INNER, fadedClass]" :inert="removingWorktree || undefined">
       <template v-if="launched">
         <!-- Filmstrip thumbnail: the same roster header (CockpitHeader) — the dir colour is applied
            regardless of status (status is the dot + badge), so a thumbnail reads as its directory
@@ -1096,6 +1290,7 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
           :home="home"
           :header-color="dirConfig.headerColor"
           :header-text-color="dirConfig.headerTextColor"
+          :icon-url="dirConfig.iconUrl"
           @click="onHeaderClick"
         >
           <span class="cell-actions" :class="CELL_ACTIONS">
@@ -1123,7 +1318,15 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
              model / tokens / custom) don't shrink, so without this they would overflow and
              push the actions past the cell's `overflow: hidden` edge — the buttons must
              stay reachable no matter how much a dir's config crams in here. -->
+          <!-- CELL_HEADER_MAIN, not upstream's inline class: it is `flex-1` where upstream writes
+               `flex-auto`, which is the difference between a one-row and a two-row header. The
+               reasoning and its spec live with the constant. -->
           <div data-testid="cell-header-main" :class="CELL_HEADER_MAIN">
+            <!-- Leading the row, ahead of the status dot: this is the browser-tab position, and a
+                 project icon is read the way a favicon is — you find the tab by its picture before
+                 you read anything. Everything after it says what the cell is DOING; the icon says
+                 which project it is, and that is the first question. -->
+            <DirIcon :src="dirConfig.iconUrl" />
             <span class="cell-dot" :class="[CELL_DOT, statusClass, dotStatusClass, dotMissedClass]" :title="statusLabel" />
             <!-- The path is NOT here any more — it is the lead item on row 2 (see the
                `header-lead` template below). It had `min-w-[16ch]`, a floor of roughly a third of
@@ -1156,6 +1359,7 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
               <template v-for="chip in cellChips" :key="chip.key">
                 <GitBranchChip v-if="chip.builtin === 'git'" :status="gitStatus" :hide-dirty="isWorktreeCell" />
                 <WorkItemChip v-else-if="chip.builtin === 'work'" :item="workItem" />
+                <WorktreeEnvChip v-else-if="chip.builtin === 'env'" :values="worktreeEnv" />
                 <button
                   v-else-if="chip.builtin === 'diff' && showDiffBadge && diff"
                   type="button"
@@ -1173,18 +1377,21 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
                   :agent="agent"
                   :model="context.model"
                   :context-tokens="context.contextTokens"
+                  :context-window="context.contextWindow"
                 />
                 <span
                   v-else-if="chip.builtin === 'usage' && showUsage"
                   data-testid="cell-usage"
-                  class="flex-none whitespace-nowrap font-mono text-[10px] tracking-[0.02em] text-dim"
+                  class="flex-none whitespace-nowrap font-mono text-[10px] tracking-[0.02em]"
+                  :class="CELL_HEADER_INK_DIM"
                   :title="usageTitle"
                   >{{ usageLabel }}</span
                 >
                 <span
                   v-else-if="chip.custom"
                   data-testid="cell-hdr-chip"
-                  class="flex-none whitespace-nowrap rounded-full border border-border px-1.5 py-px text-[10px] text-dim"
+                  class="flex-none whitespace-nowrap rounded-full border border-border px-1.5 py-px text-[10px]"
+                  :class="CELL_HEADER_INK_DIM"
                   :title="chip.custom.label || chip.custom.text"
                   >{{ chip.custom.text }}</span
                 >
@@ -1261,6 +1468,7 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
           :connect-key="connectKey"
           :cwd="cwd"
           :agent="agent"
+          :custom-agent="customAgentId"
           :launch="launchChoice"
           :hide-header="filmstrip"
           :expanded="expanded"
@@ -1378,7 +1586,7 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
                     data-testid="cell-exchange-item"
                     :aria-label="`Exchange one turn with ${target.label}`"
                     class="cursor-pointer rounded-[4px] border-none bg-transparent px-1.5 py-1.5 font-sans text-[12px] text-dim hover:bg-hover hover:text-fg disabled:cursor-default disabled:opacity-40"
-                    :disabled="exchanging"
+                    :disabled="automating"
                     title="Send this cell's turn there and bring the answer back, both submitted"
                     @click="exchangeWith(target)"
                   >
@@ -1386,6 +1594,16 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
                   </button>
                 </div>
                 <p v-if="!askTargets.length" class="m-0 px-2 py-1.5 font-sans text-[12px] text-dim">No other terminal to read</p>
+                <RoundTableMenu
+                  v-if="askTargets.length"
+                  :targets="askTargets"
+                  :self-label="`#${uid}`"
+                  :running="tableRunning"
+                  :room="tableRoom"
+                  :busy="automating"
+                  @start="startTable"
+                  @stop="stopTable"
+                />
               </div>
               <button
                 v-if="exchanging"
@@ -1481,8 +1699,12 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
             <span v-if="prMsg" data-testid="cell-diff-msg" class="min-w-0 flex-auto truncate font-sans text-[11px] text-dim">{{ prMsg }}</span>
           </div>
         </div>
+        <!-- Replaced, not faded, while the removal runs: every control in here is already disabled
+             by then, and a dialog of dead buttons is noise where the spinner above is an answer. It
+             comes BACK with the failure if the removal fails — which is what the dismissal guards
+             below exist to protect (#1550). -->
         <div
-          v-if="closeConfirm"
+          v-if="closeConfirm && !removingWorktree"
           data-testid="cell-close-confirm"
           class="absolute inset-0 z-[25] flex items-center justify-center bg-[color-mix(in_srgb,var(--bg-base)_82%,transparent)] p-4"
           role="dialog"
@@ -1497,24 +1719,28 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
               </p>
               <p v-else class="m-0 font-sans text-[12px] text-dim">Keep the worktree to reuse it later, or remove it.</p>
               <div class="flex flex-wrap gap-1.5">
+                <!-- Held during a removal: by then the pty is gone and the branch is being
+                     deleted, so "keep" is a promise this cannot make. -->
                 <button
                   data-testid="ccx-keep"
-                  class="cursor-pointer rounded-md border border-accent bg-elevated px-3 py-1.5 font-sans text-[12px] text-fg hover:bg-hover hover:text-fg"
+                  class="cursor-pointer rounded-md border border-accent bg-elevated px-3 py-1.5 font-sans text-[12px] text-fg enabled:hover:bg-hover enabled:hover:text-fg disabled:cursor-default disabled:opacity-40"
+                  :disabled="closeBusy !== null"
                   @click="teardown"
                 >
                   Keep worktree
                 </button>
                 <button
                   data-testid="ccx-remove"
-                  class="cursor-pointer rounded-md border border-border bg-elevated px-3 py-1.5 font-sans text-[12px] text-secondary hover:border-err-text hover:bg-[var(--err-hover-bg)] hover:text-err-text"
-                  :disabled="closeChecking"
+                  class="cursor-pointer rounded-md border border-border bg-elevated px-3 py-1.5 font-sans text-[12px] text-secondary enabled:hover:border-err-text enabled:hover:bg-[var(--err-hover-bg)] enabled:hover:text-err-text disabled:cursor-default disabled:opacity-40"
+                  :disabled="closeChecking || closeBusy !== null"
                   @click="removeAndClose"
                 >
-                  {{ closeChecking ? "Checking…" : hasUnsaved ? "Discard &amp; remove" : "Remove worktree" }}
+                  {{ removeButtonLabel }}
                 </button>
                 <button
                   data-testid="ccx-cancel"
-                  class="cursor-pointer rounded-md border border-border bg-elevated px-3 py-1.5 font-sans text-[12px] text-secondary hover:bg-hover hover:text-fg"
+                  class="cursor-pointer rounded-md border border-border bg-elevated px-3 py-1.5 font-sans text-[12px] text-secondary enabled:hover:bg-hover enabled:hover:text-fg disabled:cursor-default disabled:opacity-40"
+                  :disabled="closeBusy !== null"
                   @click="cancelClose"
                 >
                   Cancel
@@ -1526,13 +1752,16 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
               <div class="flex flex-wrap gap-1.5">
                 <button
                   data-testid="ccx-remove"
-                  class="cursor-pointer rounded-md border border-border bg-elevated px-3 py-1.5 font-sans text-[12px] text-secondary hover:border-err-text hover:bg-[var(--err-hover-bg)] hover:text-err-text"
+                  class="cursor-pointer rounded-md border border-border bg-elevated px-3 py-1.5 font-sans text-[12px] text-secondary enabled:hover:border-err-text enabled:hover:bg-[var(--err-hover-bg)] enabled:hover:text-err-text disabled:cursor-default disabled:opacity-40"
+                  :disabled="closeBusy !== null"
                   @click="removeAndClose"
                 >
-                  Retry
+                  {{ closeBusy === REMOVE_KEY ? "Removing…" : "Retry" }}
                 </button>
                 <button
-                  class="cursor-pointer rounded-md border border-border bg-elevated px-3 py-1.5 font-sans text-[12px] text-secondary hover:bg-hover hover:text-fg"
+                  data-testid="ccx-close-cell"
+                  class="cursor-pointer rounded-md border border-border bg-elevated px-3 py-1.5 font-sans text-[12px] text-secondary enabled:hover:bg-hover enabled:hover:text-fg disabled:cursor-default disabled:opacity-40"
+                  :disabled="closeBusy !== null"
                   @click="teardown"
                 >
                   Close cell
@@ -1545,18 +1774,19 @@ onUnmounted(() => document.removeEventListener("keydown", onDiffKey));
       <CellLaunchForm
         v-else
         :dir="dirInput"
-        :target="launchTarget"
+        :agent="pickedAgent"
         :choice="launchChoice"
         :default-cwd="defaultCwd"
         :presets="presets"
         :launchers="launchers"
+        :custom-agents="customAgents ?? []"
         :open-session-ids="openSessionIds"
         :open-cwds="openCwds"
         :cancellable="cancellable"
         @update:dir="onLaunchDir"
-        @update:target="(value) => (launchTarget = value)"
+        @update:agent="(value) => (pickedAgent = value)"
         @update:choice="(value) => (launchChoice = value)"
-        @start="startTarget"
+        @start="startPickedAgent"
         @resume="resumeSession"
         @run="(cmd) => emit('run', cmd)"
         @launch="(pick) => emit('launch', pick)"

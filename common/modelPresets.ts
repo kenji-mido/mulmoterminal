@@ -260,6 +260,16 @@ export const MODEL_PRESETS: readonly ModelPreset[] = [
     trials: measured(3, 3, 38),
   },
 
+  // ── Muse (Meta) ────────────────────────────────────────────────────────────────
+  {
+    provider: "meta",
+    id: "muse-spark-1.2-contributor",
+    label: "Muse Spark 1.2",
+    contextLength: 1_000_000,
+    pricePerMTok: { input: 1, output: 3 },
+    trials: { status: "unmeasured" },
+  },
+
   // ── Reached fine, never drove the tool loop ──────────────────────────────────
   // Kept so the list answers "what about X?" with a measurement instead of silence.
   {

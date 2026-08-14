@@ -100,7 +100,7 @@ describe("markdownHostApp over by-path files", () => {
 
   it("still writes NEW documents under artifacts/documents", async () => {
     const { path: rel } = await markdownHostApp.saveNewDoc("Design Review", "# New");
-    expect(rel).toMatch(/^artifacts\/documents\/\d{4}\/\d{2}\/design-review-[a-f0-9]{8}\.md$/);
+    expect(rel).toMatch(/^artifacts\/documents\/\d{4}\/\d{2}\/design-review-[a-f0-9]{16}\.md$/);
     expect(readFileSync(path.join(ws, rel), "utf8")).toBe("# New");
   });
 });

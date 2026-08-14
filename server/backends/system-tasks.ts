@@ -1,12 +1,22 @@
+import path from "node:path";
 import { feedRefreshTaskDef } from "@mulmoclaude/core/feeds/server";
 import { googleCalendarSyncTaskDef } from "@mulmoclaude/core/google";
-import type { TaskDefinition } from "@mulmoclaude/core/scheduler";
+import type { SystemTaskDef } from "@mulmoclaude/core/scheduler";
 import { worklogSystemTask } from "./worklog.js";
+import type { ScheduledChatSpawn } from "./scheduled-run.js";
 
 export interface SystemTaskDeps {
   workspaceRoot: string;
+  /** Every root whose feeds should refresh on a schedule — the workspace plus each saved project
+   *  directory. Omitted, only the workspace refreshes, which is what a single-root host wants and
+   *  what this did before projects existed.
+   *
+   *  A root NOT in this list is never refreshed on a schedule; its feeds update only when someone
+   *  asks. That is why the list is passed in rather than inferred here — core says so explicitly,
+   *  and it is the host's decision. */
+  feedRoots?: string[];
   worklog: { enabled: boolean; intervalHours: number };
-  spawnChat: (message: string) => void;
+  spawnChat: ScheduledChatSpawn;
 }
 
 // The system tasks a standalone MulmoTerminal registers — the ones that must keep running with no
@@ -24,10 +34,33 @@ export interface SystemTaskDeps {
 //
 // Extracted from index.ts so the list is a value a spec can read. It went months missing the
 // calendar task with nothing to notice (#1191).
-export function buildSystemTasks(deps: SystemTaskDeps): TaskDefinition[] {
+//
+// `SystemTaskDef`, not `TaskDefinition`: the extra `name` + `missedRunPolicy` are what the
+// persistence adapter needs to catch a task up after the server was off. Both core factories
+// already returned them — this host used to throw them away, so nothing was ever caught up
+// and a missed window was skipped forever (#1581).
+export function buildSystemTasks(deps: SystemTaskDeps): SystemTaskDef[] {
   return [
-    feedRefreshTaskDef({ workspaceRoot: deps.workspaceRoot }),
+    // ONE PER ROOT. A task id is the scheduler's primary key and `feedRefreshTaskDef` builds it
+    // from the root, so N roots register N tasks instead of overwriting each other down to the
+    // last one. Deduped by RESOLVED path: core canonicalises the root into the id, so two
+    // spellings of one directory would collapse to a single id and silently drop a registration.
+    ...feedRootsOf(deps).map((root) => feedRefreshTaskDef({ workspaceRoot: root })),
+    // The calendar stays WORKSPACE-ONLY, deliberately. A Google grant is user-scope and its sync
+    // state (`lastSyncedAt`) is workspace state, so a per-project sync would need a per-project
+    // answer to "which account" that nothing in this app has. A project's calendar collections
+    // still sync on demand.
     googleCalendarSyncTaskDef({ workspaceRoot: deps.workspaceRoot }),
     worklogSystemTask({ ...deps.worklog, spawnChat: deps.spawnChat }),
-  ].filter((task): task is TaskDefinition => task !== null);
+  ].filter((task): task is SystemTaskDef => task !== null);
+}
+
+/** The roots to register a feed refresh for, workspace first and each one once.
+ *
+ *  Resolved before deduping because the workspace and a saved directory can spell the same folder
+ *  differently (a trailing slash, a `.` segment) — and `feedRefreshTaskDef` canonicalises the root
+ *  into the id, so two spellings would produce ONE id and silently drop a registration rather than
+ *  two tasks. */
+function feedRootsOf(deps: SystemTaskDeps): string[] {
+  return [...new Set([deps.workspaceRoot, ...(deps.feedRoots ?? [])].map((root) => path.resolve(root)))];
 }

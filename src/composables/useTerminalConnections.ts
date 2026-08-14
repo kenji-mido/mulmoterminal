@@ -42,8 +42,9 @@ import { reclaimVisibleSlots } from "./terminalVisibilityHandoff";
 // the wheel guard this file used to wire by hand — hence no mouseTrackingModes / mouseReports /
 // scroll-speed imports here any more. guardTouchScroll is the fork's touch counterpart, wired
 // beside it.
-import { guardMouseClicks, guardMouseTracking, guardTouchScroll } from "./terminalMouseInput";
+import { guardMouseClicks, guardMouseTracking, guardTouchScroll, type WheelScrollControl } from "./terminalMouseInput";
 import { getTerminalScrollSpeed } from "./useTerminalScrollSpeed";
+import { scrollsToBottomOnSubmit } from "./useScrollToBottomOnSubmit";
 import { isTypedInput } from "./terminalUserInput";
 import { bufferIsShort, readBufferShape } from "./terminalBufferHealth";
 import { CanvasAddon } from "@xterm/addon-canvas";
@@ -52,9 +53,11 @@ import { connWsUrl, type LaunchChoice } from "../components/wsUrl";
 import { connectionWillReturn, reconnectDelayMs, shouldReconnect } from "./reconnectPolicy";
 import type { RunCommand } from "../components/runCommand";
 import { readableSlot, type SlotCandidate, type SlotInfo } from "./readableSlot";
+import { makeEnterHandler, makeSendHandler } from "./terminalKeyHandlers";
 import { exitCodeOf, messageEffect, parseServerFrame } from "./serverMessage";
-// No enterKeyOverride / EnterKeyEvent: makeEnterHandler lives in terminalSubmitHandlers.ts now.
-import { submitSequence, submittableLine, DEFAULT_TERMINAL_SUBMIT_MODE, type TerminalSubmitMode } from "../../common/terminalSubmit";
+// No enterKeyOverride / EnterKeyEvent: makeEnterHandler lives in terminalKeyHandlers.ts (upstream
+// extracted the same pair the fork had, so the fork's copy is gone).
+import { enterSubmits, submitSequence, submittableLine, DEFAULT_TERMINAL_SUBMIT_MODE, type TerminalSubmitMode } from "../../common/terminalSubmit";
 import { TERMINAL_FONT_SIZE_DEFAULT } from "../../common/terminalFontSize";
 import { TERMINAL_FONT_FAMILY_DEFAULT } from "../../common/terminalFontFamily";
 import { getTerminalSubmitMode } from "./terminalSubmitMode";
@@ -69,12 +72,6 @@ import type { TerminalAgent } from "../../common/sessionAgent";
 // "superseded" is a distinct state, not a flavour of disconnected: the session is ALIVE, just
 // held by another window, so the view can offer to take it back instead of a dead pill.
 export type ConnStatus = "connecting" | "connected" | "disconnected" | "superseded";
-
-// Both live in terminalSubmitHandlers.ts now. Imported because wireTerminalInput below calls
-// them, re-exported because `conn.makeEnterHandler` / `conn.makeSendHandler` is where every
-// caller and every spec still reaches for them.
-import { makeEnterHandler, makeSendHandler } from "./terminalSubmitHandlers";
-export { makeEnterHandler, makeSendHandler };
 
 // What a slot connects to. Mirrors the relevant Terminal.vue props; a connectKey
 // change (session switch / relaunch) hands a fresh target to retarget().
@@ -94,6 +91,9 @@ export interface ConnTarget {
   // The provider/model the launch form picked for this session (#584). Claude only —
   // it rides the /ws query and overrides the directory's default.
   launch?: LaunchChoice | null;
+  // The custom agent this session was started from (#1414) — one of the user's own ways of
+  // starting Claude Code. `agent` stays "claude" for it: that IS what runs.
+  customAgent?: string | null;
 }
 
 // The `terminalSubmit` mapping describes the user's CLAUDE binding, so it only applies to
@@ -172,6 +172,10 @@ interface Conn {
   // dies without sending DECRST must not leave the next one looking like it asked for mouse
   // reports, or its wheel would get synthesized reports it never wanted.
   swallowedMouseModes: Set<number>;
+  // The current terminal's wheel, for putting a scrolled-up agent back at the bottom on submit
+  // (#1546). Per TERMINAL rather than per session — it counts notches reported to THIS xterm — so
+  // rebuildTerminal replaces it alongside `term`.
+  wheel: WheelScrollControl;
   theme: ITheme | undefined; // last applied, so a rebuilt terminal keeps the cell's colours
   font: TerminalFont; // same reason as `theme` — a rebuilt terminal must not snap back to the default
   lastRebuildMs: number; // rate-limits the #846 recovery so a stuck reading can't spin
@@ -314,6 +318,11 @@ function wireTerminalInput(term: Terminal, c: Conn): void {
     if (isImeConfirming(e)) return true;
     if (clipboardActionFor(getActiveKeymap(), e, term.hasSelection())) return false;
     if (!onSend(e)) return false;
+    // BEFORE the bytes, so the app is back at the bottom when the submit lands rather than
+    // scrolling after it has already drawn the new turn. Asked of the keystroke rather than of
+    // the override's return value: in "cr" mode a bare Enter is native and overrides nothing,
+    // which is the commonest submit of all (#1546).
+    if (scrollsToBottomOnSubmit() && enterSubmits(e)) c.wheel.restoreToBottom();
     return onEnter(e);
   });
 }
@@ -338,6 +347,7 @@ interface TerminalRuntime {
   term: Terminal;
   fitAddon: FitAddon;
   host: HTMLDivElement;
+  wheel: WheelScrollControl;
 }
 
 // Everything a slot's xterm is made of. Built here rather than inline in ensure() because a
@@ -372,7 +382,7 @@ function buildTerminal(swallowedMouseModes: Set<number>, font: TerminalFont): Te
       },
     },
   });
-  guardMouseTracking(term, swallowedMouseModes);
+  const wheel = guardMouseTracking(term, swallowedMouseModes);
   const fitAddon = new FitAddon();
   term.loadAddon(fitAddon);
   term.loadAddon(new WebLinksAddon());
@@ -409,7 +419,7 @@ function buildTerminal(swallowedMouseModes: Set<number>, font: TerminalFont): Te
   } catch (err) {
     console.warn("[terminal] canvas renderer unavailable — falling back to the DOM renderer", err);
   }
-  return { term, fitAddon, host };
+  return { term, fitAddon, host, wheel };
 }
 
 // The wiring that needs the connection itself, so it is re-applied to every terminal a slot owns.
@@ -426,7 +436,7 @@ function ensure(key: string, target: ConnTarget, font: TerminalFont): Conn {
     return existing;
   }
   const swallowedMouseModes = new Set<number>();
-  const { term, fitAddon, host } = buildTerminal(swallowedMouseModes, font);
+  const { term, fitAddon, host, wheel } = buildTerminal(swallowedMouseModes, font);
   const c: Conn = {
     key,
     term,
@@ -444,6 +454,7 @@ function ensure(key: string, target: ConnTarget, font: TerminalFont): Conn {
     reconnectTimer: null,
     attachedEl: null,
     swallowedMouseModes,
+    wheel,
     theme: undefined,
     font,
     lastRebuildMs: 0,
@@ -466,10 +477,11 @@ function rebuildTerminal(c: Conn): void {
   const deadHost = c.host;
   const hadFocus = deadHost.contains(document.activeElement);
   console.warn(`[terminal] slot ${c.key}: xterm buffer corrupted (xtermjs/xterm.js#6063) — rebuilding the terminal and re-attaching`);
-  const { term, fitAddon, host } = buildTerminal(c.swallowedMouseModes, c.font);
+  const { term, fitAddon, host, wheel } = buildTerminal(c.swallowedMouseModes, c.font);
   c.term = term;
   c.fitAddon = fitAddon;
   c.host = host;
+  c.wheel = wheel;
   c.lastRebuildMs = Date.now();
   wireTerminalToConn(term, c);
   c.attachedEl?.appendChild(host);
@@ -645,6 +657,24 @@ export function reconnect(key: string) {
 export function attach(key: string, target: ConnTarget, handlers: ConnHandlers, el: HTMLElement, theme?: ITheme, font: TerminalFont = DEFAULT_FONT) {
   const created = !conns.has(key);
   const c = ensure(key, target, font);
+  // A view naming a session the slot is NOT running gets a reconnect, never the reuse. Slot keys
+  // are positional (`cell-<uid>`, renumbered from array position on every grid parse) while this
+  // map outlives components — so a view can inherit a slot another cell filled: after an HMR
+  // reload of GridView, or via the ghost a closed cell used to leave behind. The reuse then showed
+  // a claude cell some earlier shell's terminal, and the onSession replay below wrote that wrong
+  // pairing back into the persisted grid (#1533). A view with no opinion (sessionId null — a fresh
+  // launch, or a parent that never learned the id) keeps the reuse: for a remount of the same cell
+  // that replay is the repair path, and this guard must not break it.
+  // A slot that has not learned an id yet is a mismatch too, not a blank slate (review on #1534):
+  // it was created for a FRESH launch whose socket may still be connecting, and its `session`
+  // frame — the old cell's — would land on whatever view holds the slot now. Only a view with no
+  // opinion of its own (sessionId null) keeps the reuse.
+  const inherited = !created && target.sessionId !== null && c.knownSessionId !== target.sessionId;
+  if (inherited) {
+    const held = c.knownSessionId ?? "a fresh session still starting";
+    console.warn(`[terminal] slot ${key} holds ${held} but the view asked for ${target.sessionId} — reconnecting instead of reusing`);
+    Object.assign(c, { knownSessionId: target.sessionId, knownCwd: null, reconnectAttempts: 0, sawExit: false });
+  }
   c.released = false;
   c.handlers = handlers;
   c.attachedEl = el;
@@ -680,7 +710,7 @@ export function attach(key: string, target: ConnTarget, handlers: ConnHandlers, 
   // an already-live slot this is the same sync it always was — the send is a no-op until OPEN.
   // retarget() opens a socket the same way connect() does, so it sits on this side of the fit too.
   fitAndSyncSize(c);
-  if (created) connect(c);
+  if (created || inherited) connect(c);
   else if (staleIdentity) retarget(key, target);
   c.term.focus();
   // The persisted xterm was just re-parented into a new host. The sync fit() above can no-op (same size)
@@ -778,6 +808,10 @@ export function submitText(key: string, text: string): boolean {
   }
   setNeedsPrompt(c, false); // a prompt is on its way — the session is no longer stuck
   const submit = submitBytesFor(c);
+  // A GUI-originated submit is a submit like any other, so it gets the same return to the bottom
+  // as a typed Enter (#1546) — otherwise pressing a send button while scrolled up leaves the
+  // answer being written somewhere the user cannot see.
+  if (scrollsToBottomOnSubmit()) c.wheel.restoreToBottom();
   sock.send(JSON.stringify({ type: "input", data: submittableFor(c, text) }));
   setTimeout(() => {
     if (c.ws === sock && sock.readyState === WebSocket.OPEN) {
@@ -822,6 +856,10 @@ export function pasteAndSubmit(key: string, text: string): boolean {
     return false;
   }
   const submit = submitBytesFor(c);
+  // A paste-and-submit is a submit like a typed Enter or a send button, so it returns to the
+  // latest output the same way (#1546) — otherwise this path leaves the answer being written
+  // somewhere the user cannot see (Codex on #1547).
+  if (scrollsToBottomOnSubmit()) c.wheel.restoreToBottom();
   // The guard's space rides INSIDE the paste, where the TUI takes it as text — after the
   // terminator it would be a keystroke, and an open completion menu is what reads those (#1142).
   sock.send(JSON.stringify({ type: "input", data: `${PASTE_START}${submittableFor(c, text)}${PASTE_END}` }));
@@ -863,6 +901,11 @@ export function sendArrow(key: string, dir: ArrowDir): void {
   if (c?.ws?.readyState !== WebSocket.OPEN) return;
   c.ws.send(JSON.stringify({ type: "input", data: arrowSequence(dir, c.term.modes.applicationCursorKeysMode) }));
 }
+
+/** Whether the slot still exists at all. What a close path asks before cleaning up: a cell whose
+ *  own teardown already ran (TerminalCell's close button) has no slot left, and cleaning up again
+ *  would re-terminate a session id the state still remembers. */
+export const slotLive = (key: string): boolean => conns.has(key);
 
 // Insert text (a path, or space-joined paths) at the cursor via the normal input
 // channel — no trailing CR, so the user reviews and submits.

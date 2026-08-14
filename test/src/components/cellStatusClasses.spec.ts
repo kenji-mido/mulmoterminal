@@ -9,7 +9,7 @@ import type { AttentionStatus } from "../../../src/components/attentionStatus";
 const STATUSES = ["blocked", "done", "working", "idle"] satisfies AttentionStatus[];
 
 // Whether a class string paints with the `--done` token, in either of the two forms a Tailwind
-// utility can name it: the mapped colour (`bg-done`, `border-l-done`) or the variable inside an
+// utility can name it: the mapped colour (`bg-done`, `border-done`) or the variable inside an
 // arbitrary value (`color-mix(…var(--done)…)`).
 //
 // Asserting on the TOKEN rather than on `#22c55e` is the point of these tests: what #1307 was
@@ -74,11 +74,13 @@ describe("done reads the same in every view", () => {
     expect(namesDone(SUNK_DOT_STATUS.done)).toBe(true);
   });
 
-  it("names the token in the roster row's edge, wash and ring", () => {
+  it("names the token in the roster row's ring and wash", () => {
     const row = rosterAlertClass("done", { expanded: false, blink: true, parked: false });
-    expect(row).toContain("border-l-done");
     expect(row).toContain("bg-[color-mix(in_srgb,var(--done)_8%,var(--bg-panel))]");
-    expect(row).toContain("shadow-[0_0_0_1px_color-mix(in_srgb,var(--done)_45%,transparent)]");
+    // The 2px width and the full (unmixed) strength are rosterAlertClasses' rules and its own
+    // spec's business. What this one is about is the COLOUR being the `--done` token rather than a
+    // literal green — and the ring is where the status lives now that the left stripe is gone.
+    expect(row).toContain("shadow-[0_0_0_2px_var(--done)]");
   });
 
   it("names the token in the roster and thumbnail header's dot and pill", () => {

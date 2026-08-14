@@ -11,6 +11,8 @@
 // only the built-in buttons show.
 
 import { isRecord } from "../../common/isRecord.js";
+import type { TerminalAgent } from "../../common/sessionAgent.js";
+import type { WorktreeEnvValue } from "../../common/worktreeEnv.js";
 
 import {
   RUN_TYPES,
@@ -61,7 +63,7 @@ export interface HeaderContext {
   branch: string | null;
   repo: string | null;
   model: string | null;
-  agent: "claude" | "codex" | "antigravity";
+  agent: TerminalAgent;
   session: string | null;
   remoteUrl: string | null;
   dirty: number;
@@ -72,6 +74,9 @@ export interface HeaderContext {
   // The current branch's open PR URL, or null. Resolved only when a `pr` button is present; an
   // `open.pr` button resolves to this URL, or is dropped when it's null.
   prUrl: string | null;
+  // The per-tree values this directory holds (#1367) — the port its dev server binds, the
+  // database name its migrations touch. Empty for a project that declares none, which is most.
+  worktreeEnv: WorktreeEnvValue[];
 }
 
 export type ResolvedChip = { kind: "builtin"; id: BuiltinChip } | { kind: "custom"; label: string; text: string };
@@ -89,6 +94,9 @@ export interface ResolvedButton {
 export interface ResolvedHeader {
   buttons: ResolvedButton[];
   chips: ResolvedChip[] | null;
+  // Carried alongside the chips rather than as one of them: the `env` chip renders a value per
+  // variable, so what it needs is the values, not a marker saying it was configured.
+  env: WorktreeEnvValue[];
 }
 
 const RUN_TYPE_SET = new Set<string>(RUN_TYPES);

@@ -6,9 +6,10 @@
 // NOT shared with claude's spawner: that one drives hooks, transcripts and the draft injector off
 // the same stream, and folding those in would make this the thing it exists to avoid. If a second
 // agent ever needs one of them, move it here then.
-import { appendBoundedOutput } from "./terminal-replay.js";
+import { handlePtyExit } from "./pty-exit.js";
+import { wireBufferedOutput } from "./output-relay.js";
 import { ptyExitLine } from "./pty-exit-log.js";
-import { sendExitAndClose, sendFrame } from "./ws-frames.js";
+import { sendExitAndClose } from "./ws-frames.js";
 import type { PtyEntry } from "./types.js";
 
 export interface PtyRelayDeps {
@@ -22,14 +23,12 @@ export interface PtyRelayDeps {
  *  `onOutput` is the seed-injection tap: a spawner that types into the TUI watches the same stream
  *  for its ready-marker rather than attaching a second onData listener. */
 export function wireAgentPtyRelay(entry: PtyEntry, sessionId: string, spawnedAtMs: number, deps: PtyRelayDeps, onOutput?: (data: string) => void): void {
-  entry.term.onData((data) => {
-    entry.buffer = appendBoundedOutput(entry.buffer, data, deps.outputBufferLimit);
-    sendFrame(entry.ws, { type: "output", data });
-    onOutput?.(data);
-  });
+  const output = wireBufferedOutput(entry, deps.outputBufferLimit, onOutput);
   entry.term.onExit(({ exitCode, signal }) => {
     console.log(ptyExitLine({ agent: entry.agent ?? "agent", exitCode, signal, lifetimeMs: Date.now() - spawnedAtMs, cwd: entry.cwd, sessionId }));
+    output.flush(); // a queued batch must not arrive after the exit frame
     sendExitAndClose(entry.ws, exitCode, signal);
-    deps.reap(sessionId);
+    // See spawn-claude's copy: a tmux client killed from outside is not a finished session (#1496).
+    handlePtyExit(sessionId, deps.reap);
   });
 }

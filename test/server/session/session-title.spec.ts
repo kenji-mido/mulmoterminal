@@ -251,7 +251,9 @@ describe("maybeGenerateTitle", () => {
     await vi.waitFor(() => expect(summarized).toHaveLength(1));
     expect(summarized[0]).toEqual([
       { role: "user", text: "add a retry to the uploader" },
-      { role: "assistant", text: "Added it." },
+      // The summarizer reads whatever the agent has said, finished or not — `endsTurn` rides along
+      // for the one reader that needs the boundary (#1487) and is ignored here.
+      { role: "assistant", text: "Added it.", endsTurn: true },
     ]);
   });
 

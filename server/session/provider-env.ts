@@ -95,7 +95,7 @@ export function resolveProvider(choice: DirModelChoice, providers: readonly Prov
   // names a provider typo or omits its model is already refused, so this is the same
   // contract, not a new one.
   if (choice.model && !isUsableModelId(choice.model)) {
-    return { ok: false, reason: `unusable model id ${JSON.stringify(choice.model)} — ${MODEL_ID_ALLOWED} only` };
+    return { ok: false, reason: `unusable model id ${JSON.stringify(choice.model)} — allowed: ${MODEL_ID_ALLOWED}` };
   }
   if (!choice.provider) {
     // No provider named: stay on Anthropic, honour a bare model choice.

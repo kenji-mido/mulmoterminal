@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { describe, it, expect } from "vitest";
 
-import { buildDocPath, DOCS_DIR, isDocPath, sanitizeDocPrefix } from "../../../server/backends/docPath.js";
+import { buildDocPath, DOCS_DIR, isDocPath, newDocId, sanitizeDocPrefix } from "../../../server/backends/docPath.js";
 
 describe("isDocPath", () => {
   it("accepts a document under the documents directory", () => {
@@ -9,7 +9,7 @@ describe("isDocPath", () => {
   });
 
   it("accepts the dated path saveNewDoc composes", () => {
-    expect(isDocPath(`${DOCS_DIR}/2026/07/design-review-ab12cd34.md`)).toBe(true);
+    expect(isDocPath(`${DOCS_DIR}/2026/07/design-review-ab12cd34ef56ab78.md`)).toBe(true);
   });
 
   // This is the only thing keeping an LLM-authored path inside the workspace: the write
@@ -160,5 +160,29 @@ describe("buildDocPath", () => {
       expect(underTz("America/Los_Angeles", () => buildDocPath("x", midnightUtcMar1, rand))).toContain("/2026/02/");
       expect(underTz("Asia/Tokyo", () => buildDocPath("x", midnightUtcMar1, rand))).toContain("/2026/03/");
     });
+  });
+});
+
+describe("newDocId", () => {
+  // 8 random bytes: 16 hex characters, the shape MulmoClaude's shortId() gives a document
+  // filename, and 64 bits rather than the 60 a same-length slice of a v4 UUID would carry.
+  it("is 16 lowercase hex characters", () => {
+    expect(newDocId()).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  it("does not repeat itself", () => {
+    const ids = new Set(Array.from({ length: 1000 }, () => newDocId()));
+    expect(ids.size).toBe(1000);
+  });
+
+  // The character a v4 UUID pins to "4". Asserted so a future "just slice a UUID" rewrite
+  // has to notice it is spending 4 of the 64 bits on a constant.
+  it("carries no fixed nibble", () => {
+    const thirteenth = new Set(Array.from({ length: 200 }, () => newDocId()[12]));
+    expect(thirteenth.size).toBeGreaterThan(1);
+  });
+
+  it("composes a path isDocPath accepts", () => {
+    expect(isDocPath(buildDocPath("notes", new Date(), newDocId()))).toBe(true);
   });
 });

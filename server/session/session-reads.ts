@@ -26,9 +26,9 @@ import {
 import { createTranscriptFold, type FoldedAt } from "./transcript-fold.js";
 import { classifyWorkPhase, type WorkPhase } from "./workPhase.js";
 import { sessionListTitle } from "./sessionListTitle.js";
-import { activity, aiTitles, codexRolloutIds, isBackgroundSession, isFailedWorker, knownSessions, sessionMemos } from "./registry.js";
+import { activity, aiTitles, codexRollouts, codexRolloutsHydrated, isBackgroundSession, isFailedWorker, knownSessions, sessionMemos } from "./registry.js";
 import { projectSessionsDir } from "./project-dir.js";
-import { lastTurnFromClaudeParsed, lastTurnFromCodexRolloutDocs, EMPTY_TURN, type LastTurn } from "./last-turn.js";
+import { currentTurnReplyFromClaudeParsed, lastTurnFromClaudeParsed, lastTurnFromCodexRolloutDocs, EMPTY_TURN, type LastTurn } from "./last-turn.js";
 import { forEachJsonlRecordIn, readTailRecords } from "../infra/jsonl-file.js";
 import { copySummaryState, emptySummaryState, foldSummary, summaryPartsOf, type SummaryState } from "./summary-scan.js";
 import { partitionPending } from "./partitionPending.js";
@@ -36,6 +36,7 @@ import { codexSessionsRoot } from "../agents/codex-session.js";
 import { codexRolloutPath } from "../agents/codex-sessions.js";
 import type { DiskStat, PendingSession, SessionMeta } from "./types.js";
 import { readString } from "../../common/readString.js";
+import type { TerminalAgent } from "../../common/sessionAgent.js";
 
 // Bytes of an assistant reply kept for the roster; the same cap the push body uses.
 export const LAST_RESPONSE_MAX = 400;
@@ -230,7 +231,11 @@ export async function sessionTimeline(cwd: string, id: string): Promise<{ events
 // mulmoterminal key the browser knows; the rollout it maps to is the one we recorded at
 // spawn, or the key itself when it came from the sidebar (which lists rollout ids).
 async function codexLastTurn(sessionKey: string): Promise<LastTurn> {
-  const rolloutId = codexRolloutIds.get(sessionKey) ?? sessionKey;
+  // The mapping is read off disk, so a request served during startup would see an empty map and
+  // fall through to the key — which is a mulmoterminal id, names no rollout, and reads as a
+  // session with no last turn at all.
+  await codexRolloutsHydrated;
+  const rolloutId = codexRollouts.get(sessionKey)?.conversationId ?? sessionKey;
   const file = codexRolloutPath(codexSessionsRoot(), rolloutId);
   if (!file) return EMPTY_TURN;
   try {
@@ -252,13 +257,34 @@ async function codexLastTurn(sessionKey: string): Promise<LastTurn> {
 // stopped mattering: the same read now costs 256 KB whatever the transcript weighs. There is
 // consequently no size limit here at all, and no "too large" answer for a caller to handle.
 
-export async function sessionLastTurn(cwd: string, id: string, agent: "claude" | "codex" | "antigravity"): Promise<LastTurn> {
+export async function sessionLastTurn(cwd: string, id: string, agent: TerminalAgent): Promise<LastTurn> {
   if (agent === "codex") return codexLastTurn(id);
-  if (agent === "antigravity") return EMPTY_TURN;
+  // Neither log is read yet, and each is a real file rather than a missing feature: agy's brain
+  // directory, grok's `chat_history.jsonl` under `~/.grok/sessions/<cwd>/<id>/`, and muse's
+  // `session.jsonl` under `~/.local/share/muse/sessions/...`. EMPTY_TURN is the honest answer for
+  // all three until one is parsed — every caller already handles it (a push says nothing rather
+  // than something wrong, a handoff carries no reply), which is why a wrong guess at the format
+  // would be worse than silence.
+  if (agent === "antigravity" || agent === "grok" || agent === "muse") return EMPTY_TURN;
   try {
     return lastTurnFromClaudeParsed(readTailRecords(path.join(projectSessionsDir(cwd), `${id}.jsonl`)));
   } catch {
     return EMPTY_TURN; // no transcript on disk yet
+  }
+}
+
+// The reply to the turn that just ENDED, for the phone push — null when that turn produced none,
+// never an older exchange (#1650, which is the invariant readLatestResponse states above and this
+// path was breaking). Reads the same tail as sessionLastTurn, and differs only in which turn it
+// will speak for.
+//
+// Claude only: codex reaches the same push from codex-activity-track, which decides a turn ended by
+// reading the very record that carries its reply, so its trigger cannot outrun its own data.
+export async function claudeCurrentTurnReply(cwd: string, id: string): Promise<string | null> {
+  try {
+    return currentTurnReplyFromClaudeParsed(readTailRecords(path.join(projectSessionsDir(cwd), `${id}.jsonl`)));
+  } catch {
+    return null; // no transcript on disk yet
   }
 }
 

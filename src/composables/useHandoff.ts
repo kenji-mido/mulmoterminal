@@ -30,7 +30,7 @@ export interface HandoffSource {
 
 // Slot keys are `cell-<uid>`; the uid is what the user sees on the cell, so a menu
 // entry reads the same way the grid does.
-const slotLabel = (slot: SlotInfo, home: string | null): string => {
+export const slotLabel = (slot: SlotInfo, home: string | null): string => {
   const cell = slot.key.startsWith("cell-") ? `#${slot.key.slice("cell-".length)}` : slot.key;
   return slot.cwd ? `${cell} · ${slot.agent} · ${formatCwd(slot.cwd, home, 24)}` : `${cell} · ${slot.agent}`;
 };

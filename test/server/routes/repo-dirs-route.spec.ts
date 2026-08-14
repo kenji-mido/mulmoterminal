@@ -18,6 +18,9 @@ vi.mock("../../../server/config/config-routes.js", () => ({
   getCwdPresets: () => configState.presets,
   getRepoDirs: () => configState.recorded,
   getPrRepos: () => [],
+  // dir-config reads this when resolving a directory's icon (#1428); the value is irrelevant
+  // here, but a partial mock has to carry it or the import throws.
+  getAutoDirIcon: () => false,
 }));
 
 const { mountRepoRoutes } = await import("../../../server/routes/repo-routes.js");

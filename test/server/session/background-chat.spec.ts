@@ -16,6 +16,7 @@ describe("parseBackgroundChat", () => {
     expect(ok({ message: "look at the failing test" })).toEqual({
       agent: "claude",
       draft: false,
+      project: null,
       hidden: false,
       message: "look at the failing test",
     });

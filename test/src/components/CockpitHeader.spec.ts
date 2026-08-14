@@ -6,7 +6,7 @@ import type { PrPhase, WorkPhase } from "../../../src/components/rosterPhase";
 
 type Props = {
   status: AttentionStatus;
-  agent: string;
+  agent: string | null;
   cwd: string | null;
   home: string | null;
   headerColor: string | null;
@@ -43,9 +43,26 @@ describe("CockpitHeader", () => {
     expect(mountH({ phase: "ready" }).find('[data-testid="cockpit-phase"]').exists()).toBe(true);
   });
 
-  it("tags codex cells and not claude ones", () => {
-    expect(mountH({ agent: "codex" }).text()).toContain("codex");
-    expect(mountH({ agent: "claude" }).text()).not.toContain("codex");
+  it("shows the picker-style agent icon for every built-in agent and shell", () => {
+    for (const agent of ["claude", "codex", "antigravity", "grok", "muse", "shell"]) {
+      expect(mountH({ agent }).find('[data-testid="cockpit-agent-icon"]').exists()).toBe(true);
+    }
+  });
+
+  // A cell that has launched nothing has no kind to show, and Claude's burst is the wrong guess:
+  // the status dot and the directory already identify the row.
+  it("marks nothing when the row runs nothing", () => {
+    expect(mountH({ agent: null }).find('[data-testid="cockpit-agent-icon"]').exists()).toBe(false);
+  });
+
+  it("names the mark for assistive tech, which cannot read a drawn glyph", () => {
+    expect(mountH({ agent: "codex" }).find('[data-testid="cockpit-agent-icon"]').attributes("aria-label")).toBe("codex");
+    expect(mountH({ agent: "shell" }).find('[data-testid="cockpit-agent-icon"]').attributes("aria-label")).toBe("shell");
+  });
+
+  it("does not print the agent name beside the icon", () => {
+    expect(mountH({ agent: "codex" }).text()).not.toContain("codex");
+    expect(mountH({ agent: "shell" }).text()).not.toContain("Shell");
   });
 
   it("renders the directory and the trailing slot", () => {

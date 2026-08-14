@@ -53,14 +53,14 @@ describe("claimFullGuiMcp", () => {
       [true, CLAUDE_CWD],
       [false, CLAUDE_CWD],
     ] as const) {
-      expect(claimFullGuiMcp(randomUUID(), attach, cwd, false)).toBe(carriesFullGuiMcp(attach, cwd));
+      expect(claimFullGuiMcp(randomUUID(), attach, cwd, false, "claude")).toBe(carriesFullGuiMcp(attach, cwd, "claude"));
     }
   });
 
   it("records the session when it carries the full GUI MCP", () => {
     const id = randomUUID();
     expect(hasAllGuiTools(id)).toBe(false);
-    claimFullGuiMcp(id, true, "/some/project", false);
+    claimFullGuiMcp(id, true, "/some/project", false, "claude");
     expect(hasAllGuiTools(id)).toBe(true);
   });
 
@@ -68,7 +68,7 @@ describe("claimFullGuiMcp", () => {
   // registered — marking it would switch exactly those off.
   it("records nothing for a cell that carries no GUI MCP of ours", () => {
     const id = randomUUID();
-    claimFullGuiMcp(id, false, "/some/project", false);
+    claimFullGuiMcp(id, false, "/some/project", false, "claude");
     expect(hasAllGuiTools(id)).toBe(false);
   });
 
@@ -76,9 +76,9 @@ describe("claimFullGuiMcp", () => {
   // deciding "no" has to TAKE THE CLAIM BACK, not merely decline to add one.
   it("releases a claim the session no longer earns", () => {
     const id = randomUUID();
-    claimFullGuiMcp(id, true, CLAUDE_CWD, false);
+    claimFullGuiMcp(id, true, CLAUDE_CWD, false, "claude");
     expect(hasAllGuiTools(id)).toBe(true);
-    claimFullGuiMcp(id, false, "/some/project", false);
+    claimFullGuiMcp(id, false, "/some/project", false, "claude");
     expect(hasAllGuiTools(id)).toBe(false);
   });
 
@@ -87,7 +87,7 @@ describe("claimFullGuiMcp", () => {
   // the same stale-claim failure, reached from the other side.
   it("does not claim on a reattach", () => {
     const id = randomUUID();
-    claimFullGuiMcp(id, true, CLAUDE_CWD, true);
+    claimFullGuiMcp(id, true, CLAUDE_CWD, true, "claude");
     expect(hasAllGuiTools(id)).toBe(false);
   });
 
@@ -96,14 +96,14 @@ describe("claimFullGuiMcp", () => {
   // a cell with no GUI tools at all.
   it("releases even on a reattach", () => {
     const id = randomUUID();
-    claimFullGuiMcp(id, true, CLAUDE_CWD, false);
-    claimFullGuiMcp(id, false, "/some/project", true);
+    claimFullGuiMcp(id, true, CLAUDE_CWD, false, "claude");
+    claimFullGuiMcp(id, false, "/some/project", true, "claude");
     expect(hasAllGuiTools(id)).toBe(false);
   });
 
   it("still answers the pure predicate on a reattach, whatever it records", () => {
-    expect(claimFullGuiMcp(randomUUID(), true, CLAUDE_CWD, true)).toBe(true);
-    expect(claimFullGuiMcp(randomUUID(), false, "/some/project", true)).toBe(false);
+    expect(claimFullGuiMcp(randomUUID(), true, CLAUDE_CWD, true, "claude")).toBe(true);
+    expect(claimFullGuiMcp(randomUUID(), false, "/some/project", true, "claude")).toBe(false);
   });
 });
 // Nothing here asserts the id reaches disk. `markAllToolsSession` already persisted before this
@@ -118,14 +118,14 @@ describe("claimFullGuiMcp", () => {
 describe("releaseAllToolsSession", () => {
   it("takes the claim back", () => {
     const id = randomUUID();
-    claimFullGuiMcp(id, true, "/some/project", false);
+    claimFullGuiMcp(id, true, "/some/project", false, "claude");
     releaseAllToolsSession(id);
     expect(hasAllGuiTools(id)).toBe(false);
   });
 
   it("hands the group its tools back", async () => {
     const id = randomUUID();
-    claimFullGuiMcp(id, true, "/some/project", false);
+    claimFullGuiMcp(id, true, "/some/project", false, "claude");
     expect(toolNamesFrom((await listTools(`/api/mcp/render/${id}`)).text)).toEqual([]);
     releaseAllToolsSession(id);
     expect(toolNamesFrom((await listTools(`/api/mcp/render/${id}`)).text).length).toBeGreaterThan(0);
@@ -144,7 +144,7 @@ describe("a group url once the session is claimed", () => {
     // The order this spec exists for: the GROUP url is the first thing to reach us. Before the
     // claim moved to spawn, "does it have all tools" was learned from whichever url connected
     // first, so this call would have been served the full render group.
-    claimFullGuiMcp(id, true, CLAUDE_CWD, false);
+    claimFullGuiMcp(id, true, CLAUDE_CWD, false, "claude");
     expect(toolNamesFrom((await listTools(`/api/mcp/render/${id}`)).text)).toEqual([]);
   });
 
@@ -157,7 +157,7 @@ describe("a group url once the session is claimed", () => {
   // the group down is only correct because the all-tools url carries the same tools and more.
   it("leaves the all-tools url serving everything", async () => {
     const id = randomUUID();
-    claimFullGuiMcp(id, true, CLAUDE_CWD, false);
+    claimFullGuiMcp(id, true, CLAUDE_CWD, false, "claude");
     const all = toolNamesFrom((await listTools(`/api/mcp/${id}`)).text);
     const group = toolNamesFrom((await listTools(`/api/mcp/render/${randomUUID()}`)).text);
     expect(all.length).toBeGreaterThan(group.length);

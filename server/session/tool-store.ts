@@ -23,6 +23,58 @@ export interface ToolStoreDeps {
   root?: string;
 }
 
+// How long a save waits for the next one before it writes. Long enough that a fast tool's
+// PreToolUse and PostToolUse share a write; short enough that what a kill inside the window
+// loses is one change to a display-only history.
+const SAVE_COALESCE_MS = 50;
+
+// Turn "write this session out" into "write it once for this burst, and never twice at once".
+//
+// Two writeFile calls truncating and refilling one path concurrently can leave a file that is
+// neither version, so a write waits out whatever is already running for that session.
+//
+// One session therefore holds at most two writes: the one running, and the one waiting. Every save
+// that arrives before the waiting one STARTS folds into it — including while the earlier write is
+// still going, which is the case that matters on a slow disk. Chaining each save behind the last
+// instead would queue a write per save, and since each writes the list as it stands when it runs,
+// they would all put the same bytes on disk.
+function createCoalescedWriter(write: (sessionId: string) => Promise<void>) {
+  const waiting = new Map<string, Promise<void>>(); // not started — fold into it
+  const running = new Map<string, Promise<void>>(); // started — it must finish alone
+
+  const writeAlone = async (sessionId: string): Promise<void> => {
+    await running.get(sessionId);
+    waiting.delete(sessionId); // from here a save needs a write of its own; this one has its list
+    const run = write(sessionId);
+    running.set(sessionId, run);
+    await run;
+    if (running.get(sessionId) === run) running.delete(sessionId);
+  };
+
+  return (sessionId: string): Promise<void> => {
+    const scheduled = waiting.get(sessionId);
+    if (scheduled) return scheduled; // it has not started, so it will carry this change too
+    const written = new Promise<void>((resolve) => {
+      setTimeout(() => void writeAlone(sessionId).then(resolve), SAVE_COALESCE_MS);
+    });
+    waiting.set(sessionId, written);
+    return written;
+  };
+}
+
+// Write one session's list out, reporting rather than throwing — a save is best-effort.
+//
+// Serialising the WHOLE list is what makes this expensive: 3.8 ms of blocked event loop for a
+// 3.4 MB list, before those megabytes reach the disk. That is why callers coalesce (#1507).
+async function persistList(dirName: string, dir: string, file: string, sessionId: string, list: unknown): Promise<void> {
+  try {
+    await fs.mkdir(dir, { recursive: true });
+    await fs.writeFile(file, JSON.stringify(list));
+  } catch (e) {
+    console.error(`[${dirName}] failed to persist ${sessionId}: ${messageOf(e)}`);
+  }
+}
+
 // The file's mtime, or 0 when there is no readable file.
 async function fileMtimeMs(file: string): Promise<number> {
   try {
@@ -108,17 +160,22 @@ export function createSessionStore<T>(dirName: string, isEntry: (value: unknown)
     return maybeReload(sessionId, cached);
   }
 
-  // Persist a session's list (best-effort, fire-and-forget). Writing marks the session owned by
-  // this instance, so subsequent reads trust the in-memory working copy over the disk.
-  async function save(sessionId: string) {
-    if (!SESSION_ID_RE.test(sessionId)) return;
+  const scheduleWrite = createCoalescedWriter((sessionId) => persistList(dirName, dir, fileFor(sessionId), sessionId, map.get(sessionId) || []));
+
+  // Persist a session's list (best-effort; callers fire and forget). Writing marks the session
+  // owned by this instance, so subsequent reads trust the in-memory working copy over the disk.
+  //
+  // Saves that land inside one window share a write. A tool call fires two — PreToolUse then
+  // PostToolUse — and a tool that returns quickly puts both inside it, so the common case costs
+  // one full re-serialisation instead of two. A slow tool falls outside and writes twice, as
+  // before; its rate is low enough that it never mattered.
+  //
+  // `owned` is marked synchronously, ahead of the write: get() reads it to decide whether the
+  // disk copy could be newer than ours, and between here and the write it cannot be.
+  function save(sessionId: string): Promise<void> {
+    if (!SESSION_ID_RE.test(sessionId)) return Promise.resolve();
     owned.add(sessionId);
-    try {
-      await fs.mkdir(dir, { recursive: true });
-      await fs.writeFile(fileFor(sessionId), JSON.stringify(map.get(sessionId) || []));
-    } catch (e) {
-      console.error(`[${dirName}] failed to persist ${sessionId}: ${messageOf(e)}`);
-    }
+    return scheduleWrite(sessionId);
   }
 
   return { get, save };

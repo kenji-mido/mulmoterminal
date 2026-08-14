@@ -199,7 +199,9 @@ in one.
 - **Launch commands** run anything as a persistent terminal — `yarn dev`, `htop`, `lazygit`, a
   `tail -f` you want to keep an eye on.
 - The **one-session-per-worktree** limit is on *agents*. A shell or a `yarn dev` launcher stays
-  free, because a worktree an agent is working in is exactly where you want those.
+  free, because a worktree an agent is working in is exactly where you want those — and each
+  variable a project declares in [`worktreeEnv`](config.html#worktree-env) gets a value **per
+  worktree**, so two dev servers given a port of their own do not fight over 3000.
 
 So the grid ends up holding your whole working set, not just the agents — and the agents are the
 cells that get colour, a chime and a phone push, because they're the ones that stop and ask.
@@ -208,9 +210,9 @@ cells that get colour, a chime and a phone push, because they're the ones that s
 
 **The repository, when you are working on that project — the workspace, when you want what the single view in 3.x gave you** (the server's default working directory, printed as `Workspace: …` at startup; if you also run MulmoClaude, the workspace you share with it, `~/mulmoclaude` by default).
 
-A Claude cell carries the whole GUI MCP **only when it is launched in the workspace** — drawing into the Canvas, working with collections, all of it available with nothing to register.
-A cell in a project directory reads that directory's own MCP config instead, so register a tool group with the launcher's MCP toggles when you want GUI tools there.
-Codex and Antigravity get no workspace exemption: wherever they run, they have whatever is registered for that directory (→ [which directory to launch in](basics.html#launch-dir)).
+**A Claude or Codex session launched in the workspace has every GUI tool** — drawing into the Canvas, working with collections, all of it available with nothing to register.
+Claude or Codex, it is the same, and the **WORKSPACE** chip at the head of the WORKING DIRECTORY row is the quick way to get there (Antigravity and Grok are the exceptions: wherever either runs, it gets what its directory registered → [Antigravity and Grok register everywhere](basics.html#antigravity-gui-tools)). A **launch command** is not this — it runs your command line verbatim and carries no GUI tools, `claude` included.
+A cell in a project directory has only the tool groups registered for that directory, so register one with the launcher's MCP toggles when you want GUI tools there (→ [which directory to launch in](basics.html#launch-dir)).
 
 ---
 

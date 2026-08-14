@@ -11,6 +11,30 @@ describe("dirConfigRows", () => {
   // colour does, so it reaches the preview through `extras`. Without a row, a file whose only
   // setting is this one renders as "sets nothing this app applies" — the opposite of the truth,
   // on the panel someone opens BECAUSE a setting looks like it isn't working.
+  // The panel renders a row's value verbatim, so the icon row must never carry the resolved URL:
+  // an inline image is up to 64 KB of base64, and the route URL just repeats the directory path
+  // shown above the table. What the reader wants is where the picture came from.
+  describe("icon", () => {
+    it("names the source instead of dumping the URL", () => {
+      const row = (iconUrl: string) => dirConfigRows({ iconUrl }).find((r) => r.key === "icon");
+      expect(row("/api/dir-icon?cwd=%2Fwork%2Fproj")?.value).toBe("a file in this directory");
+      expect(row(`data:image/png;base64,${"A".repeat(60000)}`)?.value).toBe("inline image (image/png)");
+      expect(row("https://example.com/logo.png")?.value).toBe("https://example.com/logo.png");
+    });
+
+    // Nothing caps a remote URL, and this one IS shown, so it is the row that can still run away.
+    it("truncates a runaway remote URL", () => {
+      const long = `https://example.com/${"a".repeat(500)}.png`;
+      const value = dirConfigRows({ iconUrl: long }).find((r) => r.key === "icon")?.value ?? "";
+      expect(value.length).toBeLessThan(100);
+      expect(value.endsWith("\u2026")).toBe(true);
+    });
+
+    it("has no row when the directory sets no icon", () => {
+      expect(dirConfigRows({ name: "x" }).find((r) => r.key === "icon")).toBeUndefined();
+    });
+  });
+
   describe("appendSystemPrompt", () => {
     it.each([
       ["off", false, "off"],
@@ -96,24 +120,37 @@ describe("parseDirConfigDetail", () => {
     const view = parseDirConfigDetail({
       exists: true,
       file: "/proj/.mulmoterminal.json",
+      localFile: "/proj/.mulmoterminal.local.json",
+      repoFile: "/proj/repo.json",
       config: { name: "proj" },
-      source: { applied: ["name"], ignored: ["cellColor"], unknown: ["badgeColour"] },
+      source: { applied: ["name"], ignored: ["cellColor"], unknown: ["badgeColour"], local: ["name"], repo: ["name"] },
     });
     expect(view.exists).toBe(true);
     expect(view.file).toBe("/proj/.mulmoterminal.json");
+    expect(view.localFile).toBe("/proj/.mulmoterminal.local.json");
+    expect(view.repoFile).toBe("/proj/repo.json");
     expect(view.rows.map((r) => r.key)).toEqual(["name"]);
-    expect(view.source).toEqual({ applied: ["name"], ignored: ["cellColor"], unknown: ["badgeColour"] });
+    expect(view.source).toEqual({ applied: ["name"], ignored: ["cellColor"], unknown: ["badgeColour"], local: ["name"], repo: ["name"] });
   });
 
   // The wire is a trust boundary like every other parser here: a shape the server would never
   // send must leave the preview empty rather than reaching the template.
   it("falls back to an empty view for anything unexpected on the wire", () => {
-    expect(parseDirConfigDetail(null)).toEqual({ exists: false, file: null, rows: [], source: { applied: [], ignored: [], unknown: [] } });
+    expect(parseDirConfigDetail(null)).toEqual({
+      exists: false,
+      file: null,
+      localFile: null,
+      repoFile: null,
+      rows: [],
+      source: { applied: [], ignored: [], unknown: [], local: [], repo: [] },
+    });
     expect(parseDirConfigDetail({ file: 7, config: "nope", source: { applied: "name" } })).toEqual({
       exists: false,
       file: null,
+      localFile: null,
+      repoFile: null,
       rows: [],
-      source: { applied: [], ignored: [], unknown: [] },
+      source: { applied: [], ignored: [], unknown: [], local: [], repo: [] },
     });
   });
 

@@ -21,22 +21,22 @@ describe("useResumableSessions", () => {
   it("lists the sessions and the cwd they were resolved for", async () => {
     globalThis.fetch = vi.fn(async () => ok({ sessions: [{ id: "a", title: "one", mtime: 1 }], cwd: "/resolved" })) as unknown as typeof fetch;
     const { value, load } = useResumableSessions();
-    await load("/typed");
+    await load("/typed", "claude");
     expect(value.value).toEqual({ sessions: [{ id: "a", title: "one", mtime: 1 }], cwd: "/resolved" });
   });
 
   it("falls back to the requested dir when the server doesn't name one", async () => {
     globalThis.fetch = vi.fn(async () => ok({ sessions: [] })) as unknown as typeof fetch;
     const { value, load } = useResumableSessions();
-    await load("/asked");
+    await load("/asked", "claude");
     expect(value.value.cwd).toBe("/asked");
   });
 
   it("empties the list — and forgets the cwd — when there is no dir to ask about", async () => {
     globalThis.fetch = vi.fn(async () => ok({ sessions: [{ id: "a", title: "one", mtime: 1 }], cwd: "/x" })) as unknown as typeof fetch;
     const { value, load } = useResumableSessions();
-    await load("/x");
-    await load(null);
+    await load("/x", "claude");
+    await load(null, "claude");
     expect(value.value).toEqual({ sessions: [], cwd: null });
     expect(globalThis.fetch).toHaveBeenCalledTimes(1);
   });
@@ -50,8 +50,8 @@ describe("useResumableSessions", () => {
     ) as unknown as typeof fetch;
 
     const { value, load } = useResumableSessions();
-    const first = load("/slow");
-    await load("/fast");
+    const first = load("/slow", "claude");
+    await load("/fast", "claude");
     slow.resolve(ok({ sessions: [{ id: "stale", title: "stale", mtime: 1 }], cwd: "/slow" }));
     await first;
 
@@ -63,7 +63,7 @@ describe("useResumableSessions", () => {
   it("empties the rows and reports loading the moment the dir is forgotten", async () => {
     globalThis.fetch = vi.fn(async () => ok({ sessions: [{ id: "a", title: "one", mtime: 1 }], cwd: "/x" })) as unknown as typeof fetch;
     const { value, loading, forget, load } = useResumableSessions();
-    await load("/x");
+    await load("/x", "claude");
     expect(loading.value).toBe(false);
     forget();
     expect(value.value).toEqual({ sessions: [], cwd: null });
@@ -74,7 +74,7 @@ describe("useResumableSessions", () => {
     const slow = deferred<ReturnType<typeof ok>>();
     globalThis.fetch = vi.fn(async () => slow.promise) as unknown as typeof fetch;
     const { value, load, forget } = useResumableSessions();
-    const pending = load("/slow");
+    const pending = load("/slow", "claude");
     forget();
     slow.resolve(ok({ sessions: [{ id: "stale", title: "stale", mtime: 1 }], cwd: "/slow" }));
     await pending;
@@ -87,8 +87,8 @@ describe("useResumableSessions", () => {
       return ok({ sessions: [{ id: `s:${cwd}`, title: "one", mtime: 1 }], cwd });
     }) as unknown as typeof fetch;
     const { value, loading, load } = useResumableSessions();
-    await load("/x");
-    const next = load("/y");
+    await load("/x", "claude");
+    const next = load("/y", "claude");
     // Not awaited: /x's row is gone already, rather than standing there until /y answers.
     expect(value.value).toEqual({ sessions: [], cwd: null });
     expect(loading.value).toBe(true);
@@ -100,7 +100,7 @@ describe("useResumableSessions", () => {
   it("is not left loading when there is no dir to ask about", async () => {
     const { loading, forget, load } = useResumableSessions();
     forget();
-    await load(null);
+    await load(null, "claude");
     expect(loading.value).toBe(false);
   });
 
@@ -111,8 +111,8 @@ describe("useResumableSessions", () => {
     const stillPending = deferred<ReturnType<typeof ok>>();
     globalThis.fetch = vi.fn(async (url: string) => (String(url).includes("slow") ? slow.promise : stillPending.promise)) as unknown as typeof fetch;
     const { loading, load } = useResumableSessions();
-    const first = load("/slow");
-    const newer = load("/newer");
+    const first = load("/slow", "claude");
+    const newer = load("/newer", "claude");
     slow.resolve(ok({ sessions: [], cwd: "/slow" }));
     await first;
     expect(loading.value).toBe(true);
@@ -121,14 +121,46 @@ describe("useResumableSessions", () => {
     expect(loading.value).toBe(false);
   });
 
+  // #1417: the list is per AGENT as well as per directory. Every agent keeps its history in its
+  // own store, so asking the wrong route offers conversations the picked agent cannot resume —
+  // which is what this did for codex, agy and grok until the route became a function of the agent.
+  it("asks each agent's own route", async () => {
+    const urls: string[] = [];
+    globalThis.fetch = vi.fn(async (url: string) => {
+      urls.push(String(url));
+      return ok({ sessions: [], cwd: "/x" });
+    }) as unknown as typeof fetch;
+    const { load } = useResumableSessions();
+    await load("/x", "claude");
+    await load("/x", "codex");
+    await load("/x", "antigravity");
+    await load("/x", "grok");
+    expect(urls).toEqual(["/api/sessions?cwd=%2Fx", "/api/codex/sessions?cwd=%2Fx", "/api/antigravity/sessions?cwd=%2Fx", "/api/grok/sessions?cwd=%2Fx"]);
+  });
+
+  // The agent is read when the URL is built, not when the answer lands: a switch mid-flight must
+  // supersede the older request rather than relabel it.
+  it("keeps a superseded agent's answer out of the newer agent's list", async () => {
+    const slow = deferred<ReturnType<typeof ok>>();
+    globalThis.fetch = vi.fn(async (url: string) =>
+      String(url).includes("codex") ? slow.promise : ok({ sessions: [{ id: "cl", title: "claude row", mtime: 2 }], cwd: "/x" }),
+    ) as unknown as typeof fetch;
+    const { value, load } = useResumableSessions();
+    const codex = load("/x", "codex");
+    await load("/x", "claude");
+    slow.resolve(ok({ sessions: [{ id: "cx", title: "codex row", mtime: 1 }], cwd: "/x" }));
+    await codex;
+    expect(value.value.sessions).toEqual([{ id: "cl", title: "claude row", mtime: 2 }]);
+  });
+
   it("clears the rows when the read throws, rather than showing another dir's", async () => {
     globalThis.fetch = vi.fn(async () => ok({ sessions: [{ id: "a", title: "one", mtime: 1 }], cwd: "/x" })) as unknown as typeof fetch;
     const { value, load } = useResumableSessions();
-    await load("/x");
+    await load("/x", "claude");
     globalThis.fetch = vi.fn(async () => {
       throw new Error("offline");
     }) as unknown as typeof fetch;
-    await load("/y");
+    await load("/y", "claude");
     expect(value.value).toEqual({ sessions: [], cwd: null });
   });
 });

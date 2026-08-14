@@ -7,11 +7,13 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { isStrictlyWithin } from "../infra/path-within.js";
+import { mulmoterminalHome } from "../infra/mulmoterminal-home.js";
+import { canonicalPath } from "../infra/canonical-path.js";
+import { ensureWorktreeEnv } from "../config/worktree-env.js";
 import { splitLines } from "../infra/split-lines.js";
-import { DIR_CONFIG_FILE } from "../config/dir-config.js";
+import { DIR_CONFIG_FILE, DIR_LOCAL_CONFIG_FILE } from "../config/dir-config.js";
 import { writeInheritedDirConfig } from "../config/worktree-dir-config.js";
 import { ISSUE_BRANCH_PREFIX, issueFromAnchoredBranch } from "../../common/prPhase.js";
 
@@ -25,7 +27,7 @@ const realpath = realpathSync.native;
 // realpath so it matches the realpaths `git worktree list` reports (e.g. macOS
 // /tmp -> /private/tmp), which the isManagedWorktree filter relies on.
 function worktreesBase(): string {
-  const base = process.env.MULMOTERMINAL_HOME || path.join(os.homedir(), ".mulmoterminal");
+  const base = mulmoterminalHome();
   try {
     return path.join(realpath(base), "worktrees");
   } catch {
@@ -57,30 +59,6 @@ export function slugify(task: string): string {
 export function worktreesRoot(repoToplevel: string): string {
   const hash = createHash("sha1").update(repoToplevel).digest("hex").slice(0, 8);
   return path.join(worktreesBase(), `${path.basename(repoToplevel)}-${hash}`);
-}
-
-// Canonicalize a path by realpath-resolving its deepest EXISTING ancestor and
-// re-attaching the missing leaf segments. So a symlink anywhere along the path
-// (even when the leaf itself doesn't exist) is resolved before containment checks.
-//
-// Exported because it is also the KEY two concurrent launches must agree on to be recognised as
-// aiming at the same directory (session/worktree-session-limit.ts), and it is sync — which is what
-// lets that check happen before anything awaits.
-export function canonicalPath(p: string): string {
-  const resolved = path.resolve(p);
-  const missing: string[] = [];
-  let cur = resolved;
-  for (;;) {
-    try {
-      const real = realpath(cur);
-      return missing.length ? path.join(real, ...missing) : real;
-    } catch {
-      const parent = path.dirname(cur);
-      if (parent === cur) return resolved; // reached the fs root, nothing resolved
-      missing.unshift(path.basename(cur));
-      cur = parent;
-    }
-  }
 }
 
 // Whether `p` is inside the managed root for `repoToplevel` — the guard that stops
@@ -289,17 +267,35 @@ function serializeCreate<T>(task: () => Promise<T>): Promise<T> {
 // each tree is its own shade of the project. The parent is the MAIN checkout, so cutting a
 // worktree from another worktree still measures the gradient from the project itself.
 //
-// Only where git would IGNORE the file. A worktree whose `git status` gains an untracked file is
-// not merely untidy: `isDirty` reads that same status, so removeWorktree would go on refusing to
-// clean up a worktree whose only change we wrote ourselves.
+// Only where git would IGNORE the file we are about to write. A worktree whose `git status` gains
+// an untracked file is not merely untidy: `isDirty` reads that same status, so removeWorktree
+// would go on refusing to clean up a worktree whose only change we wrote ourselves.
+//
+// Preferably the LOCAL override (#1436), which this repository — and any project that adopts the
+// convention — gitignores. Checking the shared file instead used to mean that committing it
+// silently switched this whole feature off.
+//
+// The shared file stays as a FALLBACK, because the setup this feature shipped with told people to
+// gitignore THAT one, and those repositories still exist. Switching the target outright would have
+// turned their worktrees grey with nothing said — the same silent breakage, aimed the other way.
+// A repository that COMMITS the shared file is not caught by the fallback: git reports a tracked
+// file as not-ignored, so it is skipped and only the local override can be written.
 //
 // Best effort throughout — a worktree without its parent's colours is a worktree that works.
+async function inheritableConfigFile(worktreeDir: string): Promise<string | null> {
+  for (const name of [DIR_LOCAL_CONFIG_FILE, DIR_CONFIG_FILE]) {
+    if ((await git(["check-ignore", "--quiet", "--", name], worktreeDir)).ok) return name;
+  }
+  return null;
+}
+
 async function adoptParentDirConfig(repo: string, worktreeDir: string): Promise<void> {
   try {
-    if (!(await git(["check-ignore", "--quiet", "--", DIR_CONFIG_FILE], worktreeDir)).ok) return;
+    const name = await inheritableConfigFile(worktreeDir);
+    if (!name) return;
     // Counted AFTER the add, so it includes the new tree: the first worktree of a repo is index
     // 1 and therefore already one hue step away from the parent, not identical to it.
-    writeInheritedDirConfig(repo, worktreeDir, (await listWorktrees(repo)).length);
+    writeInheritedDirConfig(repo, worktreeDir, (await listWorktrees(repo)).length, name);
   } catch {
     // ignored
   }
@@ -324,6 +320,11 @@ export async function createWorktree(repoDir: string, task: string, issue?: numb
     const res = await git(["worktree", "add", "-b", branch, dir, start], repo);
     if (!res.ok) return null;
     await adoptParentDirConfig(repo, dir);
+    // AFTER the config is adopted — the declaration this reads is the one just written — and here
+    // rather than only in the ws handlers, because a worktree started FROM AN ISSUE has its agent
+    // spawned directly (routes/issue-work-routes.ts), never through a terminal socket. Reserving
+    // only there would leave the one flow this feature is most for without its port.
+    await ensureWorktreeEnv(dir);
     return { path: dir, branch };
   });
 }

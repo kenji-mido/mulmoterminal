@@ -56,14 +56,21 @@ function applyBoundary(sessionId: string, boundary: CodexTurnBoundary, deps: Cod
 
 // Start tailing; it stops on its own once the session is gone. `startAtEnd` skips a
 // resumed rollout's history — replaying it would flag the cell from turns that finished
-// days ago.
-export function trackCodexActivity(sessionId: string, file: string, startAtEnd: boolean, deps: CodexActivityTrackDeps): void {
+// days ago. `restoreOpenTurn` is the reattach exception to that skip: a turn the file
+// leaves OPEN is what the surviving process is doing right now (see CodexActivityDeps).
+export function trackCodexActivity(
+  sessionId: string,
+  file: string,
+  mode: { startAtEnd: boolean; restoreOpenTurn?: boolean },
+  deps: CodexActivityTrackDeps,
+): void {
   watchCodexActivity({
     fileSize: sizeOf(file),
     readSlice: readSliceOf(file),
     onBoundary: (boundary) => applyBoundary(sessionId, boundary, deps),
     isAlive: deps.isAlive,
-    startAtEnd,
+    startAtEnd: mode.startAtEnd,
+    restoreOpenTurn: mode.restoreOpenTurn ?? false,
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   }).catch(() => {}); // a rollout that vanishes mid-session just stops reporting
 }

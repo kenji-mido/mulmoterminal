@@ -13,6 +13,8 @@ import type { CalendarPushOutcome } from "@mulmoclaude/core/google";
 
 import { mountCalendarPushRoutes, type CalendarPushRouteDeps } from "../../../server/backends/calendarPush.js";
 import { PUSH_NOT_DECLARED_ERROR, PUSH_NOT_LINKED_ERROR } from "../../../server/backends/calendarPushResult.js";
+import { initCollectionsBackend } from "../../../server/backends/collections.js";
+import { makeTempDir } from "../../support/tempDir";
 
 const PUSHED: CalendarPushOutcome = {
   kind: "pushed",
@@ -22,9 +24,20 @@ const PUSHED: CalendarPushOutcome = {
 const stubDeps = (over: Partial<CalendarPushRouteDeps> = {}): CalendarPushRouteDeps => ({
   findCollection: vi.fn(async () => ({ slug: "meetings" })),
   push: vi.fn(async () => PUSHED),
-  workspaceRoot: () => "/ws",
+  scope: () => ({ workspaceRoot: "/ws" }),
   ...over,
 });
+
+// The LIVE deps, mounted the way server startup mounts them. The stubs above prove the
+// status/field split; they cannot prove the wiring, and that is precisely where this route
+// broke once: `liveDeps` read the engine's ambient root, which explicit-root mode removed, so
+// every push 500'd while every stubbed test stayed green.
+const appWithLiveDeps = () => {
+  const app = express();
+  app.use(express.json());
+  mountCalendarPushRoutes(app);
+  return app;
+};
 
 const appWith = (deps: CalendarPushRouteDeps) => {
   const app = express();
@@ -44,11 +57,22 @@ describe("mountCalendarPushRoutes", () => {
     expect(deps.push).toHaveBeenCalledWith("meetings", "/ws");
   });
 
-  // Read per request, not captured at mount: the collection host is configured after the
-  // routes go up, so a root read at mount time would be the empty string forever.
-  it("reads the workspace root per request", async () => {
+  // The wiring test. An unknown slug is the cheapest request that still runs the live deps
+  // end to end: it resolves the root and calls the real `loadCollection`, so a root the route
+  // cannot obtain surfaces as a 500 here instead of shipping.
+  it("serves a request through the live deps without losing the root", async () => {
+    initCollectionsBackend({ workspace: makeTempDir("mt-calendar-push-") });
+    const res = await request(appWithLiveDeps()).post("/api/collections/nope/calendar-push").send({});
+    expect(res.status).toBe(404);
+    expect(res.body.error).toContain("'nope' not found");
+  });
+
+  // Resolved per request, not captured at mount: the routes go up before the collection host
+  // is configured, and since core 3.0.0 that host has no ambient root to read later either —
+  // a root captured at mount would be wrong forever, and now unobtainable as well.
+  it("resolves the root per request", async () => {
     let root = "/before";
-    const deps = stubDeps({ workspaceRoot: () => root });
+    const deps = stubDeps({ scope: () => ({ workspaceRoot: root }) });
     await push(deps);
     root = "/after";
     await push(deps);

@@ -61,6 +61,17 @@ describe("userPromptText", () => {
 });
 
 describe("latestAssistantTextFromJsonl", () => {
+  // The roster line wants what the agent is saying RIGHT NOW, which is the opposite of what
+  // `lastTurnFromClaudeParsed` wants — so #1487's turn-boundary fix must not reach this reader.
+  it("keeps showing narration written before the tools, while the turn is still running", () => {
+    const raw = [
+      line({ type: "user", message: { content: "do X" } }),
+      line({ type: "assistant", message: { stop_reason: "tool_use", content: [{ type: "text", text: "let me look" }] } }),
+      line({ type: "assistant", message: { stop_reason: "tool_use", content: [{ type: "tool_use", name: "Read", input: {} }] } }),
+    ].join("\n");
+    expect(latestAssistantTextFromJsonl(raw)).toBe("let me look");
+  });
+
   it("returns the most recent assistant prose turn", () => {
     const raw = [
       line({ type: "user", message: { content: "do X" } }),
@@ -381,7 +392,8 @@ describe("conversationTurnsFromJsonl", () => {
     ].join("\n");
     expect(conversationTurnsFromJsonl(raw)).toEqual([
       { role: "user", text: "fix the parser" },
-      { role: "assistant", text: "Looking at it" },
+      // An assistant record with no stop reason ends its turn — see #1487 for why that direction.
+      { role: "assistant", text: "Looking at it", endsTurn: true },
       { role: "user", text: "2番目にして" },
     ]);
   });
@@ -406,7 +418,7 @@ describe("conversationTurnsFromJsonl", () => {
         ],
       },
     });
-    expect(conversationTurnsFromJsonl(raw)).toEqual([{ role: "assistant", text: "part one part two" }]);
+    expect(conversationTurnsFromJsonl(raw)).toEqual([{ role: "assistant", text: "part one part two", endsTurn: true }]);
   });
 });
 

@@ -5,6 +5,7 @@ import type { IPty } from "node-pty";
 import type { WebSocket } from "ws";
 import type { WorkerStatus } from "../../common/workerStatus.js";
 import type { SessionAgent } from "../../common/sessionAgent.js";
+import type { OutputRelay } from "./output-relay.js";
 
 export interface Activity {
   working?: boolean;
@@ -17,7 +18,13 @@ export interface Activity {
 export interface PtyEntry {
   term: IPty;
   ws: WebSocket | null;
+  // Recent output, replayed when a browser reattaches. NOT bounded by outputBufferLimit: the
+  // append leaves it up to TAIL_SLACK over so it doesn't pay for the bound per chunk (#1506).
+  // Read it through boundedTail(), never raw.
   buffer: string;
+  // Output queued for its next batched frame. A reattach replays `buffer`, which already
+  // contains the queue, so pty-connection drops it there rather than letting it arrive twice.
+  output?: OutputRelay;
   cwd: string; // the dir the PTY actually runs in (reported on reattach)
   // True when this session is the user's actively-viewed pane: the single-view open
   // session, or a focused/zoomed grid cell. Gates the attention flag — a socket being

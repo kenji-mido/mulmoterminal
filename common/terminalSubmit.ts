@@ -82,6 +82,17 @@ export interface EnterKeyEvent {
 // bare Enter falls through to xterm's native \r (submit) and Option+Enter to
 // macOptionIsMeta's ESC+CR (newline). Leaving the bare-Enter path native keeps IME
 // candidate-confirm and the hottest key untouched in the default configuration.
+// Whether an Enter-family keydown SUBMITS, as opposed to inserting a newline or belonging to an
+// IME. Mode-INDEPENDENT on purpose: the two modes disagree about which bytes carry each meaning,
+// never about the meaning itself (see the note on enterKeyOverride below) — a bare Enter submits
+// in both, Shift/Alt+Enter make a newline in both. Ctrl/Meta+Enter is neither, so it answers no.
+//
+// Separate from `enterKeyOverride` because the caller that needs it is not the one deciding bytes:
+// in "cr" mode a bare Enter is handled natively by xterm and the override returns null, so a
+// caller reading that as "not a submit" would miss the most common submit there is (#1546).
+export const enterSubmits = (e: EnterKeyEvent): boolean =>
+  e.type === "keydown" && e.key === "Enter" && !e.isComposing && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey;
+
 export const enterKeyOverride = (mode: TerminalSubmitMode, e: EnterKeyEvent): string | null => {
   if (e.type !== "keydown" || e.key !== "Enter") return null;
   // IME composition (Japanese and other CJK input): this Enter confirms a candidate — it

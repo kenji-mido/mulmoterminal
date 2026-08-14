@@ -1,4 +1,4 @@
-import { isHexColor } from "./hexColor";
+import { isHexColor } from "../../common/hexColor";
 import type { DirChrome } from "../../common/dirChrome";
 
 // Which of a directory's configured colours represents it on a launch chip. A chip is too

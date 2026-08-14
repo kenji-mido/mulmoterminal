@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, watch, nextTick } from "vue";
+import { ref, computed, watch, nextTick, onBeforeUnmount } from "vue";
 import { useSessionFeed } from "../composables/useSessionFeed";
 import { onToolGroupsAnnounced } from "../composables/useToolGroupsAnnounce";
 import { getPlugin } from "../plugins-registry";
@@ -12,6 +12,8 @@ import { isRecord } from "../../common/isRecord";
 import { isUnknownArray } from "../../common/isUnknownArray";
 import { jsonBody } from "../jsonBody";
 import { fetchWithTimeout } from "../utils/fetchWithTimeout";
+import { pushCollectionSurface, popCollectionSurface, type CollectionSurface } from "../composables/collectionSurface";
+import { cachedProjectIdForCwd, projectIdForCwd } from "../composables/collectionProject";
 
 // The GUI panel renders the toolResults produced by GUI-protocol plugins. It
 // mirrors the terminal's active session: live results arrive on that session's
@@ -30,6 +32,10 @@ interface ToolResult {
 
 const props = defineProps<{
   sessionId: string | null;
+  /** The directory the session this panel mirrors is running in. A `presentCollection` card
+   *  SELF-FETCHES by slug, so without it the fetch went to the workspace and a collection living
+   *  in the session's own folder came back "not found". */
+  cwd?: string | null;
   sendTextMessage: (text: string) => boolean;
   // Whether the panel currently covers the terminal area. Owned by the grid (it is the grid's
   // layout that changes), shown here because the button that flips it lives in this toolbar.
@@ -155,7 +161,11 @@ const cards = computed(() => collapseByIdentity(results.value, cardIdentity));
 // and that is exactly what today's behaviour already loses, since today every edit draws a whole
 // new card. Correct-and-unchanged beats stale-but-smooth. Caught by Codex on PR #1223; pinned by
 // "remounts the view … so it refetches" in GuiPanelCollapse.spec.ts.
-const cardKey = (result: ToolResult) => result.uuid;
+// The PROJECT SCOPE is part of the key, not decoration: a `presentCollection` card self-fetches
+// by slug, so a card mounted before the scope resolved fetched against the workspace. Keying on
+// the scope remounts it when the scope lands — the same refetch-by-remount this file already
+// relies on above, applied to the one input a card cannot see change.
+const cardKey = (result: ToolResult) => `${scopeId.value ?? ""}\u0000${result.uuid}`;
 
 // Each card paired with the plugin that draws it, resolved ONCE here rather than in the template.
 // A template cannot carry `v-if="getPlugin(...)"` narrowing across to the sibling attributes, so
@@ -222,6 +232,7 @@ const TOOL_HINTS = new Map<string, string>([
   ["presentCollection", "a collection from this workspace, laid out to browse"],
   ["manageCollection", "reads and writes those collections and their schemas"],
   ["manageAccounting", "reads and writes the workspace's books"],
+  ["manageSharedApp", "deploys this repository's shared app to its roster, and publishes it"],
 
   ["generateImage", "an image generated from a prompt"],
   ["presentMulmoScript", "a MulmoScript presentation, built and played here"],
@@ -254,6 +265,44 @@ async function loadAvailableTools(sessionId: string | null) {
   }
 }
 watch(() => props.sessionId, loadAvailableTools, { immediate: true });
+
+// The canvas is a SURFACE: it shows one session's cards, and a `presentCollection` card
+// self-fetches its collection by slug through the global binding. Without a scope that fetch went
+// to the workspace, so a collection living in the session's own folder came back "not found" —
+// the card rendered its own failure while the tool call had succeeded.
+//
+// Scope only, no `nav`: a link inside a card still belongs to the full-screen browser, and a
+// canvas that took navigation would swallow it.
+//
+// A GENERATION token for the same reason the pane has one — the lookup is async, so a session
+// change or an unmount mid-flight must not let an older answer land.
+const canvasSurface: CollectionSurface = { projectId: null };
+pushCollectionSurface(canvasSurface);
+onBeforeUnmount(() => popCollectionSurface(canvasSurface));
+
+// Mirrored into a ref because the CARD KEY reads it: a card self-fetches on mount, so a scope
+// that resolves a tick later resolves after the request it was for. Keying on it remounts the
+// cards when it lands, which is how this file already makes a card refetch (see `cardKey`).
+const scopeId = ref<string | null>(null);
+function applyScope(resolved: string | null): void {
+  canvasSurface.projectId = resolved;
+  scopeId.value = resolved;
+}
+
+let scopeGeneration = 0;
+watch(
+  () => props.cwd,
+  async (cwd) => {
+    const mine = ++scopeGeneration;
+    // Synchronously when the project list is already warm, which it is for every canvas after the
+    // first: then there is no window at all, rather than a window the cards usually win.
+    const cached = cachedProjectIdForCwd(cwd ?? null);
+    if (cached !== undefined) applyScope(cached);
+    const resolved = await projectIdForCwd(cwd ?? null);
+    if (mine === scopeGeneration) applyScope(resolved);
+  },
+  { immediate: true },
+);
 
 // The answer above is normally asked BEFORE it can be true: the browser is handed a session id
 // while claude is still being spawned, so its MCP client has not connected to the group URLs yet

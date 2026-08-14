@@ -43,8 +43,10 @@ describe("remoteViewFailureMessage", () => {
     expect(remoteViewFailureMessage({ kind: "not-mobile", viewId: "board" }, SLUG)).toContain('target: "mobile"');
   });
 
+  // `.claude/skills`, not the workspace's `data/skills` staging tree: staging is a WORKSPACE
+  // mechanism, and a collection now lives in whatever folder its cell is open in.
   it("gives the authoring path for a missing file", () => {
-    expect(remoteViewFailureMessage({ kind: "file-missing", file: "board.html" }, SLUG)).toContain(`data/skills/${SLUG}/board.html`);
+    expect(remoteViewFailureMessage({ kind: "file-missing", file: "board.html" }, SLUG)).toContain(`.claude/skills/${SLUG}/board.html`);
   });
 
   it("states the actual size when the view is too large", () => {

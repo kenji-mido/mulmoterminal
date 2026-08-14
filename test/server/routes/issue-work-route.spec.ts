@@ -17,6 +17,9 @@ const configState: { presets: CwdPreset[]; recorded: Record<string, string> } = 
 vi.mock("../../../server/config/config-routes.js", () => ({
   getCwdPresets: () => configState.presets,
   getRepoDirs: () => configState.recorded,
+  // dir-config reads this when resolving a directory's icon (#1428); the value is irrelevant
+  // here, but a partial mock has to carry it or the import throws.
+  getAutoDirIcon: () => false,
 }));
 
 const issueWork = { start: vi.fn() };

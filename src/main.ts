@@ -11,6 +11,7 @@ import { initTheme } from "./composables/useTheme";
 import { installFileDropGuard } from "./composables/useFileDropGuard";
 import { installPageZoomGuard } from "./composables/usePageZoomGuard";
 import { router } from "./router";
+import { i18n } from "./i18n";
 import App from "./App.vue";
 
 // Apply the persisted theme to <html> before mount so there's no flash of the
@@ -32,5 +33,5 @@ installPageZoomGuard();
 // shell (route still at the start location) — and TerminalView.onMounted would
 // attach the durable "single" PTY — before the route flips to the grid, leaking a
 // hidden Claude session. router.isReady() guarantees the initial URL is honored first.
-const app = createApp(App).use(router);
+const app = createApp(App).use(router).use(i18n);
 void router.isReady().then(() => app.mount("#app"));

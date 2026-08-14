@@ -6,10 +6,10 @@
 // of them answers "every conversation in this directory": `cache/last_conversations.json` keeps
 // only the LAST conversation per cwd and is written at exit, `history.jsonl` has no conversation
 // id, and `conversation_summaries.db` has the columns but the CLI never writes a row. So the cwd
-// is read from OUR log (session/antigravity-conversations.ts) and agy's transcript is opened only
+// is read from OUR log (session/agent-conversations.ts) and agy's transcript is opened only
 // for a title and an mtime.
 import path from "node:path";
-import type { AntigravityConversation } from "../session/antigravity-conversations.js";
+import type { AgentConversation } from "../session/agent-conversations.js";
 import { antigravityConversationExists } from "./antigravity-session.js";
 import { cleanTitle, parseJsonRecord, readTranscriptHead } from "./transcript-head.js";
 
@@ -53,6 +53,42 @@ export function antigravityTitleFromTranscriptHead(head: string): string {
   return cleanTitle(typeof first?.content === "string" ? promptText(first.content) : null, DEFAULT_TITLE);
 }
 
+// The model the conversation is running, out of the same block the title has to strip.
+//
+// It reads as prose written only on a CHANGE ("The user changed setting `Model Selection` from
+// None to Gemini 3.6 Flash (High)."), and that wording is why #1466 refused to read it. The
+// transcripts say otherwise: across all 50 conversations on the machine this was written on, every
+// one carries the block, always in step 0, and none carries a second — agy states the selection at
+// the start of a conversation as a change "from None", whether or not the user touched the setting.
+//
+// So this is a fact about THIS conversation, unlike `settings.json` (global, current, and not what
+// an older conversation ran under). The bound: it is read from the head, so if agy ever starts
+// writing a second block mid-conversation, the badge keeps naming the model the conversation
+// STARTED on until it is next resumed. Wrong in a way the user caused and can see, and cheap —
+// a bounded head read, on a file an agent appends to without limit.
+const SETTINGS_BLOCK_RE = /<USER_SETTINGS_CHANGE>([\s\S]*?)<\/USER_SETTINGS_CHANGE>/g;
+// `.` ends the sentence, but a model name contains one too ("Gemini 3.6"), so the terminator is a
+// period FOLLOWED BY a space or the end of the block — not the first period.
+const MODEL_SELECTION_RE = /`Model Selection` from [\s\S]*? to (.+?)\.(?=\s|$)/;
+// A name, not a paragraph. Anything longer means the wording moved and the capture ran on, and a
+// header badge is the wrong place to find that out — the fallback label is.
+const MODEL_NAME_MAX = 48;
+
+/** The model named in a transcript head, or null if it names none. */
+export function antigravityModelFromTranscriptHead(head: string): string | null {
+  let model: string | null = null;
+  for (const record of head.split("\n").map(parseJsonRecord)) {
+    if (!record || !isUserInput(record) || typeof record.content !== "string") continue;
+    // The LAST block wins: none of the captured transcripts has two, but if one ever does, the
+    // later line is the later change.
+    for (const [, block] of record.content.matchAll(SETTINGS_BLOCK_RE)) {
+      const name = MODEL_SELECTION_RE.exec(block ?? "")?.[1]?.trim();
+      if (name && name.length <= MODEL_NAME_MAX) model = name;
+    }
+  }
+  return model;
+}
+
 async function readTranscriptSummary(file: string): Promise<{ title: string; mtime: number } | null> {
   const read = await readTranscriptHead(file, HEAD_BYTES);
   return read && { title: antigravityTitleFromTranscriptHead(read.head), mtime: read.mtime };
@@ -60,8 +96,8 @@ async function readTranscriptSummary(file: string): Promise<{ title: string; mti
 
 // The newest record per conversation. The log only grows, so one conversation can appear under
 // several session keys (a session resumed under a new key) and the same key can appear twice.
-function newestPerConversation(records: Iterable<AntigravityConversation>, cwd: string): AntigravityConversation[] {
-  const byConversation = new Map<string, AntigravityConversation>();
+function newestPerConversation(records: Iterable<AgentConversation>, cwd: string): AgentConversation[] {
+  const byConversation = new Map<string, AgentConversation>();
   for (const record of records) {
     if (record.cwd !== cwd) continue;
     const known = byConversation.get(record.conversationId);
@@ -86,7 +122,7 @@ function newestPerConversation(records: Iterable<AntigravityConversation>, cwd: 
  */
 export async function listAntigravitySessions(
   root: string,
-  records: Iterable<AntigravityConversation>,
+  records: Iterable<AgentConversation>,
   cwd: string,
   limit: number,
 ): Promise<AntigravitySessionSummary[]> {

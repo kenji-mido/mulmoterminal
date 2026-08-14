@@ -1,4 +1,5 @@
 import { PS_UTF8_STDOUT } from "./win-powershell-utf8.js";
+import { psSingleQuoted } from "./ps-quote.js";
 
 // The Windows folder picker, in the dialog Explorer actually uses (#1003).
 //
@@ -69,7 +70,22 @@ namespace MtPicker {
     void SetFilter(IntPtr pFilter);
   }
   public static class Folder {
-    public static string Pick(string title) {
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode, PreserveSig = false)]
+    private static extern void SHCreateItemFromParsingName([MarshalAs(UnmanagedType.LPWStr)] string path, IntPtr bindCtx, ref Guid riid, [MarshalAs(UnmanagedType.Interface)] out IShellItem item);
+
+    // Where the dialog opens. Its own try/catch because a start folder is a convenience: a path the
+    // shell cannot parse must cost the user a starting point, never the dialog.
+    private static void SetStartFolder(IFileDialog dialog, string startFolder) {
+      if (String.IsNullOrEmpty(startFolder)) return;
+      try {
+        Guid riid = new Guid("${IID_ISHELL_ITEM}");
+        IShellItem item;
+        SHCreateItemFromParsingName(startFolder, IntPtr.Zero, ref riid, out item);
+        dialog.SetFolder(item);
+      } catch { }
+    }
+
+    public static string Pick(string title, string startFolder) {
       Type type = Type.GetTypeFromCLSID(new Guid("${CLSID_FILE_OPEN_DIALOG}"));
       IFileDialog dialog = (IFileDialog)Activator.CreateInstance(type);
       try {
@@ -77,6 +93,7 @@ namespace MtPicker {
         dialog.GetOptions(out options);
         dialog.SetOptions(options | ${FOS_FLAGS});
         dialog.SetTitle(title);
+        SetStartFolder(dialog, startFolder);
         if (dialog.Show(IntPtr.Zero) != 0) return null;
         IShellItem item;
         dialog.GetResult(out item);
@@ -94,14 +111,18 @@ namespace MtPicker {
 // NOTE: the `'@` terminator of a PowerShell here-string must start its own line, or the script is
 // a syntax error. A spec pins that, because prettier reflowing this template would not fail
 // anything else.
-export const winFolderDialogScript = (prompt: string): string => `
+//
+// `startFolder` is where the dialog opens, and it is empty on Windows itself — the shell's own
+// "last place you picked" is better than anything this could name. WSL passes one, because there
+// the dialog's default is the Windows side of the machine and the user wants their distro (#1447).
+export const winFolderDialogScript = (prompt: string, startFolder: string | null = null): string => `
 ${PS_UTF8_STDOUT}
 $ErrorActionPreference = 'Stop'
 function Get-MtModernFolder {
   Add-Type -TypeDefinition @'
 ${FOLDER_PICKER_CSHARP}
 '@
-  return [MtPicker.Folder]::Pick('${prompt}')
+  return [MtPicker.Folder]::Pick('${prompt}', ${psSingleQuoted(startFolder ?? "")})
 }
 try {
   $picked = Get-MtModernFolder
@@ -109,7 +130,7 @@ try {
 } catch {
   Add-Type -AssemblyName System.Windows.Forms
   $legacy = New-Object System.Windows.Forms.FolderBrowserDialog
-  $legacy.Description = '${prompt}'
+  $legacy.Description = '${prompt}'${startFolder ? `\n  $legacy.SelectedPath = ${psSingleQuoted(startFolder)}` : ""}
   if ($legacy.ShowDialog() -eq 'OK') { $legacy.SelectedPath }
 }
 `;

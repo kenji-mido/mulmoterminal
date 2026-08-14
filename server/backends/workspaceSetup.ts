@@ -20,6 +20,7 @@ import { mkdirSync } from "node:fs";
 import { seedHelps, syncPresetSkills, syncActivePresetSkills, presetSkillsAssetDir } from "@mulmoclaude/core/workspace-setup";
 import { syncCodexSkills, codexSkillsRoot } from "../agents/codex-skills.js";
 import { isSamePath } from "../infra/path-within.js";
+import { canonicalPath } from "../infra/canonical-path.js";
 
 // Console-backed logger, matching the prefix style other backends use.
 const log = {
@@ -41,7 +42,13 @@ export function isManagedWorkspace(workspace: string): boolean {
   // isSamePath, not `===`: the workspace arrives from the launcher's --cwd, so on Windows it
   // can name the managed directory in a different casing than os.homedir() spells it, and a
   // raw compare would silently skip seeding.
-  return isSamePath(workspace, managedWorkspacePath());
+  const managed = managedWorkspacePath();
+  // Lexical first, so an answer that already matched keeps matching byte for byte. Then through
+  // REALPATH, because `isSamePath` resolves `.`/`..` and casing but not symlinks: a managed
+  // workspace that is a symlink, launched by its physical target (or the reverse), read as "not
+  // the workspace" — which since core 3.1.0 means no staging dir and the project-style authoring
+  // guide, i.e. the workspace quietly losing its staged views and being told to write elsewhere.
+  return isSamePath(workspace, managed) || isSamePath(canonicalPath(workspace), canonicalPath(managed));
 }
 
 // Run one seeding step in isolation: a filesystem edge case (EACCES/ENOSPC/path
@@ -96,5 +103,20 @@ export function initWorkspaceSetup(deps: { workspace: string }): void {
   safeStep("mirrorCodexSkills", () => {
     const result = syncCodexSkills(path.join(workspace, ".claude", "skills"), codexSkillsRoot());
     log.info("mirrored skills to codex", { mirrored: result.mirrored.length, skipped: result.skipped.length, removed: result.removed.length });
+  });
+}
+
+/** Re-mirror the workspace's skills for a codex session about to start there. The boot-time
+ *  mirror above goes stale the moment a skill is created mid-run — a new collection, say — and
+ *  codex reads the mirror, never the live directory, so without this a restart was the only way
+ *  a codex chat could see a skill made after boot. Gated exactly like boot seeding: only the
+ *  managed workspace's skills belong in the user-global codex root — mirroring an arbitrary
+ *  project's `.claude/skills` there would make its skills fire in every other directory too.
+ *  Quiet on failure for the caller's sake: a mirror that cannot refresh is a session with
+ *  yesterday's skills, not a session that fails to start. */
+export function refreshCodexSkillsMirror(cwd: string): void {
+  if (!isManagedWorkspace(cwd)) return;
+  safeStep("refreshCodexSkillsMirror", () => {
+    syncCodexSkills(path.join(cwd, ".claude", "skills"), codexSkillsRoot());
   });
 }

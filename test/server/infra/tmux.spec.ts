@@ -8,11 +8,13 @@ import {
   parseTmuxEnvironment,
   parseAttachedClientCount,
   parseTmuxClientSessions,
+  parseTmuxSessionActivity,
   parseTmuxTerminalModes,
   parseTmuxWindowSize,
   redrawTargets,
   planMsOverride,
   MS_OVERRIDE_ENTRY,
+  parseTmuxPanePids,
 } from "../../../server/infra/tmux";
 
 describe("tmuxSessionName", () => {
@@ -337,5 +339,48 @@ describe("parseTmuxWindowSize", () => {
     expect(parseTmuxWindowSize("x40")).toBeNull();
     expect(parseTmuxWindowSize("120x40x10")).toBeNull();
     expect(parseTmuxWindowSize("-1x40")).toBeNull();
+  });
+});
+
+// When tmux last saw each session do anything (#1478) — the number that separates "working while I
+// was away" from "abandoned three days ago" in the Settings list.
+describe("parseTmuxSessionActivity", () => {
+  it("reads the epoch second of each of our sessions", () => {
+    expect(parseTmuxSessionActivity("mt-a 1700000000\nmt-b 1700000900\n")).toEqual(
+      new Map([
+        ["a", 1700000000],
+        ["b", 1700000900],
+      ]),
+    );
+  });
+
+  it("ignores sessions outside our prefix — the user's own tmux is not ours to list", () => {
+    expect(parseTmuxSessionActivity("work 1700000000\nmt-a 1700000001\n")).toEqual(new Map([["a", 1700000001]]));
+  });
+
+  // A line tmux gave us without a number, or with something that is not one, must drop out rather
+  // than land as NaN and render as an age nobody can read.
+  it.each(["mt-a", "mt-a notanumber", ""])("drops the unusable line %j", (line) => {
+    expect(parseTmuxSessionActivity(line)).toEqual(new Map());
+  });
+});
+
+// The pane pid -> session map, which is how a process started BY an agent is traced back to the
+// session it belongs to when nothing was handed to it (server/session/bridge-session.ts). The
+// FORMAT is the fragile part — it is a tmux format string, and a change to it would silently
+// return an empty map, which reads as "no session owns this bridge" and withholds every GUI tool.
+describe("parseTmuxPanePids", () => {
+  it("keeps only our own sessions, keyed by pane pid", () => {
+    const panes = parseTmuxPanePids(["2220 mt-aaaa-1111", "3300 someone-elses-session", "4400 mt-bbbb-2222"].join("\n"));
+    expect(panes).toEqual(
+      new Map([
+        [2220, "aaaa-1111"],
+        [4400, "bbbb-2222"],
+      ]),
+    );
+  });
+
+  it("ignores a row it cannot read rather than inventing a pid", () => {
+    expect(parseTmuxPanePids(["", "not-a-pid mt-aaaa", "0 mt-bbbb", "-3 mt-cccc", "2220"].join("\n"))).toEqual(new Map());
   });
 });

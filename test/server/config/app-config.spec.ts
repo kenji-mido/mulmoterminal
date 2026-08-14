@@ -8,13 +8,13 @@ import {
   sanitizeRepos,
   sanitizeRepoDirs,
   sanitizeLaunchers,
+  sanitizeCustomAgents,
   sanitizeQuickCommands,
   sanitizePushKinds,
   sanitizeUserMcpServers,
   sanitizePushEnabled,
   sanitizePrWorkdirFooter,
   sanitizeCopyOnSelect,
-  sanitizeWorklogIntervalHours,
   sanitizeTerminalSubmit,
   loadAppConfig,
   loadAppConfigResult,
@@ -27,6 +27,8 @@ import {
 import { DEFAULT_SOUND_KINDS } from "../../../common/notifyKinds.js";
 import { DEFAULT_PUSH_KINDS } from "../../../common/pushKinds.js";
 import { DEFAULT_COCKPIT_LINES } from "../../../common/cockpitLines.js";
+import { DEFAULT_HEADER_STATUS_TINT } from "../../../common/headerStatusColors.js";
+import { sanitizeWorklogIntervalHours } from "../../../common/worklogInterval.js";
 
 const tmp = () => mkdtempSync(path.join(tmpdir(), "mt-appcfg-"));
 
@@ -165,6 +167,39 @@ describe("sanitizeLaunchers", () => {
   it("caps the number of launchers", () => {
     const many = Array.from({ length: 30 }, (_, i) => ({ label: `L${i}`, command: `c${i}` }));
     expect(sanitizeLaunchers(many).length).toBeLessThanOrEqual(20);
+  });
+});
+
+describe("sanitizeCustomAgents (#1414)", () => {
+  it("keeps trimmed id+label+command triples, drops incomplete/dup/junk", () => {
+    expect(
+      sanitizeCustomAgents([
+        { id: " nemotron ", label: "  Nemotron ", agent: "claude", command: " ollama launch claude --model nemotron-3-ultra:cloud -- " },
+        { id: "kimi", label: "Kimi", agent: "claude", command: "kimi-claude" },
+        { id: "nemotron", label: "Again", agent: "claude", command: "x" }, // dup ID — dropped
+        { id: "noCmd", label: "NoCmd", agent: "claude", command: "" }, // no command — dropped
+        { id: "nolabel", label: "", agent: "claude", command: "x" }, // no label — dropped
+        { id: "noagent", label: "NoAgent", command: "x" }, // does not say WHICH agent — dropped
+        "junk",
+      ]),
+    ).toEqual([
+      { id: "nemotron", label: "Nemotron", agent: "claude" as const, command: "ollama launch claude --model nemotron-3-ultra:cloud --" },
+      { id: "kimi", label: "Kimi", agent: "claude", command: "kimi-claude" },
+    ]);
+    expect(sanitizeCustomAgents("nope")).toEqual([]);
+    expect(sanitizeCustomAgents(undefined)).toEqual([]);
+  });
+
+  // Its button would be shadowed by the built-in one and never reachable, which looks exactly
+  // like the entry having been ignored — so it is dropped where that can still be explained.
+  it("drops an entry that names itself after a built-in picker option", () => {
+    expect(sanitizeCustomAgents([{ id: "claude", label: "Mine", agent: "claude", command: "x" }])).toEqual([]);
+    expect(sanitizeCustomAgents([{ id: "shell", label: "Mine", agent: "claude", command: "x" }])).toEqual([]);
+  });
+
+  it("caps the number of custom agents", () => {
+    const many = Array.from({ length: 30 }, (_, i) => ({ id: `a${i}`, label: `A${i}`, agent: "claude", command: `c${i}` }));
+    expect(sanitizeCustomAgents(many).length).toBeLessThanOrEqual(8);
   });
 });
 
@@ -340,6 +375,7 @@ describe("loadAppConfig / saveAppConfig", () => {
     gitlabHosts: [],
     repoDirs: {},
     launchers: [],
+    customAgents: [],
     quickCommands: [],
     userMcpServers: [],
     themes: [],
@@ -349,6 +385,7 @@ describe("loadAppConfig / saveAppConfig", () => {
     pushKinds: [...DEFAULT_PUSH_KINDS],
     worklogEnabled: false,
     worklogIntervalHours: 6,
+    sessionIdleReapDays: 7,
     providers: [],
     terminalSubmit: "cr",
     keymap: {},
@@ -357,7 +394,10 @@ describe("loadAppConfig / saveAppConfig", () => {
     issueWorkComments: false,
     prWorkdirFooter: true,
     appendSystemPrompt: true,
+    autoDirIcon: true,
     cockpitLines: { ...DEFAULT_COCKPIT_LINES },
+    headerStatusColors: {},
+    headerStatusTint: DEFAULT_HEADER_STATUS_TINT,
     fontFamily: null,
   };
   it("round-trips presets + soundFile + prRepos + launchers + userMcpServers through a file", () => {
@@ -374,6 +414,7 @@ describe("loadAppConfig / saveAppConfig", () => {
       gitlabHosts: ["gitlab.hogefuga.com"], // config.json-only, so the file is its only way home
       repoDirs: {},
       launchers: [{ label: "Shell", command: "$SHELL" }],
+      customAgents: [{ id: "nemotron", label: "Nemotron", agent: "claude" as const, command: "ollama launch claude --model nemotron-3-ultra:cloud --" }],
       quickCommands: [],
       userMcpServers: [{ id: "weather", url: "http://localhost:9000/mcp" }],
       themes: [],
@@ -383,6 +424,7 @@ describe("loadAppConfig / saveAppConfig", () => {
       pushKinds: [...DEFAULT_PUSH_KINDS],
       worklogEnabled: true,
       worklogIntervalHours: 12,
+      sessionIdleReapDays: 7,
       providers: [],
       terminalSubmit: "esc-cr" as const, // a non-default value must round-trip through the file
       keymap: { "zoom-next": "PageDown" }, // a bound shortcut must survive the round-trip too
@@ -391,7 +433,10 @@ describe("loadAppConfig / saveAppConfig", () => {
       issueWorkComments: false, // opt-in, so only `true` proves it persisted rather than defaulted
       prWorkdirFooter: false, // the opt-out: it defaults ON, so only `false` proves it persisted
       appendSystemPrompt: false, // same opt-out shape: defaults ON, so only `false` proves it persisted
+      autoDirIcon: false, // same again (#1428): defaults ON, so only `false` proves it persisted
       cockpitLines: { summary: 6, prompt: 2, response: 3 }, // a raised clamp must survive it too
+      headerStatusColors: { working: { background: "#6d28d9", text: null } }, // a per-status header colour must round-trip too
+      headerStatusTint: "none" as const, // non-default, so only "none" proves it persisted
       fontFamily: "Cica, monospace", // already normalized, so it must come back byte-identical
     };
     expect(saveAppConfig(file, cfg, {})).toBe(true);
@@ -435,17 +480,21 @@ describe("loadAppConfig / saveAppConfig", () => {
       gitlabHosts: ["gitlab.hogefuga.com", "gitlab.two.example"],
       repoDirs: {},
       launchers: [{ label: "S", command: "sh" }],
+      customAgents: [],
       quickCommands: [],
       userMcpServers: [{ id: "ok", url: "https://x/mcp" }],
       themes: [],
       keymap: { "zoom-next": "PageDown" },
       cockpitLines: { ...DEFAULT_COCKPIT_LINES },
+      headerStatusColors: {},
+      headerStatusTint: DEFAULT_HEADER_STATUS_TINT,
       buttons: null,
       chips: null,
       pushEnabled: false,
       pushKinds: [...DEFAULT_PUSH_KINDS],
       worklogEnabled: false,
       worklogIntervalHours: 6,
+      sessionIdleReapDays: 7,
       providers: [],
       terminalSubmit: "cr",
       copyOnSelect: false,
@@ -453,6 +502,7 @@ describe("loadAppConfig / saveAppConfig", () => {
       issueWorkComments: false,
       prWorkdirFooter: true, // absent from the file — every config predating #872 stays enabled
       appendSystemPrompt: true, // absent from the file — every config predating #1062 stays enabled
+      autoDirIcon: true, // same: a config predating #1428 picks up the repo's own favicon
       fontFamily: null,
     });
     rmSync(dir, { recursive: true, force: true });
@@ -545,6 +595,7 @@ describe("#741 corrupt config is not silently wiped by a partial update", () => 
     gitlabHosts: ["gitlab.hogefuga.com"],
     repoDirs: {},
     launchers: [{ label: "Shell", command: "$SHELL" }],
+    customAgents: [{ id: "nemotron", label: "Nemotron", agent: "claude" as const, command: "ollama launch claude --model nemotron-3-ultra:cloud --" }],
     quickCommands: [],
     userMcpServers: [{ id: "weather", url: "http://localhost:9000/mcp" }],
     themes: [],
@@ -554,6 +605,7 @@ describe("#741 corrupt config is not silently wiped by a partial update", () => 
     pushKinds: [...DEFAULT_PUSH_KINDS],
     worklogEnabled: false,
     worklogIntervalHours: 6,
+    sessionIdleReapDays: 7,
     providers: [],
     terminalSubmit: "cr" as const,
     keymap: {},
@@ -562,7 +614,10 @@ describe("#741 corrupt config is not silently wiped by a partial update", () => 
     issueWorkComments: false,
     prWorkdirFooter: true,
     appendSystemPrompt: true,
+    autoDirIcon: true,
     cockpitLines: { ...DEFAULT_COCKPIT_LINES },
+    headerStatusColors: {},
+    headerStatusTint: DEFAULT_HEADER_STATUS_TINT,
     fontFamily: null,
   };
 
@@ -611,6 +666,7 @@ describe("mergeConfigUpdate", () => {
     gitlabHosts: [],
     repoDirs: {},
     launchers: [],
+    customAgents: [],
     quickCommands: [],
     userMcpServers: [],
     themes: [],
@@ -620,6 +676,7 @@ describe("mergeConfigUpdate", () => {
     pushKinds: [...DEFAULT_PUSH_KINDS],
     worklogEnabled: false,
     worklogIntervalHours: 6,
+    sessionIdleReapDays: 7,
     providers: [],
     terminalSubmit: "cr",
     keymap: {},
@@ -628,7 +685,10 @@ describe("mergeConfigUpdate", () => {
     issueWorkComments: false,
     prWorkdirFooter: true,
     appendSystemPrompt: true,
+    autoDirIcon: true,
     cockpitLines: { ...DEFAULT_COCKPIT_LINES },
+    headerStatusColors: {},
+    headerStatusTint: DEFAULT_HEADER_STATUS_TINT,
     fontFamily: null,
     ...over,
   });

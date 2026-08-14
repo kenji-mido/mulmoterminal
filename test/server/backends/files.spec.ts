@@ -7,11 +7,13 @@ import path from "node:path";
 import { appRequest } from "../../helpers/appRequest.js";
 import { mountFilesRoutes } from "../../../server/backends/files.js";
 import { makeTempDir } from "../../support/tempDir";
+import { initProjectRoots, projectId } from "../../../server/infra/project-root.js";
 
 let request: ReturnType<typeof appRequest>;
 // A session project dir OUTSIDE the workspace root (a sibling repo), reachable only via
 // the `?cwd=` scope — mirrors an agent whose cwd is a different repo.
 let sessionDir: string;
+let projectDir: string;
 
 beforeAll(() => {
   const ws = makeTempDir("mt-files-");
@@ -24,9 +26,48 @@ beforeAll(() => {
   mkdirSync(path.join(sessionDir, "assets", "media"), { recursive: true });
   writeFileSync(path.join(sessionDir, "assets", "media", "hero.gif"), Buffer.from([0x47, 0x49, 0x46, 0x38]));
 
+  // A PROJECT dir, reachable only by its opaque id — the route's third scope, beside the
+  // workspace root and a live session's cwd.
+  projectDir = makeTempDir("mt-files-project-");
+  mkdirSync(path.join(projectDir, "data"), { recursive: true });
+  writeFileSync(path.join(projectDir, "data", "pic.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+  // The workspace holds a DIFFERENT file at the same relative path, so "served the workspace's"
+  // and "served the project's" are distinguishable rather than both just 200.
+  mkdirSync(path.join(ws, "data"), { recursive: true });
+  writeFileSync(path.join(ws, "data", "pic.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a]));
+  initProjectRoots({ workspace: ws, knownProjects: () => [{ label: "project", path: projectDir }] });
+
   const app = express();
   mountFilesRoutes(app, { workspace: ws, sessionCwds: () => [sessionDir] });
   request = appRequest(app);
+});
+
+describe("GET /api/files/raw — project scope", () => {
+  it("serves the named project's file, not the workspace's file of the same path", async () => {
+    const res = await request(`/api/files/raw?path=data/pic.png&project=${projectId(projectDir)}`);
+    expect(res.status).toBe(200);
+    expect((await res.arrayBuffer()).byteLength).toBe(4);
+
+    const workspaceCopy = await request("/api/files/raw?path=data/pic.png");
+    expect((await workspaceCopy.arrayBuffer()).byteLength).toBe(6);
+  });
+
+  // PRESENCE, not shape. Express turns a duplicate or bracketed parameter into an array or an
+  // object, and reading those as "absent" would serve a WORKSPACE file to a request that
+  // explicitly named a project.
+  //
+  // `?project[x]=y` is deliberately absent from this list: with express's default query parser
+  // that is a key literally named `project[x]`, so the request never names a project at all and
+  // the workspace is the right answer. The guard still rejects non-strings, for a host that
+  // switches the parser.
+  it.each([
+    ["an unknown id", "?project=0123456789abcdef"],
+    ["duplicate parameters", "?project=a&project=b"],
+    ["an empty value", "?project="],
+  ])("400s for %s rather than falling back to the workspace", async (_label, query) => {
+    const res = await request(`/api/files/raw?path=data/pic.png&${query.slice(1)}`);
+    expect(res.status).toBe(400);
+  });
 });
 
 describe("GET /api/files/raw", () => {

@@ -1,6 +1,28 @@
 # Integrating `@mulmoclaude/collection-plugin` into MulmoTerminal
 
-Status: **the cross-repo blocker is gone.** The package shipped `0.5.0`/`0.5.1` with exactly the
+> **HISTORICAL — do not read this as the current state (marked 2026-08-06, #1492).**
+>
+> This is the *plan* that brought collections into MulmoTerminal, kept for the reasoning:
+> why the read path needs a server at all, why favorites are a shared on-disk file, how the
+> Shadow-DOM teleport works, and which decisions were taken and rejected along the way.
+>
+> **All three tiers below have shipped.** Everything the tier list, the gap table's `[term]`
+> markers and the stub list describe as future work is now real — the write routes
+> (`items` / `item` / actions / refresh / calendar-push), the registry import, remote views,
+> `manageCollection`, and a `startChat` that seeds a visible chat. If a passage here says
+> something is a stub or a no-op, it is telling you what was true when the increment was scoped.
+>
+> **For the current state, read instead:**
+> - [`mulmoclaude-parity.md`](mulmoclaude-parity.md) — what is shared with MulmoClaude today,
+>   the three deliberate API-path divergences, and the differences that remain (custom-view
+>   response bodies, `kind: "agent"` dispatch).
+> - `server/backends/collections.ts` — the mounted routes, one line each.
+> - `src/composables/collectionUi.ts` — every host-capability binding, real ones and the
+>   handful still deliberately inert.
+>
+> Nothing below is edited to match new behaviour; that is what keeps it readable as a record.
+
+Status at the time of writing: **the cross-repo blocker is gone.** The package shipped `0.5.0`/`0.5.1` with exactly the
 host-contract changes this doc originally said were still needed (ToolPlugin entry, router-optional
 nav, configurable teleport target, server engine). What remains is **MulmoTerminal-side wiring only** —
 **no MulmoClaude changes are required.**
@@ -132,6 +154,12 @@ read-only card over the shared workspace:
   `buildViewSrcdoc`/`listFeeds` → typed failure; `reconcileShortcuts`/`unpin` → no-op;
   `notifiedSeverities` → empty map; `startChat` → no-op (the card uses the `sendTextMessage` prop, not
   this binding hook).
+
+  > **This bullet is the Tier-1 plan, not the current state.** Every binding listed here has since
+  > been wired for real; `notifiedSeverities` was the last of them, in #1491 — it now maps the live
+  > bell's entries (`useNotifications().active` → `src/utils/collectionNotified.ts`) to
+  > `itemId → severity`, which is what accents a Kanban card that has a pending completion bell.
+  > Left as written because the rest of this section records how the increment was scoped.
 - **Asset URLs:** `imageSrc`/`fileAssetUrl` resolve to `GET /api/files/raw?path=<workspace-relative>`
   (server/backends/files.ts), mirroring MulmoClaude's `resolveImageSrc`, so `image`/`file` fields and
   custom-view `<img>` thumbnails render. `fileRoutePath` stays null (no in-app File Explorer).
@@ -237,6 +265,10 @@ favorite), and the full-screen browse overlay (`CollectionsIndexView` / standalo
 via `useCollectionBrowse`). Verified: MulmoClaude's pinned collections appear in MulmoTerminal's
 toolbar from the shared file; the overlay opens and the index renders. Still open: `startChat` is a
 no-op (collection "create"/action buttons that seed a chat are inert), and Tier 1 write routes.
+
+Both of those have since shipped — `startChat` seeds a visible chat (`startCollectionChat`) and the
+Tier 1 write routes are mounted in `server/backends/collections.ts` — which is what the note under the
+stub list above refers to. The sentence before this one is left as the record of where Tier 2 stopped.
 
 Bottom line: **the package is drop-in-ready and needs zero MulmoClaude changes.** The work is entirely
 in MulmoTerminal: server read engine + routes, the frontend ToolPlugin + binding + teleport wrapper,

@@ -4,10 +4,12 @@
 // from config-routes.ts so the sanitize/load/save logic is unit-testable.
 import { existsSync, copyFileSync } from "node:fs";
 import path from "node:path";
+import { isRecord } from "../../common/isRecord.js";
 import { sanitizePresets } from "./cwd-presets.js";
 import { sanitizeButtons, sanitizeChips } from "./header-config.js";
 import {
   launcherSchema,
+  customAgentSchema,
   quickCommandSchema,
   userMcpServerSchema,
   providerSchema,
@@ -22,17 +24,27 @@ import {
 } from "./config-schema.js";
 import { DEFAULT_TERMINAL_SUBMIT_MODE, isTerminalSubmitMode, type TerminalSubmitMode } from "../../common/terminalSubmit.js";
 import type { QuickCommand } from "../../common/quickCommands.js";
+import { isCustomAgentId, type CustomAgent } from "../../common/customAgents.js";
 import { DEFAULT_PUSH_KINDS, PUSH_KINDS, type PushKind } from "../../common/pushKinds.js";
 import { DEFAULT_SOUND_KINDS, NOTIFY_KINDS, type NotifyKind } from "../../common/notifyKinds.js";
 import { parsePresetRef } from "../../common/notifySounds.js";
-import { isRecord } from "../../common/isRecord.js";
+import { MODEL_ID_ALLOWED } from "../../common/modelIds.js";
 import { sanitizeKeymap, type Keymap } from "../../common/keymap.js";
 import { sanitizeCockpitLines, DEFAULT_COCKPIT_LINES, type CockpitLines } from "../../common/cockpitLines.js";
+import {
+  sanitizeHeaderStatusColors,
+  sanitizeHeaderStatusTint,
+  DEFAULT_HEADER_STATUS_TINT,
+  type HeaderStatusColors,
+  type HeaderStatusTint,
+} from "../../common/headerStatusColors.js";
 import { normalizeFontFamily } from "../../common/terminalFontFamily.js";
 import { readTextFile } from "../infra/read-text-file.js";
 import { writeFileAtomicSync } from "../files/atomic-write.js";
 import { isRepoEntry } from "../../common/repoEntry.js";
 import { sanitizeGitlabHosts } from "../../common/gitlabHosts.js";
+import { DEFAULT_WORKLOG_INTERVAL_HOURS, sanitizeWorklogIntervalHours } from "../../common/worklogInterval.js";
+import { DEFAULT_REAP_IDLE_DAYS, sanitizeReapIdleDays } from "../../common/sessionReap.js";
 import { GUI_SERVER_ID } from "../../common/toolGroups.js";
 
 export interface AppConfig {
@@ -51,7 +63,7 @@ export interface AppConfig {
   prRepos: string[];
   // Hosts that run a self-hosted GitLab (#1332), e.g. "gitlab.hogefuga.com". A host named here is
   // read with `glab`, exactly as gitlab.com is; nothing else can tell them apart from the URL.
-  // config.json only — no Settings control, so a hand edit needs a restart like `prRepos` does.
+  // Takes effect on the next server start, like `prRepos` does.
   gitlabHosts: string[];
   // Which local clone work on a repo starts in, for the repos the user has chosen one for (#1172).
   // Only the CHOICE is stored: which clones exist at all is derived from `cwdPresets` on every
@@ -59,6 +71,11 @@ export interface AppConfig {
   repoDirs: Record<string, string>;
   // User-defined launch commands offered in the grid cell launcher (label + command).
   launchers: Launcher[];
+  // The user's OWN ways of starting Claude Code, offered in the Agent Picker beside Claude /
+  // Codex / Antigravity / Shell (#1414). Not a launcher: Claude Code's argv is appended to the
+  // entry's command, so the session resumes, reports cost, and reaches the GUI tools like any
+  // other Claude cell — see common/customAgents.ts.
+  customAgents: CustomAgent[];
   // Phrases the phone offers as chips on a session's terminal view (#830), optionally
   // scoped to session kinds. Empty by default — no chips until the user adds one.
   quickCommands: QuickCommand[];
@@ -82,6 +99,9 @@ export interface AppConfig {
   // session on each run, so it costs tokens). `worklogIntervalHours` is the cadence.
   worklogEnabled: boolean;
   worklogIntervalHours: number;
+  // Days a tmux session may sit with nobody attached and no output before the server ends it at
+  // its next start (#1467). 0 turns the sweep off; the conversation is on disk either way.
+  sessionIdleReapDays: number;
   // Anthropic-compatible backends a directory can point its sessions at (#579). Safe to
   // serve: an entry names the env var holding its key (`tokenEnv`), never the key.
   providers: Provider[];
@@ -117,6 +137,17 @@ export interface AppConfig {
   // it is a vision-stage idea rather than something every user needs, and it writes a file
   // (under ~/.mulmoterminal/decisions/) that would otherwise never exist.
   decisionDigest: boolean;
+  // Pick up a project's own favicon when its `.mulmoterminal.json` names no `icon` (#1428).
+  // ON unless turned off, unlike the opt-in flags above: it shows a picture the repository
+  // already ships rather than creating anything, and a project that doesn't want one says
+  // `"icon": false` in its own file. This is the switch for turning the whole behaviour off.
+  autoDirIcon: boolean;
+  // What a cell header shows once a status replaces the directory's colour — working / done /
+  // blocked (#1617). The DEFAULT for every directory; a `.mulmoterminal.json` that names either
+  // key outranks it. Global rather than per-directory-only because the readable pairing of a
+  // status wash and its ink is a property of the THEME the user runs, not of one project.
+  headerStatusColors: HeaderStatusColors;
+  headerStatusTint: HeaderStatusTint;
   // Colour schemes the user defined, offered in Settings alongside the four built-ins (#996).
   // Server-side rather than per-browser (like `fontFamily`, unlike `fontSize`): a palette you
   // authored is an asset you want on every browser you open the app from. WHICH one is selected
@@ -213,6 +244,41 @@ export function sanitizeLaunchers(input: unknown): Launcher[] {
     seen.add(label);
     out.push({ label, command });
     if (out.length >= LAUNCHERS_MAX) break;
+  }
+  return out;
+}
+
+const CUSTOM_AGENT_LABEL_MAX = 24;
+const CUSTOM_AGENT_COMMAND_MAX = 500;
+const CUSTOM_AGENTS_MAX = 8;
+
+// Same shape of rule as sanitizeLaunchers, with the ID as the identity rather than the label:
+// the id is what a running session is remembered by and what the browser sends back, so a
+// duplicate would make two entries indistinguishable on the wire while both still rendered.
+//
+// An id that is a BUILT-IN picker option ("claude", "shell", …) is dropped by `isCustomAgentId`
+// rather than kept: its button would be shadowed by the built-in one, which looks exactly like
+// the entry having been ignored.
+//
+// The label is short because it sits in the same one-line toggle as Claude / Codex /
+// Antigravity / Shell, and that row already wraps in a narrow cell.
+export function sanitizeCustomAgents(input: unknown): CustomAgent[] {
+  if (!Array.isArray(input)) return [];
+  const seen = new Set<string>();
+  const out: CustomAgent[] = [];
+  for (const v of input) {
+    const parsed = customAgentSchema.safeParse(v);
+    if (!parsed.success) continue;
+    const id = parsed.data.id.trim();
+    const label = parsed.data.label.trim().slice(0, CUSTOM_AGENT_LABEL_MAX);
+    const command = parsed.data.command.trim().slice(0, CUSTOM_AGENT_COMMAND_MAX);
+    if (!isCustomAgentId(id) || !label || !command || seen.has(id)) continue;
+    seen.add(id);
+    // `agent` is already narrowed by the schema's enum — an entry that omits it, or names an
+    // agent whose argv this app cannot build, never reaches here. That is deliberate: without it
+    // nothing knows WHICH arguments to append, and appending none would start a bare wrapper.
+    out.push({ id, label, agent: parsed.data.agent, command });
+    if (out.length >= CUSTOM_AGENTS_MAX) break;
   }
   return out;
 }
@@ -336,10 +402,6 @@ export function sanitizeTerminalSubmit(input: unknown): TerminalSubmitMode {
   return isTerminalSubmitMode(input) ? input : DEFAULT_TERMINAL_SUBMIT_MODE;
 }
 
-export const DEFAULT_WORKLOG_INTERVAL_HOURS = 6;
-const MIN_WORKLOG_INTERVAL_HOURS = 1;
-const MAX_WORKLOG_INTERVAL_HOURS = 168; // one week
-
 export function sanitizeWorklogEnabled(input: unknown): boolean {
   return input === true;
 }
@@ -370,10 +432,8 @@ export function sanitizeAppendSystemPrompt(input: unknown): boolean {
   return input !== false;
 }
 
-// Positive whole hours, clamped to [1, 168]. Anything else falls back to the default.
-export function sanitizeWorklogIntervalHours(input: unknown): number {
-  if (typeof input !== "number" || !Number.isFinite(input) || input <= 0) return DEFAULT_WORKLOG_INTERVAL_HOURS;
-  return Math.min(MAX_WORKLOG_INTERVAL_HOURS, Math.max(MIN_WORKLOG_INTERVAL_HOURS, Math.round(input)));
+export function sanitizeAutoDirIcon(input: unknown): boolean {
+  return input !== false;
 }
 
 // Fresh object each call — callers hold and mutate the returned config in place, so a
@@ -389,8 +449,11 @@ export const emptyConfig = (): AppConfig => ({
   gitlabHosts: [],
   repoDirs: {},
   launchers: [],
+  customAgents: [],
   quickCommands: [],
   userMcpServers: [],
+  headerStatusColors: {},
+  headerStatusTint: DEFAULT_HEADER_STATUS_TINT,
   themes: [],
   buttons: null,
   chips: null,
@@ -398,6 +461,7 @@ export const emptyConfig = (): AppConfig => ({
   pushKinds: [...DEFAULT_PUSH_KINDS],
   worklogEnabled: false,
   worklogIntervalHours: DEFAULT_WORKLOG_INTERVAL_HOURS,
+  sessionIdleReapDays: DEFAULT_REAP_IDLE_DAYS,
   providers: [],
   terminalSubmit: DEFAULT_TERMINAL_SUBMIT_MODE,
   keymap: {},
@@ -406,9 +470,45 @@ export const emptyConfig = (): AppConfig => ({
   issueWorkComments: false,
   prWorkdirFooter: true,
   appendSystemPrompt: true,
+  autoDirIcon: true,
   cockpitLines: { ...DEFAULT_COCKPIT_LINES },
   fontFamily: null,
 });
+
+// Said once per process: this config is re-read on paths that run per session spawn, so an entry
+// the user has not fixed yet would repeat its line at every launch and bury everything else.
+const warnedConfigLines = new Set<string>();
+const warnOnce = (message: string): void => {
+  if (warnedConfigLines.has(message)) return;
+  warnedConfigLines.add(message);
+  console.warn(message);
+};
+
+// What a rejected entry is quoted as. A dropped value is whatever the user's JSON held — an
+// object, or a string far past MODEL_ID_MAX_LENGTH, which is one of the reasons it was rejected —
+// so it is quoted to a bound rather than echoed whole into the line.
+const DROPPED_MODEL_QUOTE_MAX = 80;
+const quoteDropped = (model: unknown): string => {
+  const text = JSON.stringify(model) ?? String(model);
+  return text.length > DROPPED_MODEL_QUOTE_MAX ? `${text.slice(0, DROPPED_MODEL_QUOTE_MAX)}…` : text;
+};
+
+// A model id the schema refuses is dropped in silence, and a provider whose whole list was
+// refused looks exactly like one that never listed any: the picker has nothing to offer while the
+// user is reading a config file that lists models (#1432). Compared against what the schema KEPT
+// rather than re-testing the rule here, so the two cannot drift apart.
+function warnDroppedModels(provider: Provider, raw: unknown): void {
+  if (!isRecord(raw) || raw.models === undefined) return;
+  if (!Array.isArray(raw.models)) {
+    warnOnce(`[providers] '${provider.id}': "models" must be an array of model ids — the whole value was ignored, so this backend offers nothing.`);
+    return;
+  }
+  const kept = new Set(provider.models);
+  const dropped = raw.models.filter((model) => typeof model !== "string" || !kept.has(model.trim()));
+  if (dropped.length === 0) return;
+  const shown = dropped.map(quoteDropped).join(", ");
+  warnOnce(`[providers] '${provider.id}': dropped ${dropped.length} unusable model id(s) — ${shown}. A model id is ${MODEL_ID_ALLOWED}.`);
+}
 
 // Drop malformed entries rather than rejecting the whole config: one bad provider must
 // not cost the user their launchers and presets. A bad entry surfaces at spawn time,
@@ -417,7 +517,9 @@ export function sanitizeProviders(input: unknown): Provider[] {
   if (!Array.isArray(input)) return [];
   return input.flatMap((entry) => {
     const parsed = providerSchema.safeParse(entry);
-    return parsed.success ? [parsed.data] : [];
+    if (!parsed.success) return [];
+    warnDroppedModels(parsed.data, entry);
+    return [parsed.data];
   });
 }
 
@@ -434,8 +536,11 @@ function sanitizeAppConfig(raw: unknown): AppConfig {
     gitlabHosts: sanitizeGitlabHosts(o.gitlabHosts),
     repoDirs: sanitizeRepoDirs(o.repoDirs),
     launchers: sanitizeLaunchers(o.launchers),
+    customAgents: sanitizeCustomAgents(o.customAgents),
     quickCommands: sanitizeQuickCommands(o.quickCommands),
     userMcpServers: sanitizeUserMcpServers(o.userMcpServers),
+    headerStatusColors: sanitizeHeaderStatusColors(o.headerStatusColors),
+    headerStatusTint: sanitizeHeaderStatusTint(o.headerStatusTint) ?? DEFAULT_HEADER_STATUS_TINT,
     themes: sanitizeCustomThemes(o.themes),
     buttons: sanitizeButtons(o.buttons),
     chips: sanitizeChips(o.chips),
@@ -443,6 +548,7 @@ function sanitizeAppConfig(raw: unknown): AppConfig {
     pushKinds: sanitizePushKinds(o.pushKinds),
     worklogEnabled: sanitizeWorklogEnabled(o.worklogEnabled),
     worklogIntervalHours: sanitizeWorklogIntervalHours(o.worklogIntervalHours),
+    sessionIdleReapDays: sanitizeReapIdleDays(o.sessionIdleReapDays),
     providers: sanitizeProviders(o.providers),
     terminalSubmit: sanitizeTerminalSubmit(o.terminalSubmit),
     keymap: sanitizeKeymap(o.keymap),
@@ -451,6 +557,7 @@ function sanitizeAppConfig(raw: unknown): AppConfig {
     issueWorkComments: sanitizeIssueWorkComments(o.issueWorkComments),
     prWorkdirFooter: sanitizePrWorkdirFooter(o.prWorkdirFooter),
     appendSystemPrompt: sanitizeAppendSystemPrompt(o.appendSystemPrompt),
+    autoDirIcon: sanitizeAutoDirIcon(o.autoDirIcon),
     cockpitLines: sanitizeCockpitLines(o.cockpitLines),
     fontFamily: normalizeFontFamily(o.fontFamily),
   };
@@ -539,8 +646,11 @@ export function mergeConfigUpdate(base: AppConfig, body: Record<string, unknown>
     gitlabHosts: updated("gitlabHosts", sanitizeGitlabHosts, base.gitlabHosts),
     repoDirs: updated("repoDirs", sanitizeRepoDirs, base.repoDirs),
     launchers: updated("launchers", sanitizeLaunchers, base.launchers),
+    customAgents: updated("customAgents", sanitizeCustomAgents, base.customAgents),
     quickCommands: updated("quickCommands", sanitizeQuickCommands, base.quickCommands),
     userMcpServers: updated("userMcpServers", sanitizeUserMcpServers, base.userMcpServers),
+    headerStatusColors: updated("headerStatusColors", sanitizeHeaderStatusColors, base.headerStatusColors),
+    headerStatusTint: updated("headerStatusTint", (input) => sanitizeHeaderStatusTint(input) ?? DEFAULT_HEADER_STATUS_TINT, base.headerStatusTint),
     themes: updated("themes", sanitizeCustomThemes, base.themes),
     buttons: updated("buttons", sanitizeButtons, base.buttons),
     chips: updated("chips", sanitizeChips, base.chips),
@@ -548,6 +658,7 @@ export function mergeConfigUpdate(base: AppConfig, body: Record<string, unknown>
     pushKinds: updated("pushKinds", sanitizePushKinds, base.pushKinds),
     worklogEnabled: updated("worklogEnabled", sanitizeWorklogEnabled, base.worklogEnabled),
     worklogIntervalHours: updated("worklogIntervalHours", sanitizeWorklogIntervalHours, base.worklogIntervalHours),
+    sessionIdleReapDays: updated("sessionIdleReapDays", sanitizeReapIdleDays, base.sessionIdleReapDays),
     providers: updated("providers", sanitizeProviders, base.providers),
     terminalSubmit: updated("terminalSubmit", sanitizeTerminalSubmit, base.terminalSubmit),
     keymap: updated("keymap", sanitizeKeymap, base.keymap),
@@ -557,6 +668,7 @@ export function mergeConfigUpdate(base: AppConfig, body: Record<string, unknown>
     fontFamily: updated("fontFamily", normalizeFontFamily, base.fontFamily),
     prWorkdirFooter: updated("prWorkdirFooter", sanitizePrWorkdirFooter, base.prWorkdirFooter),
     appendSystemPrompt: updated("appendSystemPrompt", sanitizeAppendSystemPrompt, base.appendSystemPrompt),
+    autoDirIcon: updated("autoDirIcon", sanitizeAutoDirIcon, base.autoDirIcon),
     cockpitLines: updated("cockpitLines", sanitizeCockpitLines, base.cockpitLines),
   };
 }
@@ -575,8 +687,11 @@ export function toPublicAppConfig(config: AppConfig): AppConfig {
     gitlabHosts: config.gitlabHosts,
     repoDirs: config.repoDirs,
     launchers: config.launchers,
+    customAgents: config.customAgents,
     quickCommands: config.quickCommands,
     userMcpServers: config.userMcpServers,
+    headerStatusColors: config.headerStatusColors,
+    headerStatusTint: config.headerStatusTint,
     themes: config.themes,
     buttons: config.buttons,
     chips: config.chips,
@@ -584,6 +699,7 @@ export function toPublicAppConfig(config: AppConfig): AppConfig {
     pushKinds: config.pushKinds,
     worklogEnabled: config.worklogEnabled,
     worklogIntervalHours: config.worklogIntervalHours,
+    sessionIdleReapDays: config.sessionIdleReapDays,
     terminalSubmit: config.terminalSubmit,
     keymap: config.keymap,
     copyOnSelect: config.copyOnSelect,
@@ -591,6 +707,7 @@ export function toPublicAppConfig(config: AppConfig): AppConfig {
     issueWorkComments: config.issueWorkComments,
     prWorkdirFooter: config.prWorkdirFooter,
     appendSystemPrompt: config.appendSystemPrompt,
+    autoDirIcon: config.autoDirIcon,
     cockpitLines: config.cockpitLines,
     fontFamily: config.fontFamily,
   };

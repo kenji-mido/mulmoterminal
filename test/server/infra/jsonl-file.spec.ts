@@ -4,7 +4,14 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { appendFileSync, statSync } from "node:fs";
-import { forEachJsonlLine, forEachJsonlRecord, forEachJsonlRecordIn, readTailLines, readTailRecords } from "../../../server/infra/jsonl-file.js";
+import {
+  forEachJsonlLine,
+  forEachJsonlRecord,
+  forEachJsonlRecordIn,
+  readFirstJsonlRecord,
+  readTailLines,
+  readTailRecords,
+} from "../../../server/infra/jsonl-file.js";
 
 // These two exist because `fs.readFile(file, "utf8")` throws past ~512 MB whatever the file holds,
 // which silently emptied the longest sessions (#998). What matters in a spec is therefore the
@@ -242,5 +249,38 @@ describe("forEachJsonlRecordIn", () => {
 
   it("rejects for a file that isn't there, like the streaming reader", async () => {
     await expect(foldAll(path.join(dir, "gone.jsonl"))).rejects.toThrow();
+  });
+});
+
+// The header line is what several of these files open with, and reaching it used to take the whole
+// file — codex's spawn watcher then repeated that once a second across every recent rollout (#1553).
+describe("readFirstJsonlRecord", () => {
+  const lines = (name: string, rows: string[]) => write(name, rows.join("\n"));
+
+  it("returns the first record", async () => {
+    const file = lines("meta.jsonl", ['{"type":"session_meta","n":1}', '{"type":"message","n":2}']);
+    expect(await readFirstJsonlRecord(file)).toEqual({ type: "session_meta", n: 1 });
+  });
+
+  it("skips leading blank lines", async () => {
+    expect(await readFirstJsonlRecord(lines("blank.jsonl", ["", "   ", '{"n":1}']))).toEqual({ n: 1 });
+  });
+
+  it("is null for an empty file, and for a first line that is not a JSON object", async () => {
+    expect(await readFirstJsonlRecord(lines("empty.jsonl", []))).toBeNull();
+    expect(await readFirstJsonlRecord(lines("junk.jsonl", ["not json"]))).toBeNull();
+    expect(await readFirstJsonlRecord(lines("array.jsonl", ["[1,2,3]"]))).toBeNull();
+  });
+
+  it("is null for a missing file rather than throwing", async () => {
+    await expect(readFirstJsonlRecord(path.join(dir, "nope.jsonl"))).rejects.toThrow();
+  });
+
+  // The point of the change: what follows the first line is never read, so a file whose remainder
+  // dwarfs anything a reader would hold still answers from one chunk.
+  it("does not read past the first line, however large the rest is", async () => {
+    const huge = JSON.stringify({ pad: "x".repeat(8 * 1024 * 1024) });
+    const file = lines("huge.jsonl", ['{"type":"session_meta"}', huge]);
+    expect(await readFirstJsonlRecord(file)).toEqual({ type: "session_meta" });
   });
 });

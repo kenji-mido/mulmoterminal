@@ -16,7 +16,29 @@ running grid. Already set up? `npx mulmoterminal@latest` is the whole thing.
 [Getting started — from zero to running](getting-started.html){: .btn .btn-purple .fs-5 .mb-4 .mb-md-0 .mr-2 }
 [Basics — how to read the screen](basics.html){: .btn .fs-5 .mb-4 .mb-md-0 }
 
-> **[What's new in 4.4.0](v4.4.0.html)** — **every cell keeps its own right pane**, the Files pane can **open a document or a story in the Canvas without an agent**, your **claude.ai connectors work in the workspace** again, and the session list stops re-reading whole transcripts (8.7 s to 1 ms on a 2.1 GB project). The cell header's **path became a menu** and six permanent icons moved into it (as of 2026-08-04)
+> **[What's new in 4.8.2](v4.8.2.html)** — **GitHub beside the cell, and a header you can read while it runs**. The GitHub view no longer takes over the screen: an enlarged cell opens open PRs and issues **in its own right pane**, with **that cell's repository at the top** (the full-screen view, `/prs` and `"view": "prs"` all still work). And a project's `headerColor` stopped becoming unreadable the moment its cell started working — the theme's status tint no longer keeps your ink, and you can **name the colours for working / done / blocked yourself** with `headerStatusColors`, or keep your own colour throughout with `"headerStatusTint": "none"`. Also fixed: a **"finished" push carrying the previous turn's reply** when the turn itself produced none, a replayed terminal starting with `�`, and a new document silently overwriting an existing one (as of 2026-08-13)
+>
+> **[What's new in 4.8.1](v4.8.1.html)** — **a server that stops running out of terminals**. After a few days of uptime every new session failed with `forkpty: Device not configured`, because each spawn leaked two file descriptors on macOS — one of them a whole pseudo-terminal — until the machine hit its limit of 511. **Nothing to configure; restart onto this version.** Also: a project folder's collection now **refreshes on schedule** instead of writing into the workspace's same-named collection, and a **card stays with the project it was made in** rather than showing another project's rows after the app moves (as of 2026-08-10)
+>
+> **[What's new in 4.8.0](v4.8.0.html)** — **collections in the cell, and tasks that catch up**. A **Collections pane** sits in each cell's right pane beside Canvas / Tools / Files and lists the collections of **that cell's directory** — no project picker, because a cell already names a folder. **Keep your collections in the workspace for now**: the per-folder feature is not finished (no scheduled refresh there, no phone access, and cards from two projects cannot share a panel), and the release page says exactly what is missing. Separately, a scheduled task no longer loses a run because the server was off at its UTC window: every run is recorded and **the missed one is made up at startup** — which is why a dev worklog you enabled may never have produced a page (as of 2026-08-10)
+>
+> **[What's new in 4.7.5](v4.7.5.html)** — **Settings you can find, in a language you read**: the modal is a **sidebar of nine grouped sections** instead of one 24-heading scroll, and from the keyboard the whole sidebar is one Tab stop with arrows moving inside it. The whole modal is now available in **English and 日本語** — it follows your browser's language, and **Language** is the first entry in the sidebar so it is findable by someone who cannot read the rest of the screen. And a **skill button asks before it starts an agent session**, naming the agent and saying how to stop it; Cancel leaves Settings exactly where it was (as of 2026-08-09)
+>
+> **[What's new in 4.7.4](v4.7.4.html)** — **your project's icon now reaches your phone**: the picture that tells cells apart in the grid — `icon` in a project's `.mulmoterminal.json`, or the favicon its repository already ships — now appears in the phone app's **terminal list** and **terminal screen**, taking the place of the terminal glyph. That glyph's green/grey said whether a session is live, so the colour moved to a dot on the icon's corner. A **`claude` or `codex` launch from the phone finally starts** instead of stopping at the empty cell-creation form waiting for someone at the desktop. And **codex session discovery** stopped re-reading 149 files and 37 MB every second to look at a few hundred bytes (as of 2026-08-08)
+>
+> **[What's new in 4.7.3](v4.7.3.html)** — **`+ New worktree` made one worktree per click**: it looked identical to the moment before you pressed it for the six seconds `git worktree add` takes on a big repository, so it got pressed again — and each press succeeded. Every control in that section now holds itself and shows a spinner, and **a refused create finally says why** instead of nothing at all. A cell whose **worktree is being removed** greys out behind a spinner and cannot be clicked or tabbed into. And **pressing Enter takes a scrolled-up terminal back to the latest output**, the way an ordinary terminal does — on by default, with a checkbox in Settings (as of 2026-08-08)
+>
+> **[What's new in 4.7.2](v4.7.2.html)** — **a terminal that came back on the WRONG backend process is fixed**: a conversation still running in tmux read as free, so resuming it started a second backend on it. Fixed across three layers, together with codex activity that never restarted after a server restart. **Worktrees no longer pile up as working-directory chips** (already-saved ones stay — remove them with the chip's ×), the **cockpit roster** wears the Agent Picker's marks and one border geometry, **collection chats can choose their agent** again, and the folder button opens **one** file dialog however many times you click (as of 2026-08-08)
+>
+> **[What's new in 4.7.0](v4.7.0.html)** — **Muse** joins the Agent Picker as a fifth agent, running **Muse Spark** — and its cells now reach the **GUI tools**, through a per-machine plugin no other agent uses (set `MUSE_EXPERIMENTAL_PLUGINS=1`). A new **[Which coding agent](agents.html)** page covers all five: what each needs installed, how each resumes, and the three different routes to the GUI tools. On **Windows**, every Claude session on a `.cmd` install can start again — the closing-summary workaround is no longer needed (as of 2026-08-07)
+>
+> **[What's new in 4.6.1](v4.6.1.html)** — a round table's conversation is now kept in a **room**: an append-only log you can open from **Rooms** in the toolbar, post into yourself, and reach from a shell with `mulmoterminal room`. A speaker reads **the whole conversation so far**, not just the last reply. Sessions that **survived a restart** are listed in Settings with a Stop button, and idle ones are ended at the next start. And a cell no longer **slows down the command it is showing** — six cells running the same heavy command went from 8.2 s to 2.2 s (as of 2026-08-06)
+>
+> **[What's new in 4.6.0](v4.6.0.html)** — **Round table** runs a conversation around a ring of up to five cells for a turn budget you set: tick the seats in a cell's forum menu and press start. The launcher's **resume list is the agent you picked**, so a codex, agy or grok conversation is finally reachable. A session left **running with nobody attached** says so and can be stopped there. And **every agent's cell** shows its model and how full its context is. Nothing to configure — but read what a table costs before you start one (as of 2026-08-06)
+>
+> **[What's new in 4.5.1](v4.5.1.html)** — a backend registered under an id other than `openrouter` **stops appearing as a row you cannot click**: the MODEL list offers only what it can actually run, and the link beside it reads **Needs attention** with the sentence naming what is missing. **Choose a folder…** now works on a Linux desktop and under **WSL2 without zenity**, and says so when the host has no dialog at all. One line to add, and only if you registered such a backend (as of 2026-08-05)
+>
+> **[What's new in 4.5.0](v4.5.0.html)** — a repository can now **carry its own icon and colour**, in [`repo.json`](../../repo-json.html): an open metadata file any tool can read, so a project states its identity once. One colour becomes the whole cell, and a repo that already ships a **favicon** needs no configuration at all. Each git worktree can also be handed **its own dev-server port and database name**, and **Grok** joins the Agent Picker (as of 2026-08-05)
 >
 > **[What's new in 4.3.1](v4.3.1.html)** — the launcher's workspace chip is labelled **`WORKSPACE`** by its role rather than by its folder name, and the **git chip refreshes when you come back to the tab** instead of up to ten seconds later. Nothing to configure (as of 2026-08-04)
 >
@@ -71,7 +93,7 @@ and answer with one tap (**yes / no / continue**). → [Mobile notifications](no
 ### Worktree isolation & one-click PRs
 
 **Git worktrees** let several agents work the same repo without colliding — diff panel, commit,
-push, and **Open PR**, all from the cell. → [Scenarios](scenarios.html)
+push, and **Open PR**, all from the cell. → [Isolating work in a git worktree](worktree.html)
 
 ### The GUI panel — a screen beside the terminal
 
@@ -185,13 +207,14 @@ installing Node.js / Claude Code / git / gh on macOS and Windows, the
 3. [FAQ](faq.html) (existing sessions, Windows, token cost, how it compares)
 4. [Scenarios — workflows by example](scenarios.html)
 5. [Feature reference](features.html) (grouped by the four pillars)
-6. [Configuration](config.html) (settings modal · `config.json` · `.mulmoterminal.json` · the **DSL**)
-7. [Mobile notifications (Web Push)](notifications.html) (iPhone / Android setup)
-8. [From your phone](phone.html) (watch, reply with your own chips, start a terminal)
-9. [GitHub — cross-repo PRs & Issues](github.html) (open PRs and issues from your registered repos on one screen)
-10. [Using another model via OpenRouter](providers.html) (run Kimi / DeepSeek / Gemini, with measured data)
-11. [Local models with claude-ollama](claude-ollama.html) (fully local, offline, via Ollama)
-12. [Always on](always-on.html) (run the server as a service, across logout and reboot)
-13. [Glossary](glossary.html)
+6. [Making the cells talk to each other](conversation.html) (one-turn handoffs, round tables, the room)
+7. [Configuration](config.html) (settings modal · `config.json` · `.mulmoterminal.json` · the **DSL**)
+8. [Mobile notifications (Web Push)](notifications.html) (iPhone / Android setup)
+9. [From your phone](phone.html) (watch, reply with your own chips, start a terminal)
+10. [GitHub — cross-repo PRs & Issues](github.html) (open PRs and issues from your registered repos — beside a cell, led by its repository, or on one screen)
+11. [Using another model via OpenRouter](providers.html) (run Kimi / DeepSeek / Gemini, with measured data)
+12. [Local models with claude-ollama](claude-ollama.html) (fully local, offline, via Ollama)
+13. [Always on](always-on.html) (run the server as a service, across logout and reboot)
+14. [Glossary](glossary.html)
 
 > The Japanese guide is here: [日本語ガイド](../ja/).

@@ -34,6 +34,32 @@ export async function forEachJsonlLine(file: string, onLine: (line: string) => v
   }
 }
 
+/** The FIRST record, without reading past it.
+ *
+ *  A header line is what several of these files open with — codex writes its `session_meta` there —
+ *  and the whole file was being materialised to reach it. That is not a hypothetical cost: codex's
+ *  spawn watcher polls every recent rollout once a SECOND for up to thirty minutes, so on this
+ *  machine it re-read ~37 MB per pass to look at a few hundred bytes each time (#1553).
+ *
+ *  The stream is torn down as soon as the line arrives, so the read is one chunk whatever the file
+ *  weighs. Null for an empty file, or a first line that is not a JSON object — the same lines
+ *  `forEachJsonlRecord` skips.
+ */
+export async function readFirstJsonlRecord(file: string): Promise<Record<string, unknown> | null> {
+  const input = createReadStream(file, "utf8");
+  const lines = readline.createInterface({ input, crlfDelay: Infinity });
+  try {
+    for await (const line of lines) {
+      if (!line.trim()) continue;
+      return jsonlRecord(line);
+    }
+    return null;
+  } finally {
+    lines.close();
+    input.destroy();
+  }
+}
+
 /** Every record in a JSONL file, one at a time — the whole-file counterpart to readTailRecords.
  *  Nothing is kept: `onRecord` decides what survives, which is how a summary distils hundreds of
  *  megabytes into a handful of fields. Malformed and non-object lines are skipped. */

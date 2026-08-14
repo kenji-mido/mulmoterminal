@@ -6,6 +6,8 @@ import type { PtyEntry } from "../../../server/session/types.js";
 const OPEN = 1;
 const CLOSED = 3;
 const SESSION = "11111111-2222-3333-4444-555555555555";
+// Bigger than anything these specs replay, so the bound never truncates what they assert.
+const OUTPUT_BUFFER_LIMIT = 64 * 1024;
 
 // Records what the PTY and the socket were asked to do, so a frame's effect can be
 // asserted without a real terminal or connection.
@@ -50,6 +52,7 @@ function fakeSocket(readyState = OPEN) {
 function setup(terminalModes: readonly number[] = []) {
   const calls: string[] = [];
   const handlers = createConnectionHandlers({
+    outputBufferLimit: OUTPUT_BUFFER_LIMIT,
     cancelReap: (id) => calls.push(`cancelReap:${id}`),
     reap: (id) => calls.push(`reap:${id}`),
     setWaiting: (id, waiting) => calls.push(`setWaiting:${id}:${waiting}`),
@@ -320,6 +323,28 @@ describe("reattachPty", () => {
     const entry = entryWith({ ws: null, buffer: "previous output" });
     reattachPty(entry, s.ws as never, SESSION);
     expect(s.parsed()).toEqual([{ type: "output", data: "previous output" }]);
+  });
+
+  it("cuts a buffer that ran past the limit back to it before replaying", () => {
+    const { reattachPty } = setup();
+    const s = fakeSocket();
+    // The append leaves the buffer up to TAIL_SLACK over the limit (PtyEntry.buffer); the
+    // replay is where that overrun is paid off, so the browser sees what it always did.
+    reattachPty(entryWith({ ws: null, buffer: "x".repeat(OUTPUT_BUFFER_LIMIT + 5000) }), s.ws as never, SESSION);
+    expect(s.parsed()[0].data).toHaveLength(OUTPUT_BUFFER_LIMIT);
+  });
+
+  it("drops the queued output batch — the replay it just sent already contains it", () => {
+    const { reattachPty } = setup();
+    const s = fakeSocket();
+    const discarded: string[] = [];
+    const entry = entryWith({
+      ws: null,
+      buffer: "previous output",
+      output: { push: () => undefined, flush: () => discarded.push("flush"), discard: () => discarded.push("discard") },
+    });
+    reattachPty(entry, s.ws as never, SESSION);
+    expect(discarded).toEqual(["discard"]);
   });
 
   it("strips terminal queries from the replay so xterm does not answer them as input", () => {

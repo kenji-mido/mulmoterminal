@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useI18n } from "vue-i18n";
 import { computed, ref } from "vue";
 import { useSavedListMirror } from "../../composables/useSavedListMirror";
 import SettingsButton from "../SettingsButton.vue";
@@ -6,10 +7,12 @@ import SettingsField from "../SettingsField.vue";
 import { canAddMcpServer } from "../settingsValidators";
 import type { UserMcpServer } from "../userMcp";
 import SettingsListRow from "./SettingsListRow.vue";
-import { SECTION_HEADING, SETTINGS_LIST } from "./sectionClasses";
+import { SETTINGS_LIST } from "./sectionClasses";
 
 const props = defineProps<{ userMcpServers?: UserMcpServer[] | undefined }>();
 const emit = defineEmits<{ (e: "update-user-mcp", servers: UserMcpServer[]): void }>();
+
+const { t } = useI18n();
 
 // User HTTP MCP servers (id + url) merged into the single-view Claude session.
 const { items: mcpServers, replace } = useSavedListMirror<UserMcpServer>(
@@ -32,12 +35,15 @@ function removeMcpServer(id: string) {
 </script>
 
 <template>
-  <h3 :class="SECTION_HEADING">MCP servers</h3>
-  <p class="mb-3 mt-1.5 text-[12px] text-dim">
-    HTTP MCP servers the <strong>single-view</strong> Claude session loads (in addition to the built-in GUI tools). <code>id</code> is the server name;
-    <code>url</code> is its streamable-HTTP endpoint. In the Docker sandbox, a <code>localhost</code> URL is reached over <code>host.docker.internal</code>
-    automatically. Takes effect on the next Claude session.
-  </p>
+  <i18n-t keypath="settings.mcp.intro" tag="p" class="mb-3 mt-1.5 text-[12px] text-dim">
+    <template #singleView>
+      <strong>{{ t("settings.mcp.singleView") }}</strong>
+    </template>
+    <template #idKey><code>id</code></template>
+    <template #urlKey><code>url</code></template>
+    <template #localhost><code>localhost</code></template>
+    <template #dockerHost><code>host.docker.internal</code></template>
+  </i18n-t>
   <ul v-if="mcpServers.length" :class="SETTINGS_LIST">
     <SettingsListRow v-for="s in mcpServers" :key="s.id" :name="s.id" @remove="removeMcpServer(s.id)">
       <span class="flex-auto font-mono text-[12px] text-secondary">{{ s.id }}</span>
@@ -48,19 +54,19 @@ function removeMcpServer(id: string) {
     <SettingsField
       v-model="newMcpId"
       class="min-w-0 shrink grow basis-[30%]"
-      placeholder="id (e.g. weather)"
-      aria-label="MCP server id"
+      :placeholder="t('settings.mcp.idPlaceholder')"
+      :aria-label="t('settings.mcp.idField')"
       spellcheck="false"
       @keydown.enter="addMcpServer"
     />
     <SettingsField
       v-model="newMcpUrl"
       class="min-w-0 flex-auto font-mono"
-      placeholder="https://… or http://localhost:PORT/mcp"
-      aria-label="MCP server URL"
+      :placeholder="t('settings.mcp.urlPlaceholder')"
+      :aria-label="t('settings.mcp.urlField')"
       spellcheck="false"
       @keydown.enter="addMcpServer"
     />
-    <SettingsButton :disabled="!newMcpValid" @click="addMcpServer">Add</SettingsButton>
+    <SettingsButton :disabled="!newMcpValid" @click="addMcpServer">{{ t("settings.common.add") }}</SettingsButton>
   </div>
 </template>

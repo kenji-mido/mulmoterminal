@@ -19,6 +19,7 @@ const ctx = (o: Partial<HeaderContext> = {}): HeaderContext => ({
   task: null,
   isGitRepo: true,
   prUrl: null,
+  worktreeEnv: [],
   ...o,
 });
 

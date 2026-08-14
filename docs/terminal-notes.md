@@ -117,6 +117,14 @@ change one and change the other (#834).
   - **Wheel** (#737) — xterm's fallback turns it into ↑/↓ arrows, which a TUI binds to input
     history, so scrolling spun the prompt. That fallback is still what an app which never asked
     for tracking gets (and the spec pins it) — the report only replaces it for one that did.
+    **The notches are counted, not just sent** (`WheelScrollControl.restoreToBottom`, #1546): the
+    app owns its scroll position and never reports it, so the running total of notches this side
+    reported is the only measure of how far above the bottom the app is. On submit that debt is
+    paid back as wheel-DOWN reports, which is what makes Enter return to the latest output for a
+    full-screen agent — `term.scrollToBottom()` cannot, there being no xterm scrollback in the
+    alternate buffer. A shell needs none of this: with no tracking the wheel reaches tmux, and
+    copy-mode's own Enter cancels back to the bottom.
+
     **Deltas are accumulated into whole notches** (`wheelNotches`), not reported one per event:
     a macOS trackpad emits a burst of a few pixels per event, and one detent each scrolled a TUI
     an order of magnitude faster than the same swipe scrolls the normal buffer (#978). The

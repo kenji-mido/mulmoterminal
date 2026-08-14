@@ -19,6 +19,7 @@
 // prompt is auto-sent as claude's first turn (startChat / actions).
 
 import { ref, watch } from "vue";
+import { activeCollectionProjectId } from "./collectionSurface";
 import { asTerminalAgent, type TerminalAgent } from "../../common/sessionAgent";
 import { placeSpawnedChat } from "./useSpawnedChat";
 import { seedCollectionCanvas } from "./seedCollectionCanvas";
@@ -27,8 +28,9 @@ import { fetchWithTimeout, SLOW_COMMAND_TIMEOUT_MS } from "../utils/fetchWithTim
 
 export type Agent = TerminalAgent;
 
-// Which agent a collection action / chat spawns. Bound to the Claude/Codex/Antigravity toggle in the collection
-// browser (CollectionsBrowseOverlay); persisted in localStorage so the choice survives reloads.
+// Which agent a collection action / chat spawns. Bound to the "Launch with" dropdown in the
+// collection browser (CollectionsBrowseOverlay); persisted in localStorage so the choice
+// survives reloads.
 const LAUNCH_AGENT_KEY = "mt-launch-agent";
 const saved = localStorage.getItem(LAUNCH_AGENT_KEY);
 export const launchAgent = ref<Agent>(asTerminalAgent(saved));
@@ -47,7 +49,10 @@ export interface SpawnedChat {
  *  `draft`, the prompt is prefilled in the input box but NOT submitted. Returns what was spawned
  *  (null if nothing was) — `hidden` callers need it to put the session somewhere of their own,
  *  since suppressing the opener otherwise leaves them no handle on what they started. */
-export async function startCollectionChat(prompt: string, opts: { hidden?: boolean; draft?: boolean } = {}): Promise<SpawnedChat | null> {
+export async function startCollectionChat(
+  prompt: string,
+  opts: { hidden?: boolean; draft?: boolean; project?: string | null } = {},
+): Promise<SpawnedChat | null> {
   const message = prompt.trim();
   if (!message) return null;
   const agent = launchAgent.value;
@@ -60,7 +65,13 @@ export async function startCollectionChat(prompt: string, opts: { hidden?: boole
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ message, draft, agent }),
+        // The chat runs where the collection it was started from lives. Without this a starter
+        // or action pressed in a project's Collections pane seeds a prompt full of that project's
+        // paths and then opens a terminal standing in the workspace.
+        // The CALLER's project when it has one — a chat started from a card belongs to the
+        // project that card was made in, not to whatever surface is on screen when the button is
+        // pressed. Only the ambient answer is a default, for every caller that is the surface.
+        body: JSON.stringify({ message, draft, agent, project: opts.project === undefined ? activeCollectionProjectId() : opts.project }),
       },
       SLOW_COMMAND_TIMEOUT_MS,
     );

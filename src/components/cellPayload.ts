@@ -1,5 +1,6 @@
 // The two payload shapes a cell believes without asking anyone: the token usage and the
 import { isRecord } from "../../common/isRecord";
+import type { SessionContextInfo } from "../../common/sessionContext";
 // running model/context that back its header badges.
 //
 // They arrive from /api/session/:id and the cost route, and the guards only asked whether a
@@ -17,10 +18,9 @@ export interface CellUsage {
   cacheCreationTokens: number;
 }
 
-export interface CellContext {
-  model: string | null;
-  contextTokens: number;
-}
+// The wire shape itself (common/sessionContext.ts) — the server answers it and this file only
+// says whether what arrived is renderable.
+export type CellContext = SessionContextInfo;
 
 // Rendered as a number, so it has to be one: NaN and Infinity read as a broken badge just as
 // a string would.
@@ -47,5 +47,9 @@ export function isCellContext(value: unknown): value is CellContext {
   // `model` is legitimately null before the first assistant turn — that hides the badge,
   // which is different from the field being the wrong type.
   const modelOk = context.model === null || typeof context.model === "string";
-  return modelOk && isRenderableCount(context.contextTokens);
+  // Optional on the wire: only the agents that state a window send it (codex). Absent and null
+  // both mean "nobody told us" and are fine; a NaN or a string is the broken shape this guard is
+  // for — it would divide into a percentage.
+  const windowOk = context.contextWindow === undefined || context.contextWindow === null || isRenderableCount(context.contextWindow);
+  return modelOk && windowOk && isRenderableCount(context.contextTokens);
 }

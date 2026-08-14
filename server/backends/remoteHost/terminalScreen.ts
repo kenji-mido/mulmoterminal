@@ -19,7 +19,7 @@ import type { AgentKind } from "../../agents/types.js";
 // panes called `agy-next`, and matching only the default would report their agent as a shell.
 // The basename, because that is what a pane command is; the default stays in the map either way,
 // so overriding the variable never un-recognises sessions started before it was set.
-const AGENT_DEFAULT_COMMAND: Record<AgentKind, string> = { claude: "claude", codex: "codex", antigravity: "agy" };
+const AGENT_DEFAULT_COMMAND: Record<AgentKind, string> = { claude: "claude", codex: "codex", antigravity: "agy", grok: "grok", muse: "muse" };
 
 const agentCommands = (): Record<string, SessionAgent> => {
   const map: Record<string, SessionAgent> = {};
@@ -63,6 +63,11 @@ export interface TerminalSessionSummary {
   // What is running in it, or null when unknown (see SessionAgent). A tmux-only
   // session is always null: the process that knew is gone.
   agent: SessionAgent | null;
+  // Which entry of the reply's `icons` table draws this row's project image (#1556). Absent when
+  // the directory configures none, when its file could not be read, and when the reply's icon
+  // budget was already spent — all three of which the phone answers the same way, with the plain
+  // terminal glyph it drew before.
+  iconId?: string;
 }
 
 export interface SessionDetail {
@@ -182,6 +187,9 @@ export interface SessionScreenMeta {
   // github.com — which is why the phone only ever has to decide "link or no link".
   // Not a /tree/<branch>: see the note where this is filled in (server/index.ts).
   githubUrl?: string;
+  // The directory's own image, ready for an `<img src>` (#1556). The src itself rather than an
+  // id into a table: one screen carries one icon, so there is nothing to deduplicate against.
+  icon?: string;
 }
 
 export interface SessionScreen extends SessionScreenMeta {
@@ -219,6 +227,8 @@ export interface ScreenMetaSources {
   // cannot name has no branch and no GitHub page either.
   branchOf: (cwd: string) => Promise<string | null>;
   githubUrlOf: (cwd: string) => Promise<string | null>;
+  // The directory's icon as a src the phone can render, "" when it has none.
+  iconOf: (cwd: string) => string;
   memoOf: (id: string) => string;
   summaryOf: (id: string) => string;
   promptOf: (id: string) => string;
@@ -235,6 +245,7 @@ export async function buildScreenMeta(id: string, sources: ScreenMetaSources): P
   return definedScreenMeta({
     cwd,
     branch: branch ?? "",
+    icon: cwd ? sources.iconOf(cwd) : "",
     memo: sources.memoOf(id),
     summary: sources.summaryOf(id),
     prompt: sources.promptOf(id),

@@ -24,17 +24,27 @@ describe("describeDirConfig", () => {
       applied: ["name"],
       ignored: ["headerColor"], // known key, but the loader kept nothing
       unknown: ["badgeColour"], // British spelling — the app never reads it
+      // Filled in by dirConfigDetail, which knows which of the two files each key came from;
+      // this function is only handed the merged object (#1430).
+      local: [],
+      repo: [],
     });
   });
 
   it("reports nothing for a file that sets nothing", () => {
-    expect(describeDirConfig({}, new Set())).toEqual({ applied: [], ignored: [], unknown: [] });
+    expect(describeDirConfig({}, new Set())).toEqual({ applied: [], ignored: [], unknown: [], local: [], repo: [] });
   });
 
   // A key the loader resolved but the FILE didn't set must not be reported as applied — the
   // preview is about this file, not about everything the app ended up with.
   it("only reports keys the file actually set", () => {
-    expect(describeDirConfig({ name: "proj" }, new Set(["name", "theme", "fontSize"]))).toEqual({ applied: ["name"], ignored: [], unknown: [] });
+    expect(describeDirConfig({ name: "proj" }, new Set(["name", "theme", "fontSize"]))).toEqual({
+      applied: ["name"],
+      ignored: [],
+      unknown: [],
+      local: [],
+      repo: [],
+    });
   });
 
   it("counts every documented key as known", () => {

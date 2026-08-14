@@ -3,7 +3,7 @@ title: Configuration — colours, sounds, launchers, per-project settings
 nav_title: Configuration
 layout: default
 parent: English
-nav_order: 6
+nav_order: 9
 description: Configuring MulmoTerminal — the settings modal, per-project colours and names, Enter behaviour, notification sounds, fonts, keyboard shortcuts and environment variables, findable by symptom.
 ---
 
@@ -20,9 +20,12 @@ description: Configuring MulmoTerminal — the settings modal, per-project colou
 | Move the enlargement **from the keyboard** | [Keyboard shortcuts](#keymap) |
 | Roster rows are **too long or too short** | [Roster rows](#cockpit-lines) |
 | Let a session **see another folder** | [Several folders](#add-dirs) |
+| Two `yarn dev` **fighting over port 3000** | [A port per worktree](#worktree-env) |
 | A **worktree** looks like a different project | [Worktrees inherit this file](#worktree-inherit) |
 | **No Canvas** when you enlarge a cell / no GUI tools | [Which directory to launch in](basics.html#launch-dir) |
+| **Antigravity or Grok** has no GUI tools, even in the workspace | [Antigravity and Grok register everywhere](basics.html#antigravity-gui-tools) |
 | Run on **a model other than Claude** | [Providers](#providers) |
+| Start Claude Code through **your own command** (`ollama launch claude …`) | [Custom agents](#custom-agents) |
 | Add **your own button** to the header | [Customizing the header](#header) |
 | Recolour the whole app **your way** | [Make your own colour scheme](#custom-themes) |
 | Tell an issue **you have started on it** | [issueWorkComments](#issue-work-comments) |
@@ -53,7 +56,7 @@ Settings live in three places: the **settings modal (Settings)**, the **global c
 > | **`/mulmoterminal-theme`** | Your own [colour scheme](#custom-themes), appearing in Settings' picker. (Settings → **Create a theme…**) |
 > | **`/mulmoterminal-header`** | [Header buttons and chips](#header), global or per project |
 > | **`/mulmoterminal-keys`** | [`keymap`](#keymap), [`copyOnSelect`](#copy-on-select), [`terminalSubmit`](#terminal-submit) — the fix for "Shift+Enter submits instead of adding a line". (Settings → **Set up shortcuts…**) |
-> | **`/mulmoterminal-model`** | [`providers`](#providers) and a per-project model |
+> | **`/mulmoterminal-model`** | [`providers`](#providers), a per-project model, and [`customAgents`](#custom-agents) |
 > | **`/mulmoterminal-notify`** | [Which moments beep or push](#sounds), and what each plays. (Settings → **Configure notifications…**) |
 >
 > This is how you reach the settings that have **no UI at all**. Hand-editing works too — this page
@@ -70,29 +73,67 @@ Settings live in three places: the **settings modal (Settings)**, the **global c
 
 Open it from **Settings** (the gear) in the toolbar.
 
-![The Settings modal — Theme with its Create a theme… button, Terminal font size, Terminal scroll speed, Waiting rows with the blink checkbox, Directory appearance, and Directory settings with acme-web expanded](../images/config-settings-modal.png)
+Under the title, a **Version** row says **which build you are running** — `4.7.0` on an npm
+install, and on a git checkout a second `commit a1b2c3d` chip beside it, since there the version
+is only whatever was last released and the commit is what identifies the build. When something
+newer exists, the update notice from the header badge follows on the next line, command included.
+That row is what to quote in a bug report.
 
-Up to seventeen sections, in this order — **Voice input** is there only on a machine that can transcribe, so most
-setups see sixteen.
+![The Settings modal — the sidebar scrolled to show Appearance down to Sessions, with Theme open and its Create a theme… button](../images/config-settings-modal.png)
+
+The **sidebar** groups the sections and shows one at a time; below `sm` (a phone) it becomes a picker
+above the section. Twenty-five sections in nine groups — **Voice input** is there only on a machine
+that can transcribe, so most setups see twenty-four.
+
+A button that hands a section over to a skill — "Create a theme…", "Configure notifications…" —
+**asks first**. It starts an agent session in a new grid cell, so the dialog says what will happen
+and how to stop it (close that cell); **Cancel** leaves you where you were, with Settings still open.
+
+![The confirmation a skill button raises — what starts, how to stop it, Cancel / Start](../images/skill-launch-confirm-en.png)
+
+Settings is available in **English and Japanese**. It follows your browser's language unless you pick
+one in **Language** — the first entry in the sidebar, because it is the one setting someone who
+cannot read the rest of the screen has to find first. Only this modal is translated so far; the rest
+of the app is still English.
+
+- **Appearance** — Language, Theme, Terminal font, Terminal font size, Terminal scroll speed, Waiting rows
+- **Projects** — Directory appearance, Directory settings
+- **Header & launch** — Launch commands, Header buttons and chips
+- **Input** — Terminal keys, Keyboard shortcuts, Voice input
+- **Models & servers** — Models and backends, MCP servers
+- **Notifications** — Notification sounds, Web Push notifications, Phone quick commands
+- **Integrations** — GitHub and GitLab, Pull request repos, Google account
+- **Sessions** — Sessions and background tasks, Sessions that survived a restart, Cost (estimated)
+- **Help** — Help & user guide
+
+![The Settings modal in Japanese — the sidebar's groups and the Notification sounds pane](../images/settings-japanese.png)
 
 | Item | Description |
 |---|---|
+| **Language** | What language Settings itself is written in — your browser's (the default), English, or 日本語. Per browser, like the theme, and stored in `localStorage` rather than in any config file |
 | **Theme** | Midnight / Nord / Daylight / Solarized Light, plus [any you defined yourself](#custom-themes). Picks from what exists; "Create a theme…" starts the `mulmoterminal-theme` skill to write a new one |
+| **Terminal font** | The font-family stack every terminal renders in (`fontFamily`) — **global**, unlike the size, because which fonts exist is a property of the machine. Empty means the built-in stack (→ [Terminal font](#font-family)) |
 | **Terminal font size** | The xterm font size in px (8–32). Applies to every terminal **in this browser** — a phone and a desktop each keep their own. A directory can override it with `fontSize` ([below](#per-dir)) |
 | **Terminal scroll speed** | How far one wheel notch or trackpad swipe moves the terminal (1× is xterm's own). Per browser, like the font size, because it is a property of the pointing device |
-| **Waiting rows** | In the roster beside an enlarged cell, a row whose agent is **waiting on you** carries an amber ring and blinks; one that has merely **finished** is green and still. The checkbox turns off the movement, not the colour — and no row blinks when your system asks for reduced motion |
+| **Waiting rows** | In the roster beside an enlarged cell, a row whose agent is **waiting on you** carries an amber ring and blinks; one that has merely **finished** is green and still. The checkbox turns off the movement, not the colour — and no row blinks when your system asks for reduced motion. The three steppers below it set how many lines each row shows before clamping (`cockpitLines` → [Roster rows](#cockpit-lines)) |
 | **Directory appearance** | "Configure appearance…" — set a directory's name badge, colors, terminal palette, and grid position interactively, through the `mulmoterminal-dirs` skill |
 | **Directory settings** | What each directory's `.mulmoterminal.json` is **actually doing**. Expand a row for the values in force (colors with a swatch), **which file each came from**, **keys dropped in validation**, and **keys this app never reads**. Read-only — "Explain my settings…" starts the `mulmoterminal-config` skill to say why and fix it (→ [When a setting isn't working](#dir-settings-preview)) |
-| **Notification sounds** | Which moments beep and what each plays — one row per kind, with a preset picker and a play button. "Configure notifications…" starts the `mulmoterminal-notify` skill for a per-project sound and which moments push (→ [Notification sounds](#sounds)) |
-| **Voice input** | The language you **dictate in** (your browser's, per-clip detection, or a fixed one). Shown only on a machine that can transcribe |
-| **Web Push notifications** | The "Notify my devices when a task finishes" toggle (off by default → [Mobile notifications](notifications.html)) |
-| **Google account** | Google sign-in for the Calendar link (not the RemoteHost Connect) |
-| **Pull request repos** | The repos aggregated by the cross-repo PR/Issue view (`owner/repo`) |
 | **Launch commands** | Commands you can launch besides the agents in a grid cell (`{ label, command }`). A plain shell needs no entry — the launcher's **Shell** toggle opens `$SHELL` unconfigured |
-| **Phone quick commands** | Phrases offered as chips on the **phone's** terminal view. Tapping one fills the input box; it is sent when you press send (`quickCommands`) |
-| **MCP servers** | Your own HTTP MCP servers (`userMcpServers`), merged into the sessions that carry the full GUI MCP — a cell whose working directory is the **workspace**, and any session the server starts on its own (the phone, a scheduled task). A cell in a project directory loads its own MCP config instead (→ [which directory to launch in](basics.html#launch-dir)) |
-| **Cost (estimated)** | Estimated cost readouts for Session / Today / Month |
+| **Header buttons and chips** | How many buttons and chips your global config declares, read-only — "built-in" when you have configured none. "Set up header buttons…" starts the `mulmoterminal-header` skill (→ [Customizing the header](#header)) |
+| **Terminal keys** | [Copy on select](#copy-on-select) (`copyOnSelect`, off) and which bytes your Claude reads as **submit** ([Enter — submit vs. newline](#terminal-submit), `terminalSubmit`) |
 | **Keyboard shortcuts** | What is bound to what, read-only. **Everything starts as Not set** — "Set up shortcuts…" starts the `mulmoterminal-keys` skill to bind them in `keymap` (→ [Keyboard shortcuts](#keymap)) |
+| **Voice input** | The language you **dictate in** (your browser's, per-clip detection, or a fixed one). Shown only on a machine that can transcribe |
+| **Models and backends** | The backends a session can run on and whether each can be **reached right now**, read-only. "Add a backend…" starts the `mulmoterminal-model` skill (→ [Using another model](providers.html)) |
+| **MCP servers** | Your own HTTP MCP servers (`userMcpServers`), merged into the **Claude** sessions that have every GUI tool — a cell whose working directory is the **workspace**, and a session the server starts on its own (the phone, a scheduled task) unless it is started in a grid cell's shape, as an issue's seed session is. A cell in a project directory does not get this merge, and neither does Codex (the Claude MCP config **you** wrote — `.mcp.json` and the rest — is read in either directory → [which directory to launch in](basics.html#launch-dir)) |
+| **Notification sounds** | Which moments beep and what each plays — one row per kind, with a preset picker and a play button. "Configure notifications…" starts the `mulmoterminal-notify` skill for a per-project sound and which moments push (→ [Notification sounds](#sounds)) |
+| **Web Push notifications** | The "Notify my devices when a task finishes" toggle (off by default → [Mobile notifications](notifications.html)) |
+| **Phone quick commands** | Phrases offered as chips on the **phone's** terminal view. Tapping one fills the input box; it is sent when you press send (`quickCommands`) |
+| **GitHub and GitLab** | What this app writes to a forge as you: whether a cell [says it has started on an issue](#issue-work-comments) (`issueWorkComments`, off by default) and whether a created PR [ends with the clone name](#pr-workdir-footer) (`prWorkdirFooter`, on). Below them, the [self-hosted GitLab hosts](github.html#a-gitlab-of-your-own-self-hosted) to read with `glab` (`gitlabHosts` — takes effect on the next start) |
+| **Pull request repos** | The repos aggregated by the cross-repo PR/Issue view (`owner/repo`) |
+| **Google account** | Google sign-in for the Calendar link (not the RemoteHost Connect) |
+| **Sessions and background tasks** | Whether replies [end with a closing summary](#append-system-prompt) (`appendSystemPrompt`, on — a directory's own setting wins), whether to [keep a digest of decisions](#decision-digest) (`decisionDigest`, off), and the [periodic dev-work log](#all-keys) with its interval in hours (`worklogEnabled`, off — each run costs tokens) |
+| **Sessions that survived a restart** | Every terminal still running from an earlier server, **across all directories** — the one place a session in a project you no longer open, or a plain shell, can be seen and ended. Each row says where it runs, what it is (`shell or unknown` when no agent conversation is recorded under it), how long it has been idle, and whether ending it loses anything. **Stop** ends that session only; a conversation with a transcript can be resumed afterwards. A row a terminal is holding shows `● open` instead, and is closed from there. The section also carries `sessionIdleReapDays` — the number of idle days after which the server ends one on its own — and marks the rows that number will take with **ends at next start** |
+| **Cost (estimated)** | Estimated cost readouts for Session / Today / Month |
 | **Help & user guide** | Links into this guide |
 
 ## When a setting isn't working — look here first {#dir-settings-preview}
@@ -146,6 +187,173 @@ pick a different model on Anthropic itself. → [Using another model via OpenRou
 ```
 
 All values are `#rrggbb`. The working / needs-you status colors take priority over these background colors (which show when idle).
+
+Leave `headerTextColor` out and the header's text — the path, the title, the model / context and token
+chips — is derived from `headerColor` so it stays readable on it.
+
+`headerColor` and `headerTextColor` are the **idle** pair, and they apply only while that colour is
+what shows. A cell that is working, done, or needs you has replaced the header background with the
+theme's status tint, so its text goes back to the theme's own — an ink chosen for your header colour
+is not readable on a tint the theme mixed.
+
+To recolour those states, name them:
+
+```json
+{
+  "headerColor": "#0b2545",
+  "headerStatusColors": {
+    "working": "#6d28d9",
+    "done": { "background": "#166534" },
+    "blocked": { "background": "#7c2d12", "text": "#ffe8a3" }
+  }
+}
+```
+
+Only `working`, `done` and `blocked` — there is no `idle`, because `headerColor` is idle. A status
+you don't name keeps the theme's tint. **Omit `text` and a readable one is derived** from that
+background, so naming a single colour can never come out unreadable.
+
+Or keep your own colour throughout with `"headerStatusTint": "none"`, which leaves `headerColor` in
+place while **working** and **done**; the status still reads from the cell border, the status dot and
+the pill. It deliberately does not reach **blocked** — that is the state where nothing proceeds until
+you answer, so it keeps the theme's amber unless `headerStatusColors.blocked` says otherwise.
+
+Both keys also work in `~/.mulmoterminal/config.json`, where they are the default for every
+directory; a `.mulmoterminal.json` that names either one outranks it for that directory.
+
+### A repository that ships `repo.json` {#repo-json}
+
+[`repo.json`](../../repo-json.html) is an **open repository-metadata format**: one small file, at
+the repository root, that any tool can read. MulmoTerminal reads it, so a project that ships one
+gets a named, coloured, icon-bearing cell without knowing this app exists.
+
+```json
+{
+  "name": "diffusion-lab",
+  "description": "Training and evaluation for latent diffusion models",
+  "icon": "docs/logo.png",
+  "color": "#7c3aed"
+}
+```
+
+- **`name`** → the badge.
+- **`icon`** → the cell icon. A string, or an array with sizes; the best usable entry wins.
+- **`color`** → **all seven** chrome colours. The header is the colour exactly; the badge, border,
+  status dot, buttons and cell body are derived from its hue; the header text is derived for
+  contrast and is never declared. `color.background` sets the cell body directly.
+- **`extensions.mulmoterminal`** → anything this app understands that the open format doesn't —
+  `theme`, `orderPriority`, `sound`, and the rest of the keys on this page.
+
+The three files layer, general to specific:
+
+```
+repo.json  →  .mulmoterminal.json  →  .mulmoterminal.local.json
+the project    this app's settings    this checkout
+```
+
+Each replaces whatever keys the one below it set. A repository can ship `repo.json` alone and never
+create the other two; equally, a `.mulmoterminal.json` colour wins over `repo.json`'s, which is how
+you keep your own palette for a project whose brand colour you would rather not look at all day.
+
+### Several clones of one repository (`.mulmoterminal.local.json`) {#local-config}
+
+Working on one repository in several checkouts at once — `acme`, `acme2`, `acme3` — they are the
+same project and should differ in nothing but the colour that tells them apart in the grid. Put a
+`.mulmoterminal.local.json` beside the shared file:
+
+```jsonc
+// .mulmoterminal.json — the project. Complete on its own, colours included, so somebody with a
+// single clone needs nothing else. Safe to commit.
+{
+  "name": "acme-web",
+  "theme": "nord",
+  "badgeColor": "#1b3479",
+  "headerColor": "#2d4ea9",
+  "headerTextColor": "#ffffff",
+  "orderPriority": 30
+}
+
+// .mulmoterminal.local.json — this checkout only. Add it to .gitignore.
+{
+  "badgeColor": "#27b4a8",
+  "headerColor": "#4ed0c5",
+  "orderPriority": 65
+}
+```
+
+- **The local file wins, key by key.** Keys it does not name keep the shared value.
+- **Whole keys, not a deep merge.** A `colors` block in the local file replaces the shared one
+  entirely rather than merging into it — one key is one intent, and a palette assembled from two
+  files is harder to predict than one you can read in a single place.
+- **Everything is still validated.** A local file is not a way past the rules; a colour that isn't
+  `#rrggbb` is dropped there exactly as it would be in the shared file.
+- **A relative path means the same in both** (`icon`, `sound`, `addDirs`) — they resolve against
+  the directory, not against the file.
+- **Either file can stand alone.** A checkout may have only a local file, and a malformed one file
+  leaves the other still working.
+- **Both trigger the live reload**, so editing your own clone's colours recolours the cells at once.
+
+Settings → [Directory settings](#dir-settings-preview) names both paths and lists which keys the
+local file took over — which is the answer when you change something and the cell disagrees.
+
+### Project icon (`icon`) {#dir-icon}
+
+`icon` puts an **image** next to the name badge — the project's own logo, so a cell is recognisable
+before you have read a word of it:
+
+```jsonc
+{
+  "icon": "docs/logo.png",                  // a file in this directory
+  // "icon": "https://example.com/logo.svg" // or a URL
+  // "icon": "data:image/png;base64,iVBO…"  // or an inline image
+}
+```
+
+It appears in the **cell header**, the **cockpit roster** and the **filmstrip thumbnails** while a
+cell is enlarged, on the **launcher's directory chips**, and in the [phone's](phone.md) **terminal list and terminal
+screen** — so the same picture identifies the project everywhere it is offered or running.
+
+- **A path is relative to this directory.** An absolute path, or a `../` that escapes the
+  directory, is rejected — the same confinement `sound` has, so an opened project cannot point
+  MulmoTerminal at files elsewhere on your machine.
+- **Formats:** PNG, JPEG, **GIF (an animated one plays)**, WebP, AVIF, SVG, ICO, BMP. A file with
+  any other extension is ignored.
+- **Commit it to the repository.** That is what makes a fresh clone — and a
+  [worktree](#worktree-inherit) cut from it — arrive with the icon already set; the `icon` key is
+  carried over as written, so the same relative path resolves in the worktree's own tree.
+- An icon that stops resolving (a renamed file, a host that is down) simply doesn't appear. Check
+  what the app actually resolved in Settings → [When a setting isn't working](#dir-settings-preview).
+- Not to be confused with a header **button's** `icon`, which is a
+  [Material Symbols](https://fonts.google.com/icons) name rather than a picture.
+
+### The favicon is picked up on its own {#auto-dir-icon}
+
+You usually do not need to write `icon` at all. A directory that sets **none** shows the icon its
+repository already ships:
+
+1. `public/favicon.svg`, then `favicon.svg`
+2. `public/apple-touch-icon.png`, then `apple-touch-icon.png`
+3. `public/favicon.png`, then `favicon.png`
+4. `public/favicon.ico`, then `favicon.ico`
+5. a web manifest (`public/site.webmanifest`, `public/manifest.json`, or either at the root) — its
+   largest non-`maskable` icon
+
+First hit wins, ordered by how the image survives being drawn at 14px rather than by how common it
+is. `docs/logo.png` and `assets/logo.*` are deliberately **not** searched: a "logo" is as often a
+wide README banner as an icon, and one of those at 14 square pixels is a smudge.
+
+Two ways to turn it off, meaning different things:
+
+- **`"icon": false`** in a project's own file — no icon on *this* project's cells. Worktrees
+  inherit it.
+- **`autoDirIcon: false`** in `~/.mulmoterminal/config.json`, or the checkbox in
+  Settings → *Directory appearance* — off everywhere. Reach for this if the behaviour itself is
+  unwanted; writing `"icon": false` into every repository is not the way.
+
+**A key written wrong does not fall back to the favicon.** `"icon": "logo.png"` pointing at a file
+that isn't there leaves the cell with no icon at all, on purpose — a broken setting has to look
+broken. Settings → [When a setting isn't working](#dir-settings-preview) lists the key under the
+ones that were dropped.
 
 ### Sound for this directory
 
@@ -240,14 +448,22 @@ ranked ones, in that launch order.
 
 ### Worktrees inherit this file {#worktree-inherit}
 
-`.mulmoterminal.json` is normally gitignored, so a [worktree](glossary.html#git-worktree) cut from the project used
-to start with nothing in it: no colours, no name, no model, no rank — one more grey cell at the end
-of the grid, looking like an unrelated project.
+> Creating worktrees, the rules around them and cleaning them up are in
+> [Isolating work in a git worktree](worktree.html). This section is the **inheritance rule for this
+> config file**.
 
-Now a new worktree is given its own copy, derived from the project's:
+A [worktree](glossary.html#git-worktree) cut from the project used to start with nothing in it: no
+colours, no name, no model, no rank — one more grey cell at the end of the grid, looking like an
+unrelated project.
 
-- **The identity is copied as written** — `name`, `theme`, `colors`, `fontSize`, `fontFamily`,
-  `provider`, `model`. Same project, same terminal, same model.
+Now a new worktree is given its own copy, derived from the project's, written to
+**`.mulmoterminal.local.json`** ([above](#local-config)) so it layers over any shared config the
+repository committed and leaves the worktree's `git status` clean:
+
+- **The identity is copied as written** — `name`, `icon`, `theme`, `colors`, `fontSize`,
+  `fontFamily`, `provider`, `model`. Same project, same terminal, same model. `icon` is carried as
+  the path you typed rather than the file it resolved to, so a logo committed to the repository is
+  found again inside the worktree; one that is gitignored simply doesn't appear there.
 - **The chrome colours are rotated a little around the colour wheel** — `badgeColor`,
   `headerColor`, `headerTextColor`, `cellColor`, `cellBorderColor`, `dotColor`, `buttonColor`. Each
   worktree of a project sits one 12-degree step further round than the one before it, so a row of
@@ -260,15 +476,21 @@ Now a new worktree is given its own copy, derived from the project's:
 - **`sound`, `sounds` and `addDirs` are NOT carried.** Those name paths inside the project
   directory, which the worktree has no copy of, and `addDirs` would resolve against the worktree
   and quietly grant a different set of folders.
+- **[`worktreeEnv`](#worktree-env) is copied as written**, because it is a declaration rather than
+  a value: the worktree is then reserved its own port and database name from it. A worktree that
+  did not carry it would be the one tree of the project whose dev server still fought for 3000.
 
 Two cases where nothing is written, both deliberate:
 
-- **The project's config isn't gitignored.** The file would show up as an untracked change in the
-  worktree's `git status` — which is not just untidy: MulmoTerminal refuses to remove a worktree
-  that has uncommitted changes, so it could no longer be cleaned up. Add `.mulmoterminal.json` to
-  the repo's `.gitignore` and the next worktree gets its colours.
-- **The worktree already has one** (it is committed to the repo, or you wrote it yourself). That
-  file is the answer; MulmoTerminal never overwrites it.
+- **Neither file is gitignored in that repository.** Whichever one MulmoTerminal wrote would show
+  up as an untracked change in the worktree's `git status` — which is not just untidy: it refuses
+  to remove a worktree that has uncommitted changes, so the tree could no longer be cleaned up.
+  Add `.mulmoterminal.local.json` to the repo's `.gitignore` and the next worktree gets its
+  colours. A repository set up before this file existed, which ignores `.mulmoterminal.json`
+  instead, keeps working — that one is used as a fallback.
+- **The worktree already has a local file of its own** (you wrote it, or a previous run did). That
+  file is the answer; MulmoTerminal never overwrites it. A committed *shared* config does not stop
+  it — that is the file the local one is meant to layer over.
 
 The copy is taken at creation and then belongs to the worktree. Recolour the project afterwards and
 existing worktrees keep the shade they were given — edit or delete their own file to change it.
@@ -278,7 +500,12 @@ existing worktrees keep the shade they were given — edit or delete their own f
 This is where MulmoTerminal's **Extend** pillar lives. Shape the header of a running terminal to fit your workflow with **a small DSL**.
 Any developer can turn their frequent actions into a single click and surface only the information they want to see — that's what this is for.
 
-**Buttons** (`buttons`) — action buttons that act on a running session. Display is an `icon` (a Material Symbol name) plus a `label`; `order` controls the sort.
+> **For your first one, go to [Customizing the header](header.html)** — it walks through reading the
+> header and adding a button, with screenshots. This section is the **full field reference**.
+
+**Buttons** (`buttons`) — action buttons that act on a running session. **Only the `icon` (a Material Symbol name) is drawn**;
+`label` becomes the **hover tooltip** (and the accessible name). No text appears on screen, so write a `label` that says what the
+button does. With neither `icon` nor `emoji`, you get `bolt`. `order` controls the sort.
 With none set, you get a **built-in starter set**: **Insert a file path** · **Open this branch's PR** (git repos, only when a PR exists). Setting `buttons` at any level **replaces the whole default set** (it is _not_ merged on top) — so listing your own, even a **shorter** list, is how you trim, reorder, or swap them.
 
 *Reveal in the file manager*, *Browse files in the app*, *New terminal here* and *Open on GitHub* used to be defaults too. They are **items in the path menu** now — click the directory path on the terminal's header row. They all answered "do something with this directory", which is what the path itself is; keeping four permanent icons for them cost more room than it was worth in a tiled cell. Nothing changed about them as config: list any of them yourself and it works exactly as before, as a button — you will then have it both places, since the menu is fixed.
@@ -295,7 +522,7 @@ With none set, you get a **built-in starter set**: **Insert a file path** · **O
 ```
 
 - `run: "input"` … send `text` to the running Claude/Codex (e.g. `/compact`).
-- `run: "open"` … `url` (browser, http/https only) / `reveal` (OS file manager: Finder/Explorer/xdg-open) / `files` (in-app explorer) / `pickFile` (OS file dialog, inserts the path) / `terminal` (a new terminal cell in that directory) / `pr` (the current branch's PR in the browser) / `view` (`diff`/`prs`/`wiki`/`collections`/`accounting`).
+- `run: "open"` … write ONE per button. Set several and **only the first of this order** takes effect: `pr` (the current branch's PR — the server resolves it into `url`, so it beats a `url` written alongside) / `url` (browser, http/https only) / `reveal` (OS file manager: Finder/Explorer/xdg-open) / `files` (in-app explorer) / `view` (`prs`/`wiki`/`collections`/`accounting`; `diff` is accepted but has no dedicated screen and currently falls back to the files view) / `terminal` (a new terminal cell in that directory) / `pickFile` (OS file dialog, inserts the path).
 - `run: "shell"` … run `cmd` in a command cell (the id is resolved server-side, `${variables}` are shell-escaped, and the command never reaches the browser).
 - `${variables}` … `dir` `dirName` `branch` `repo` `remoteUrl` `ahead` `behind` `dirty` `agent` `model` `task` `session`.
 - `when` … `isGitRepo` / `agent == …` / `repo == …` (`&&` / `||`, with `&&` taking precedence).
@@ -306,8 +533,11 @@ With none set, you get a **built-in starter set**: **Insert a file path** · **O
 { "chips": ["ctx", "git", { "label": "env", "text": "⎇ ${branch}", "when": "isGitRepo" }] }
 ```
 
-- Built-in `dir` / `git` / `work` / `diff` / `ctx` / `usage` / `status` / `tools` … shown in the order you list them; omit one to hide it.
-- Custom `{ label, text, when }` … read-only text (`text` expands `${variables}`).
+- **Only `git` / `work` / `diff` / `ctx` / `usage` / [`env`](#worktree-env) respond** — shown in the order you list them; omit one to hide it.
+- `dir` (the project badge), `status` (the status dot) and `tools` (the row-2 tool timeline) are **structural to the cell**:
+  listing them does nothing and omitting them hides nothing. The schema accepts them, so it is not an error — they are silently ignored.
+- Custom `{ label, text, when }` … read-only text. **`text` is what's displayed** (it expands `${variables}`);
+  `label` is the **tooltip**, as on a button.
 
 #### `work` — which PR / issue this cell is on {#work-chip}
 
@@ -331,7 +561,7 @@ yourself, add `"work"` to the list** — a configured list is the whole list.
 The header's **Skill** button (the bolt icon) lists the skills available in that directory
 (`<project>/.claude/skills` and `~/.claude/skills`). Working-dir (project) skills come
 first, then user-scope ones. Picking one runs the skill **in the current session**
-(Claude: `/<slug>`; Codex: `Use the "<slug>" skill.`).
+(Claude: `/<slug>`; other agents: `Use the "<slug>" skill.`).
 
 Set `skills` to an allowlist to show **only those slugs, in that order**. **Omit it to
 show everything.**
@@ -639,6 +869,12 @@ the reversed binding. If you're unsure, keep `cr`; switch to `esc-cr` only if Sh
 
 ### How to set it
 
+The quick way is **Settings → Terminal keys**, which offers both modes worded as behaviour. It
+takes effect in this tab at once; the phone remote view still picks it up on the next server
+start (step 3 below).
+
+By hand instead:
+
 1. Open `~/.mulmoterminal/config.json` (create the file if it doesn't exist) and add the key at the
    top level — for the reversed binding:
    ```json
@@ -714,8 +950,8 @@ A kind with no `sounds` entry falls back to `soundFile`, and a project's own
 
 ## Terminal font — when CJK text looks wrong (`fontFamily`) {#font-family}
 
-The font every terminal renders in. There is **no Settings UI** — put a CSS font-family stack in
-`~/.mulmoterminal/config.json`:
+The font every terminal renders in. Set it in **Settings → Terminal font**, or put a CSS
+font-family stack in `~/.mulmoterminal/config.json`:
 
 ```json
 { "fontFamily": "'Cica', 'MS Gothic', monospace" }
@@ -771,7 +1007,9 @@ highlight something while reading.
 { "copyOnSelect": true }
 ```
 
-Config file only — there is no Settings toggle. Restart the server to pick it up.
+There is a checkbox in **Settings → Terminal keys**, applied at once. A hand edit of the file
+instead needs a **server restart, then a tab reload** — the server reads this file once at startup,
+and the browser takes the value from the server when the page loads.
 
 It coexists with the [`copy` keymap action](#keymap): keep `copy` bound as well if you also want a
 key for it, for instance to copy a selection made with the keyboard.
@@ -1033,6 +1271,8 @@ worth raising.
 { "cockpitLines": { "summary": 6, "prompt": 2, "response": 3 } }
 ```
 
+Or use the three steppers in **Settings → Waiting rows**.
+
 | Field | Clamps | Default |
 |---|---|---|
 | `summary` | What the session is doing now | `2` |
@@ -1073,6 +1313,100 @@ it — you used to need an editor that can open a multi-folder workspace. Claude
 
 Take effect on the next session in that directory.
 
+## A port and a database name per worktree (`worktreeEnv`) {#worktree-env}
+
+A worktree isolates your **files**. It does not isolate a **port**. Start `yarn dev` in one
+worktree and `yarn dev` in another and the second one dies on 3000 — and five worktrees pointed at
+one local database means the one that runs a migration breaks the other four.
+
+Declare what each working tree needs its own of, and MulmoTerminal reserves a distinct value per
+tree and exports it into that tree's terminals:
+
+```json
+{
+  "worktreeEnv": {
+    "PORT": { "kind": "port", "base": 3000 },
+    "API_PORT": { "kind": "port", "base": 4000 },
+    "DB_NAME": { "kind": "slug", "prefix": "myapp_" }
+  }
+}
+```
+
+Where the project's own checkout reserves first — the usual case, since it is the directory you
+opened before cutting anything from it — it takes the `base` it declared and its worktrees the
+numbers above it:
+
+| Directory | `PORT` | `DB_NAME` |
+|---|---|---|
+| `~/src/myapp` (the checkout) | `3000` | `myapp_myapp` |
+| `…/worktrees/myapp-a1b2c3d4/fix-login` | `3010` | `myapp_fix_login` |
+| `…/worktrees/myapp-a1b2c3d4/add-search` | `3020` | `myapp_add_search` |
+
+`base` itself goes to whichever directory reserves first. A **second clone of the same repo**
+declares the same `base`, so it takes the next free slot instead (3010) — which is the point: those
+two checkouts used to fight over 3000 as surely as two worktrees did.
+
+- **`kind: "port"`** — a free TCP port, `base` + a multiple of **10**. The stride is ten and not
+  one because a dev server that finds its port taken commonly moves to the next one (vite does
+  this by default); at a stride of one that fallback would land on the neighbouring worktree's
+  port.
+- **`kind: "slug"`** — a name derived from the worktree's task (or the folder's own name), behind
+  the `prefix` you give. Lowercase, `[a-z0-9_]`, cut to 63 characters — usable as a Postgres
+  database or schema name, a SQLite filename, a container name.
+- MulmoTerminal **does not create the database.** It hands you a name nothing else is using;
+  what your `migrate` script does with it is yours.
+- Variable names are yours: `PORT`, `VITE_PORT`, `NEXT_PUBLIC_PORT`, anything a shell can export.
+  Up to 16 of them.
+
+### The numbers do not move {#worktree-env-stable}
+
+A value is **reserved once and then kept**, in `~/.mulmoterminal/worktree-env.jsonl`. Reopen the
+cell, restart the server, reboot — the same tree gets the same number, for as long as the
+declaration it was made against is unchanged.
+
+That is not a nicety. If the port were re-measured on every launch, the tree's OWN dev server
+would make its port look taken and the number would move — the tree would flee from itself. And a
+cell reattaching to a tmux session does not re-read its environment at all, so a value that moved
+would be one the running program no longer agrees with.
+
+What IS measured, once, is whether the port is free at the moment it is first handed out — so a
+port something else on your machine already holds is skipped rather than handed over.
+
+Two MulmoTerminal servers running side by side can still both pick the same value in the instant
+between reading the reservations and writing one. That collision is detected straight after the
+write rather than prevented with a lock: both servers read the same append-only file, so both agree
+that whoever's line came first keeps it, and the other releases and takes the next value. The
+collision can happen; it does not stick.
+
+The reservation is given up when the worktree is **removed** (Close → delete), and a reservation
+whose directory is simply gone stops holding its value. **Editing the declaration also frees it**:
+change `base` and the next session re-allocates, rename or drop a variable and the value it held
+goes back into circulation for the other trees.
+
+### Where to see what this tree got {#worktree-env-chip}
+
+On the cell header, as an `env` chip: `:3010`. **Click a port and the dev server opens** in a new
+tab. Hover for the variable name.
+
+On **every** cell in that directory — an agent cell, a Shell, a launch command, a Run command. The
+launcher cell matters most: it is the one running `yarn dev`, so it is the one whose number you
+want to read.
+
+It is one of the default chips, and it renders nothing at all in a project that declares no
+`worktreeEnv` — so there is nothing to switch on, and nothing to see if you do not use this. To
+place it deliberately, name it in [`chips`](#header): `"chips": ["git", "env", "ctx"]`.
+
+### Notes
+
+- Values reach **every terminal** in the directory — a Claude cell, a Codex cell, a Shell, a
+  launch command, a Run-menu command. Whatever runs `yarn dev` gets the port.
+- They are set **on top of** the inherited environment, and a variable MulmoTerminal needs for
+  itself wins over a declaration of the same name.
+- Declaring nothing changes nothing: without `worktreeEnv` no value is reserved and no variable
+  is set. A directory that USED to declare one is the single exception — its old reservation is
+  released, which is one line appended, so the value goes back into circulation.
+- Take effect on the **next session** in that directory.
+
 ## Running on another model (providers) {#providers}
 
 Claude Code can talk to any Anthropic-compatible backend. The backend goes in `providers` in
@@ -1091,6 +1425,109 @@ Note that `baseUrl` must not end in `/v1`, and `tokenEnv` is the **name** of a v
 
 → **Full walkthrough, the measured model list, how to add your own models, and troubleshooting:
 [Using another model via OpenRouter](providers.html).**
+
+## Your own way of starting Claude Code (`customAgents`) {#custom-agents}
+
+*A provider is a backend you reach over HTTP. This is the other case: the model is reached by
+**running a command**.*
+
+`ollama launch claude --model nemotron-3-ultra:cloud --` starts Claude Code against a local model.
+You could put that in a launcher chip — but then it is just a command in a terminal: no resumable
+transcript, no cost or context, no "waiting for you", no GUI tools. A **custom agent** runs the same
+command line and hands it **Claude Code's own arguments**, so the cell is a real session.
+
+It appears in the **Agent Picker** — the toggle at the top of an empty cell — beside Claude, Codex,
+Antigravity, Grok and Shell.
+
+```json
+{
+  "customAgents": [
+    {
+      "id": "nemotron",
+      "label": "Nemotron",
+      "agent": "claude",
+      "command": "ollama launch claude --model nemotron-3-ultra:cloud --"
+    }
+  ]
+}
+```
+
+| Key | What it is | Limit |
+|---|---|---|
+| `id` | A short name identifying the entry internally, so changing it later makes a **different** agent — rename the label instead | `^[a-z0-9][a-z0-9_-]{0,31}$` — lowercase letters, digits, `-` and `_`, up to 32 chars, not starting with `-`/`_`. Cannot be `claude`, `codex`, `antigravity`, `grok` or `shell` |
+| `label` | The button's text | 24 characters |
+| `agent` | Which agent this launches **as**, i.e. whose arguments get appended | `"claude"` — the only value today, and **required** |
+| `command` | The command line to run, with Claude Code's arguments appended to it | 500 characters |
+
+The two kinds of limit fail differently, and neither says anything on screen:
+
+- A bad `id` or `agent`, a blank `label` or `command`, or a duplicate `id` **drops the whole
+  entry** — no button appears.
+- An over-long `label` or `command` is **truncated** to the limit above, not dropped. A truncated
+  command is the worse of the two: it still runs, as a different command.
+
+Up to 8 entries; the 9th onwards are ignored. `config.json` only — there is no Settings control, so an edit made while the
+server is running needs a **restart**, then a tab reload.
+
+The picker decides what a **new** session starts as. Continuing one under *OR RESUME HERE* keeps
+the agent that session began on, whatever the picker happens to show — the same rule the
+provider/model choice follows. Which agent each session started on is remembered on disk, so it
+survives closing the cell, exiting the session, and restarting the server.
+
+### Where your command ends and Claude Code's begins
+
+What actually runs is your command with Claude Code's entire argv after it:
+
+```
+ollama launch claude --model nemotron-3-ultra:cloud -- \
+  --session-id <uuid> --settings <hooks> --permission-mode … --mcp-config … --allowedTools …
+```
+
+So your command has to **stop taking arguments** where Claude Code's begin — that is what the
+trailing `--` is doing above: `ollama` consumes `--model nemotron-3-ultra:cloud`, and everything
+after `--` is passed through untouched.
+
+Two things that follow from this:
+
+- **The two `--model`s do not collide.** The one you wrote is before the `--` and belongs to
+  `ollama`; the launch form's MODEL choice arrives after it and belongs to Claude Code.
+- **A command that swallows what follows breaks the session quietly.** Without `--session-id` it
+  cannot be resumed, without `--settings` the cell never shows working / waiting, without
+  `--mcp-config` there are no GUI tools. If a custom agent's cell starts but stays grey, this is
+  why.
+
+Your command runs **as written, not through a shell**: quotes are honoured, but `$HOME`, `~`, pipes
+and `&&` are not expanded. If you want shell syntax, you want a launch command (a chip) instead.
+
+### If the button doesn't appear
+
+The entry was rejected on load, and a rejected entry is simply absent — it looks exactly like never
+having saved the file. In order of likelihood:
+
+1. **No `agent: "claude"`.** It is required: nothing in your command line says which CLI is on the
+   other side of the `--`, so MulmoTerminal will not guess.
+2. **The `id` is not a valid name** — an uppercase letter, a space, or one of the four built-in
+   names.
+3. **The server wasn't restarted**, or the tab wasn't reloaded.
+
+To check what was accepted, compare your file with what the app parsed:
+
+```sh
+curl -s "http://localhost:34567/api/config" | jq .customAgents
+```
+
+An entry in the file and missing from that output is one that was dropped.
+
+### Not the same as a launch command
+
+|  | Custom agent (Agent Picker) | Launch command (chip) |
+|---|---|---|
+| Runs | your command **+ Claude Code's arguments** | your command, exactly as written |
+| The cell is | a real agent session — resume, cost, context, waiting status | a plain terminal |
+| GUI tools | yes, like any Claude cell | only if your own command asks for them |
+| Shell syntax (`$VAR`, pipes) | no | yes |
+
+→ `/mulmoterminal-model` writes this for you, and knows the traps above.
 
 ## Which clone made this PR (`prWorkdirFooter`) {#pr-workdir-footer}
 
@@ -1116,8 +1553,9 @@ the branch, which the PR already shows.
 }
 ```
 
-The next PR you create honours it — **no restart needed**. This setting has no Settings-modal
-control, so it is read from the file each time a PR is created.
+Or use the checkbox in **Settings → GitHub and GitLab**. The next PR you create honours it either
+way — **no restart needed**: it is read from the file each time a PR is created, so a second
+MulmoTerminal running beside this one sees your change too.
 
 Notes:
 
@@ -1143,6 +1581,8 @@ asked for and what came of it are only recoverable by scrolling back through the
   "appendSystemPrompt": false
 }
 ```
+
+Or use the checkbox in **Settings → Sessions and background tasks**.
 
 It applies to **sessions started from then on**. No server restart is needed, but **sessions
 already running keep it** — the instruction is handed over once, at spawn. To see the change,
@@ -1175,6 +1615,8 @@ person who filed it, and anyone else with a checkout, can see it is being worked
 ```json
 { "issueWorkComments": true }
 ```
+
+Or tick it in **Settings → GitHub and GitLab**.
 
 With it on, a cell leaves **one comment per issue** and keeps it up to date. Starting the work
 posts it:
@@ -1243,6 +1685,7 @@ which one you picked — so an agent can read it before asking something similar
 { "decisionDigest": true }
 ```
 
+- Or tick it in **Settings → Sessions and background tasks**.
 - Written to `~/.mulmoterminal/decisions/<project>.md`, **never into your repository**.
 - Refreshed **when the server starts and every 6 hours**, for the directories this host is
   actually working in.
@@ -1258,8 +1701,8 @@ which one you picked — so an agent can read it before asking something similar
 **Off by default.** It is a vision-stage idea, and it writes a file that would otherwise not
 exist.
 
-This key has **no Settings-modal switch** — it lives only in `~/.mulmoterminal/config.json`, which
-is read once when the server starts. Edit the file, then **restart `mulmoterminal`**.
+Tick it in **Settings → Sessions and background tasks**. If you edit `~/.mulmoterminal/config.json`
+by hand instead, **restart `mulmoterminal`** — that file is read once when the server starts.
 
 ## Put your common commands in the Run menu (`script.json`)
 
@@ -1306,16 +1749,20 @@ What you write here appears in an empty cell's launcher under **OR RUN A SCRIPT*
 | `launchers` | The launch commands that appear under "OR LAUNCH" in a grid cell. Only what you add — a plain shell is already the launcher's **Shell** toggle |
 | `quickCommands` | Phrases the **phone** offers as chips on a session (`{ label, text, agents? }`). Tapping one fills the input box — it is not sent until you press send. `agents` scopes a chip to `"claude"` / `"codex"` / `"shell"`; omit it to offer the chip everywhere. Editable in Settings → **Phone quick commands** |
 | `prRepos` | The repos targeted by the cross-repo PR/Issue view |
-| `gitlabHosts` | Hosts running a **self-hosted GitLab**, e.g. `["gitlab.example.com"]`. A URL does not say which forge a host runs, so declaring it is what lets `prRepos` entries on that host be read with `glab`. Needs `glab auth login --hostname <host>`. config.json only (no Settings control), so a hand edit takes effect on the next start (→ [A GitLab of your own](github.html#a-gitlab-of-your-own-self-hosted)) |
+| `gitlabHosts` | Hosts running a **self-hosted GitLab**, e.g. `["gitlab.example.com"]`. A URL does not say which forge a host runs, so declaring it is what lets `prRepos` entries on that host be read with `glab`. Needs `glab auth login --hostname <host>`. Editable in Settings → **GitHub and GitLab**; either way it takes effect on the next start (→ [A GitLab of your own](github.html#a-gitlab-of-your-own-self-hosted)) |
 | `repoDirs` | Which local clone work on a repo starts in, when you keep several side by side: `{ "acme/web": "/Users/you/src/web" }`. Only the choice is stored — which clones exist is re-derived from `cwdPresets`, so adding one needs no second edit, and an entry that no longer names a clone of that repo is ignored |
+| `userMcpServers` | Your own HTTP MCP servers (`{ id, url }`), merged into the sessions that carry the full GUI MCP. Editable in Settings → **MCP servers** |
+| `issueWorkComments` | Let a cell comment on the issue it is working on — once, edited as the PR opens and merges. **Off by default**; it writes to GitHub, often on somebody else's issue (→ [Telling the issue you are on it](#issue-work-comments)) |
 | `buttons` / `chips` | Header buttons / chips (merged with project settings → [Customizing the header](#header)) |
 | `providers` | Anthropic-compatible backends (→ [Using another model via OpenRouter](providers.html)) |
+| `customAgents` | Your own commands for starting Claude Code, offered in the Agent Picker (→ [Custom agents](#custom-agents)) |
 | `soundFile` | The fallback notification sound for every kind (absolute path to an audio file; also settable from the modal) |
 | `soundKinds` | Which moments beep. Omit to keep `["finished","waiting"]`; the four added in 2.2 are opt-in, `[]` for silence (→ [Notification sounds](#sounds)) |
 | `sounds` | Per-kind sound, e.g. `{ "waiting": "preset:coin" }` — a `preset:<id>` or an absolute path. A kind with no entry uses `soundFile` (→ [Notification sounds](#sounds)) |
 | `pushEnabled` | The Web Push master switch (default `false` → [Mobile notifications](notifications.html)) |
 | `pushKinds` | Which moments push: `"finished"` (a turn ended) and/or `"waiting"` (the agent stopped to ask). Omit to keep both; `[]` for none (→ [Which moments push](notifications.html#kinds)) |
-| `worklogEnabled` / `worklogIntervalHours` | The periodic dev-work log (default off / 6 hours) |
+| `sessionIdleReapDays` | How long a terminal may sit with **nobody attached and no output** before the server ends it at its next start (default 7 days, `0` disables it, 0–365). The conversation is not lost — a transcript on disk resumes without the tmux session; the process and its scrollback are. Editable in Settings → **Sessions that survived a restart**, beside the list it acts on |
+| `worklogEnabled` / `worklogIntervalHours` | The periodic dev-work log — summarizes recent work across your saved directories into weekly wiki pages (default off / 6 hours, clamped to 1–168). Each run spawns an LLM session, so it costs tokens. Editable in Settings → **Sessions and background tasks** |
 | `decisionDigest` | Keep a Markdown digest of what this project already decided, for agents to read before asking again. **Off by default** (→ [What this project already decided](#decision-digest)) |
 | `terminalSubmit` | Which bytes mean **submit** vs **newline** — `"cr"` (default) or `"esc-cr"` (→ [Enter — submit vs. newline](#terminal-submit)) |
 | `themes` | Colour schemes you defined; they appear in Settings' theme picker (→ [Make your own colour scheme](#custom-themes)) |
@@ -1341,7 +1788,7 @@ there to look at.
 
 | Variable | Default | Role |
 |---|---|---|
-| `CLAUDE_CWD` / `--cwd` | The directory you run `npx mulmoterminal@latest` in (only `~/mulmoclaude` when the server is started directly) | The default working directory (the PTY's cwd), settled in the order `--cwd`, the `CLAUDE_CWD` environment variable, then the directory you ran the launcher in. **Only a Claude cell launched in this same directory carries the whole GUI MCP** (→ [which directory to launch in](basics.html#launch-dir)) |
+| `CLAUDE_CWD` / `--cwd` | The directory you run `npx mulmoterminal@latest` in (only `~/mulmoclaude` when the server is started directly) | The default working directory (the PTY's cwd), settled in the order `--cwd`, the `CLAUDE_CWD` environment variable, then the directory you ran the launcher in. **A Claude or Codex session launched in this same directory has every GUI tool** (not Antigravity or Grok, and not a Shell or any other launch command → [which directory to launch in](basics.html#launch-dir)) |
 | `PORT` | `34567` | The server port |
 | `MULMOTERMINAL_HOST` | `127.0.0.1` | The interface the server binds to (→ [below](#bind-host)) |
 | `MULMOTERMINAL_ALLOWED_ORIGINS` | *(none)* | Extra browser origins allowed to attach a terminal, comma-separated. Only needed alongside a wider `MULMOTERMINAL_HOST` (→ [below](#bind-host)) |

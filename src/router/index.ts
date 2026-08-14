@@ -24,7 +24,15 @@ export const routes: RouteRecordRaw[] = [
   { path: "/feeds", name: "feeds", component: Stub },
   { path: "/feeds/:slug", name: "feedDetail", component: Stub },
   { path: "/accounting", name: "accounting", component: Stub },
-  { path: "/prs", name: "prs", component: Stub },
+  // Named for what it shows — pull requests AND issues — rather than for the half it started as.
+  // `/prs` is kept as a redirect: it was the path for long enough to be bookmarked, and the cost
+  // of honouring it is this line.
+  { path: "/github", name: "github", component: Stub },
+  { path: "/prs", redirect: { name: "github" } },
+  // The conversation rooms a round table writes to (#1456). The open room is the URL so a
+  // conversation can be linked to and reloaded.
+  { path: "/rooms", name: "rooms", component: Stub },
+  { path: "/rooms/:room", name: "roomView", component: Stub },
   // Full-screen file explorer + editor, rooted at a project dir (?cwd=). Opened from a
   // terminal header's Files button.
   { path: "/files", name: "files", component: Stub },

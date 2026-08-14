@@ -1,6 +1,8 @@
 import { ref, type Ref } from "vue";
 import { presetLabel, type CwdPreset } from "../components/presets";
+import { isManagedWorktreePath, worktreeLabel } from "../../common/worktreePath";
 import type { Launcher } from "../components/launchers";
+import { isCustomAgent, type CustomAgent } from "../../common/customAgents";
 import type { UserMcpServer } from "../components/userMcp";
 import type { QuickCommand } from "../../common/quickCommands";
 import { isPushKind, type PushKind } from "../../common/pushKinds";
@@ -16,8 +18,16 @@ import { setCustomThemes } from "./customThemes";
 import { refreshTheme } from "./useTheme";
 import { setActiveKeymap } from "./activeKeymap";
 import { setCockpitLines } from "./cockpitLines";
+import { setHeaderStatusDefaults } from "./headerStatusColors";
 import { setCopyOnSelect } from "./copyOnSelect";
 import { setIssueWorkComments } from "./issueWorkComments";
+import { setPrWorkdirFooter } from "./prWorkdirFooter";
+import { setAppendSystemPrompt } from "./appendSystemPrompt";
+import { setDecisionDigest } from "./decisionDigest";
+import { setWorklogEnabled, setWorklogIntervalHours } from "./worklog";
+import { setSessionIdleReapDays } from "./sessionReap";
+import { setHeaderConfigSummary } from "./headerConfigSummary";
+import { postConfigField } from "./postConfigField";
 import { fetchWithTimeout } from "../utils/fetchWithTimeout";
 
 // The custom attention-sound file is a SINGLETON ref shared across every
@@ -63,11 +73,37 @@ function adoptSoundConfig(c: Record<string, unknown>): void {
 // unshortened. Found by looking at a screenshot of the issue rows' clone menu.
 const home = ref<string | null>(null);
 
+// Where the server keeps the worktrees IT created (`<MULMOTERMINAL_HOME>/worktrees`), so this side
+// can tell one of ours from a directory that merely looks like one — see `isManagedWorktreePath`.
+// A SINGLETON for the same reason as `home`: only `loadConfig` writes it, and a component that
+// calls useAppConfig() without loading would otherwise hold a copy that stays null forever.
+const worktreesRoot = ref<string | null>(null);
+
+// The initial /api/config while it is still in flight, so a launch that lands first can wait for
+// the root rather than decide without it (Codex on #1543). Null when nothing is loading — then
+// there is nothing to wait for. It never rejects and `fetchWithTimeout` bounds it, so a dead
+// server delays one chip instead of stalling the queue.
+let configLoadInFlight: Promise<void> | null = null;
+
+/** Run a config load, publishing it as the in-flight one for the duration — what a preset record
+ *  waits on when it needs the worktree root before it can decide. */
+async function trackConfigLoad(load: () => Promise<void>): Promise<void> {
+  const run = load();
+  configLoadInFlight = run;
+  try {
+    await run;
+  } finally {
+    // Only when a LATER load has not already taken the slot: clearing another's would tell a
+    // waiter that nothing is coming.
+    if (configLoadInFlight === run) configLoadInFlight = null;
+  }
+}
+
 const prRepos = ref<string[]>([]);
 
-// The hosts declared as self-hosted GitLab (#1332). Read-only here — config.json is the only place
-// it can be set — but the browser needs it to know that a `gitlab.hogefuga.com/...` row can start
-// work, which is a decision this side makes on its own (common/issueStartPlan.ts).
+// The hosts declared as self-hosted GitLab (#1332). The browser needs it to know that a
+// `gitlab.hogefuga.com/...` row can start work, which is a decision this side makes on its own
+// (common/issueStartPlan.ts), and Settings now edits it too.
 const gitlabHosts = ref<string[]>([]);
 
 /** The declared hosts, for a reader outside the composable — same shape as `currentSoundConfig`
@@ -85,6 +121,10 @@ const repoDirs = ref<Record<string, string>>({});
 // Cell-launcher commands (shell/codex/…) — SINGLETON so the grid's cell launchers and
 // the settings editor (openable from either view) share one list.
 const launchers = ref<Launcher[]>([]);
+
+// The user's own ways of starting Claude Code, offered in the Agent Picker (#1414) — a SINGLETON
+// like the launchers above, and read-only here: config.json is the only place they can be set.
+const customAgents = ref<CustomAgent[]>([]);
 
 // User-added HTTP MCP servers merged into the single-view session's --mcp-config —
 // SINGLETON like the others.
@@ -109,26 +149,6 @@ function readLegacyRecents(): string[] {
   }
 }
 
-// POST a single config field as a partial update; the server keeps the other fields, so
-// this never clobbers them. Returns the server's echoed value for that field (or
-// `{ ok: false }` on failure) so each caller can update just its own singleton ref.
-async function postConfigField(field: string, value: unknown): Promise<{ ok: true; value: unknown } | { ok: false }> {
-  try {
-    const res = await fetchWithTimeout("/api/config", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ [field]: value }),
-    });
-    if (!res.ok) return { ok: false };
-    const body: unknown = await res.json();
-    // `unknown`, not a caller-named `T`: this is the server's echo, and the type argument used to
-    // let each caller DECLARE the shape it wanted. Several already narrowed it anyway; now all do.
-    return { ok: true, value: isRecord(body) ? body[field] : undefined };
-  } catch {
-    return { ok: false };
-  }
-}
-
 // The elements of a config list that pass their own guard. Anything else is dropped rather than
 // loaded: the list is a set of independent entries, so one bad entry costs only itself.
 const listOf = <T>(value: unknown, isEntry: (entry: unknown) => entry is T): T[] => (isUnknownArray(value) ? value.filter(isEntry) : []);
@@ -144,7 +164,12 @@ const isLauncher = (value: unknown): value is Launcher => isRecord(value) && typ
 // `next` from the same stale snapshot — the later POST would clobber the earlier one
 // (last-write-wins, dropping a just-launched dir). `serialize` runs the writes in order so
 // every mutation reads the freshly-saved list before computing its own.
-function createPresetMutations(presets: Ref<CwdPreset[]>, savePresets: (next: CwdPreset[]) => Promise<boolean>) {
+function createPresetMutations(
+  presets: Ref<CwdPreset[]>,
+  hasAuthoritativeList: () => boolean,
+  recordPresetOnServer: (path: string, label: string) => Promise<boolean>,
+  removePresetOnServer: (path: string) => Promise<boolean>,
+) {
   let presetWrite: Promise<unknown> = Promise.resolve();
   function serialize(mutate: () => Promise<void>): Promise<void> {
     const run = presetWrite.then(mutate, mutate);
@@ -161,21 +186,50 @@ function createPresetMutations(presets: Ref<CwdPreset[]>, savePresets: (next: Cw
   // its basename. Already at the front → no write. No cap: the user prunes the list with the
   // chip's close button. Called with the server-confirmed (effective) cwd so we only remember dirs that
   // actually ran.
-  function recordPreset(path: string | null): Promise<void> {
-    if (!path) return Promise.resolve();
+  //
+  // A managed worktree is skipped — see `isManagedWorktreePath`. Skipped rather than filtered on
+  // read, so an entry a previous version recorded stays exactly where the user left it: the chip's
+  // close button is theirs to press, and silently dropping saved config is not this function's
+  // call. It also means a worktree already in the list stops being bumped to the front.
+  async function recordPreset(path: string | null): Promise<void> {
+    if (!path) return;
+    // Decided BEFORE the write lock is taken, never while holding it: `loadConfigOnce` ends with
+    // `migrateLegacyRecents`, which needs that same lock, so waiting for the load from inside it
+    // deadlocks an upgrading user's first load outright — the import and the record both hang
+    // (Codex on #1543).
+    //
+    // A path without the worktree SHAPE cannot be one of ours whatever the root turns out to be, so
+    // it never waits — which is what keeps a launch during the initial GET writing immediately, a
+    // guarantee of its own (#164). Only a shape-matching path waits, and only while the config
+    // carrying the root is actually in flight; `fetchWithTimeout` bounds it.
+    if (worktreeLabel(path) !== null && worktreesRoot.value === null) await configLoadInFlight;
+    if (isManagedWorktreePath(path, worktreesRoot.value)) return;
     return serialize(async () => {
       if (presets.value[0]?.path === path) return; // already most-recent — nothing to reorder
-      const existing = presets.value.find((p) => p.path === path);
-      const entry = existing ?? { label: presetLabel(path), path };
-      await savePresets([entry, ...presets.value.filter((p) => p.path !== path)]);
+      // A ONE-ENTRY MUTATION, applied to the list on disk by the server — never a replace-all
+      // built from `presets.value`.
+      //
+      // This is the fix for a data-loss bug, so it is worth being blunt about: `presets.value` is
+      // this tab's view, and it is EMPTY until the initial GET lands, empty again if that GET
+      // fails, and stale the moment another mulmoterminal (or another tab) saves a directory.
+      // Sending it as the whole list deletes the difference from a file every instance shares —
+      // and that list is what decides which projects the server serves collections for. On
+      // 2026-08-09 a terminal launched during the first GET reduced five saved directories to
+      // one, silently.
+      //
+      // Recording is inherently "add this, keep the rest", so it is expressed that way and the
+      // rest is never in this tab's hands. That also keeps #164's guarantee — a launch during the
+      // initial GET is recorded immediately, with nothing to wait for.
+      await recordPresetOnServer(path, presetLabel(path));
     });
   }
 
   // Drop one preset (the chip's close button). No-op when the path isn't present.
   function removePreset(path: string): Promise<void> {
     return serialize(async () => {
-      if (!presets.value.some((p) => p.path === path)) return;
-      await savePresets(presets.value.filter((p) => p.path !== path));
+      // Server-side for the same reason as recordPreset: filtering this tab's copy and sending it
+      // back would drop every directory this tab had not seen.
+      await removePresetOnServer(path);
     });
   }
 
@@ -185,14 +239,30 @@ function createPresetMutations(presets: Ref<CwdPreset[]>, savePresets: (next: Cw
   // is cleared on success so a chip the user later deletes can't reappear. Dedup keeps it
   // harmless if it runs twice.
   async function migrateLegacyRecents(): Promise<void> {
+    // The list is only consulted to decide what is NEW; the writing below is per entry, so a
+    // stale read costs at most a duplicate the server then dedupes by path.
+    if (!hasAuthoritativeList()) return;
     const legacy = readLegacyRecents();
     if (!legacy.length) return;
     const known = new Set(presets.value.map((p) => p.path));
-    const additions = legacy.filter((path) => !known.has(path)).map((path) => ({ label: presetLabel(path), path }));
+    const additions = legacy.filter((path) => !known.has(path));
     let saved = true;
     if (additions.length) {
       await serialize(async () => {
-        saved = await savePresets([...additions, ...presets.value]);
+        // ONE ENTRY AT A TIME, like every other preset write. An authoritative GET describes the
+        // instant it completed: another mulmoterminal can record a directory before this
+        // migration's POST reaches the config lock, and a replace-all built from the list we read
+        // BEFORE that would delete it. This migration is purely add-only, so it has no business
+        // sending a whole list at all.
+        //
+        // REVERSED, because each record goes to the FRONT: replaying most-recent-last leaves the
+        // legacy order intact ahead of what was already saved.
+        for (const path of [...additions].reverse()) {
+          // A failure stops the import and KEEPS the localStorage key, so the whole thing is
+          // retried on the next load rather than half-migrated and forgotten.
+          saved = await recordPresetOnServer(path, presetLabel(path));
+          if (!saved) return;
+        }
       });
     }
     if (!saved) return; // keep the key so the import retries on the next load
@@ -213,6 +283,18 @@ function createPresetMutations(presets: Ref<CwdPreset[]>, savePresets: (next: Cw
 // resolves would be dropped by the stale GET.
 function createPresetManager(presets: Ref<CwdPreset[]>, saving: Ref<boolean>, error: Ref<string | null>) {
   let version = 0;
+  // True only once a GET (or our own successful save) has authoritatively populated `presets`.
+  //
+  // THIS IS THE DIFFERENCE BETWEEN RECORDING A DIRECTORY AND DELETING EVERY OTHER ONE. The save
+  // is a REPLACE-ALL POST built from `presets.value`, so writing before the list is known sends
+  // the empty default plus the one entry — and the user's whole saved-directory list becomes
+  // that single directory, on disk, in a file every mulmoterminal on the machine shares.
+  //
+  // That happened on 2026-08-09: a terminal launched while the initial GET was still in flight
+  // reduced five saved directories to one, and the collections of the other four stopped being
+  // served (they are the project list — server/infra/project-root.ts). The same guard exists in
+  // useShortcuts for the same reason, on the same kind of file.
+  let loaded = false;
 
   // Persist the directory presets. Posts only cwdPresets — the server keeps the other fields,
   // so this never clobbers them. Returns whether the save succeeded.
@@ -228,6 +310,8 @@ function createPresetManager(presets: Ref<CwdPreset[]>, saving: Ref<boolean>, er
       if (!res.ok) throw new Error(`save failed (${res.status})`);
       const saved: unknown = await res.json();
       presets.value = isRecord(saved) && isUnknownArray(saved.cwdPresets) ? saved.cwdPresets.filter(isCwdPreset) : [];
+      // The server has now told us what the list IS, so the next write may build on it.
+      loaded = true;
       version++;
       return true;
     } catch {
@@ -240,10 +324,45 @@ function createPresetManager(presets: Ref<CwdPreset[]>, saving: Ref<boolean>, er
 
   const snapshotVersion = (): number => version;
   const adoptServerPresets = (list: unknown, capturedVersion: number): void => {
-    if (version === capturedVersion) presets.value = isUnknownArray(list) ? list.filter(isCwdPreset) : [];
+    if (version !== capturedVersion) return;
+    presets.value = isUnknownArray(list) ? list.filter(isCwdPreset) : [];
+    loaded = true;
   };
 
-  return { savePresets, ...createPresetMutations(presets, savePresets), snapshotVersion, adoptServerPresets };
+  /** Apply a one-entry change on the SERVER and adopt the list it answers with. The response is
+   *  the file's real contents after the change, so this tab ends up agreeing with disk even when
+   *  its own copy was empty or stale — which is the point.
+   *
+   *  A failed call leaves the list exactly as it was: the directory is simply not recorded, and
+   *  the next launch tries again. It counts as a local write (`version++`) so a GET already in
+   *  flight cannot re-adopt the pre-change list over it (#164). */
+  async function mutateOneOnServer(url: string, body: Record<string, string>): Promise<boolean> {
+    version++;
+    try {
+      const res = await fetchWithTimeout(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      if (!res.ok) throw new Error(`save failed (${res.status})`);
+      const saved: unknown = await res.json();
+      if (isRecord(saved) && isUnknownArray(saved.cwdPresets)) {
+        presets.value = saved.cwdPresets.filter(isCwdPreset);
+        loaded = true;
+      }
+      error.value = null;
+      return true;
+    } catch {
+      error.value = "Couldn't save presets. Check the server and try again.";
+      return false;
+    }
+  }
+
+  const recordPresetOnServer = (path: string, label: string) => mutateOneOnServer("/api/config/cwd-presets/record", { path, label });
+  const removePresetOnServer = (path: string) => mutateOneOnServer("/api/config/cwd-presets/remove", { path });
+
+  return {
+    savePresets,
+    ...createPresetMutations(presets, () => loaded, recordPresetOnServer, removePresetOnServer),
+    snapshotVersion,
+    adoptServerPresets,
+  };
 }
 
 // The single-field savers each persist ONE config field and update its SINGLETON ref, so
@@ -266,13 +385,21 @@ async function savePrRepos(next: string[]): Promise<boolean> {
   if (r.ok) prRepos.value = stringsOf(r.value);
   return r.ok;
 }
+// Persist the self-hosted GitLab hosts. The server drops anything that is not a bare hostname, so
+// the echo is what lands here rather than what was sent — a rejected entry has to disappear from
+// the list, not sit there looking saved.
+async function saveGitlabHosts(next: string[]): Promise<boolean> {
+  const r = await postConfigField("gitlabHosts", next);
+  if (r.ok) gitlabHosts.value = stringsOf(r.value);
+  return r.ok;
+}
 
 // The settings that are PUSHED into other modules rather than held as refs here. Grouped for the
 // same reason as adoptSoundConfig: loadConfig should read as what the config decides, not as the
 // plumbing for each decision.
 function applyGlobalSettings(c: Record<string, unknown>): void {
-  // The Enter-key submit/newline byte mapping — read once so every terminal's key
-  // handler honours it (config.json-only; unset falls back to the standard binding).
+  // The Enter-key submit/newline byte mapping, so every terminal's key handler honours it.
+  // Unset falls back to the standard binding.
   setTerminalSubmitMode(isTerminalSubmitMode(c.terminalSubmit) ? c.terminalSubmit : DEFAULT_TERMINAL_SUBMIT_MODE);
   // Keyboard shortcuts are opt-in: no `keymap` in config.json leaves this empty and
   // every shortcut stays off.
@@ -284,14 +411,41 @@ function applyGlobalSettings(c: Record<string, unknown>): void {
   setIssueWorkComments(c.issueWorkComments);
   // How far the cockpit roster clamps each line. Absent `cockpitLines` keeps 2/2/3.
   setCockpitLines(c.cockpitLines);
-  // The terminal font stack (config.json-only, no Settings UI). Terminals already open
-  // re-fit when this lands — a different face means different cell metrics.
+  // What a header shows once a status replaces the directory's colour (#1617). The default for
+  // every directory; a `.mulmoterminal.json` naming either key outranks it per cell.
+  setHeaderStatusDefaults(c.headerStatusColors, c.headerStatusTint);
+  // The terminal font stack. Terminals already open re-fit when this lands — a different face
+  // means different cell metrics.
   setGlobalFontFamily(c.fontFamily);
   // The user's own colour schemes (#996). Re-applied after loading, because the selected id
   // may name one of these: until the config arrives it resolves to nothing, and the app is
   // painted with the default.
   setCustomThemes(c.themes);
   refreshTheme();
+}
+
+// The settings this browser only DISPLAYS — the server is what acts on each of them. They still
+// have to be adopted, because Settings shows and writes them; before there were controls, nothing
+// on this side had a reason to know their values.
+function adoptServerSideSettings(c: Record<string, unknown>): void {
+  setHeaderConfigSummary(c);
+  setPrWorkdirFooter(c.prWorkdirFooter);
+  setAppendSystemPrompt(c.appendSystemPrompt);
+  setDecisionDigest(c.decisionDigest);
+  setWorklogEnabled(c.worklogEnabled);
+  setWorklogIntervalHours(c.worklogIntervalHours);
+  setSessionIdleReapDays(c.sessionIdleReapDays);
+}
+
+// The user's own lists, adopted together — grouped like the sound and repo fields above.
+//
+// Each is filtered by the SAME guard its own save path uses. They used to differ: a save
+// validated, the load on every page open did not.
+function adoptListConfig(c: Record<string, unknown>): void {
+  launchers.value = listOf(c.launchers, isLauncher);
+  customAgents.value = listOf(c.customAgents, isCustomAgent);
+  quickCommands.value = listOf(c.quickCommands, isQuickCommand);
+  userMcpServers.value = listOf(c.userMcpServers, isUserMcpServer);
 }
 
 // The repo fields, adopted together — like adoptSoundConfig, so loadConfig keeps reading as a list
@@ -380,7 +534,9 @@ export function useAppConfig() {
 
   const { savePresets, recordPreset, removePreset, migrateLegacyRecents, snapshotVersion, adoptServerPresets } = createPresetManager(presets, saving, error);
 
-  async function loadConfig() {
+  const loadConfig = (): Promise<void> => trackConfigLoad(loadConfigOnce);
+
+  async function loadConfigOnce() {
     const version = snapshotVersion();
     try {
       const res = await fetchWithTimeout("/api/config");
@@ -390,17 +546,15 @@ export function useAppConfig() {
       const c = body;
       defaultCwd.value = typeof c.cwd === "string" ? c.cwd : null;
       home.value = typeof c.home === "string" ? c.home : null;
+      worktreesRoot.value = typeof c.worktreesRoot === "string" ? c.worktreesRoot : null;
       adoptServerPresets(c.cwdPresets, version);
       adoptSoundConfig(c);
       pushEnabled.value = c.pushEnabled === true;
-      // Each list is filtered by the SAME guard its own save path uses (postConfigField below).
-      // They used to differ: a save validated, the load on every page open did not.
       pushKinds.value = listOf(c.pushKinds, isPushKind);
       adoptRepoConfig(c);
-      launchers.value = listOf(c.launchers, isLauncher);
-      quickCommands.value = listOf(c.quickCommands, isQuickCommand);
-      userMcpServers.value = listOf(c.userMcpServers, isUserMcpServer);
+      adoptListConfig(c);
       applyGlobalSettings(c);
+      adoptServerSideSettings(c);
       await migrateLegacyRecents();
     } catch {
       // the app still works; presets are just unavailable
@@ -412,9 +566,12 @@ export function useAppConfig() {
     home,
     presets,
     prRepos,
+    gitlabHosts,
+    saveGitlabHosts,
     repoDirs,
     saveRepoDir,
     launchers,
+    customAgents,
     quickCommands,
     userMcpServers,
     ...soundSettings,

@@ -20,7 +20,15 @@ vi.mock("node:fs", () => {
     mkdir: vi.fn(async () => undefined),
     writeFile: vi.fn(async () => undefined),
   };
-  return { promises, default: { promises } };
+  // `realpathSync` is in the graph because the spawn path now resolves which directory a seeded
+  // chat runs in, and the managed-workspace check canonicalises through symlinks to answer it.
+  // Identity, not a stub returning nothing: these tests care about the route's wiring, and a
+  // realpath that invented a different path would move the answer without saying so.
+  const realpathSync = Object.assign(
+    vi.fn((p: string) => p),
+    { native: vi.fn((p: string) => p) },
+  );
+  return { promises, realpathSync, default: { promises, realpathSync } };
 });
 
 const { mountPluginRoutes } = await import("../../../server/routes/plugin-routes.js");
@@ -33,6 +41,8 @@ mountPluginRoutes(app, {
   spawnClaudePty: (() => ({})) as never,
   spawnCodexPty: (() => ({})) as never,
   spawnAntigravityPty: (() => ({})) as never,
+  spawnGrokPty: (() => ({})) as never,
+  spawnMusePty: (() => ({})) as never,
   registerBackgroundSession: () => {},
 });
 

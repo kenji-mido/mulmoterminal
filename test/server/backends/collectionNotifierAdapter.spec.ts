@@ -15,6 +15,18 @@ import {
 // deep-link builder — the three places a divergence would silently double a bell or
 // misroute a click.
 
+describe("buildPluginData carries the project", () => {
+  it("puts a named project on the navigate target", () => {
+    const data = buildPluginData({ legacyId: "x", slug: "tasks", itemId: "i", priority: "normal", project: "p1" });
+    expect(data.action.target).toEqual({ view: "collections", slug: "tasks", itemId: "i", project: "p1" });
+  });
+
+  it("OMITS the key for the workspace — the shape MulmoClaude writes and reads", () => {
+    const data = buildPluginData({ legacyId: "x", slug: "tasks", itemId: "i", priority: "normal" });
+    expect(Object.hasOwn(data.action.target, "project")).toBe(false);
+  });
+});
+
 describe("buildPluginData -> readEntry round-trip", () => {
   it("preserves a high priority", () => {
     const data = buildPluginData({ legacyId: "todo:a/b", slug: "a", itemId: "b", priority: "high" });
@@ -87,6 +99,16 @@ describe("buildNavigateTarget", () => {
 
   it("percent-encodes reserved characters in slug and itemId", () => {
     expect(buildNavigateTarget("a b/c", "x?y&z")).toBe("/collections/a%20b%2Fc?selected=x%3Fy%26z");
+  });
+
+  it("names the project after the record, so two roots' same-named collections deep-link apart", () => {
+    expect(buildNavigateTarget("tasks", "abc", "p1")).toBe("/collections/tasks?selected=abc&project=p1");
+    expect(buildNavigateTarget("tasks", "", "p1")).toBe("/collections/tasks?project=p1");
+  });
+
+  it("is byte-identical to the pre-project link when no project is named (the workspace)", () => {
+    expect(buildNavigateTarget("tasks", "abc", undefined)).toBe("/collections/tasks?selected=abc");
+    expect(buildNavigateTarget("tasks", "abc", "")).toBe("/collections/tasks?selected=abc");
   });
 });
 

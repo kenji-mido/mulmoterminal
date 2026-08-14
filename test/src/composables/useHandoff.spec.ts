@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { pickHandoffTargets, pullLastTurn, type HandoffDeps, type HandoffTarget } from "../../../src/composables/useHandoff";
+import { pickHandoffTargets, pullLastTurn, slotLabel, type HandoffDeps, type HandoffTarget } from "../../../src/composables/useHandoff";
 import type { SlotInfo } from "../../../src/composables/readableSlot";
 
 const slot = (key: string, agent: "claude" | "codex" = "claude", cwd: string | null = "/Users/me/work/proj", sessionId = `sess-${key}`): SlotInfo => ({
@@ -87,5 +87,19 @@ describe("pullLastTurn", () => {
 
   it("reports when this cell's own socket has gone", async () => {
     expect(await pullLastTurn(target(), "cell-1", deps({ paste: () => false }))).toBe("This terminal is not connected");
+  });
+});
+
+// Every seat at a round table is named the same way, including the cell that STARTS it — the
+// first live run put a bare `#0` in the framing beside `#1 · codex · …/proj`, so the message told
+// the reader "Also at the table: #0" and named something it could not identify (#1456).
+describe("slotLabel", () => {
+  it("names a slot by cell, agent and directory", () => {
+    expect(slotLabel({ key: "cell-3", sessionId: "S", cwd: "/home/u/proj", agent: "codex" }, "/home/u")).toContain("#3");
+    expect(slotLabel({ key: "cell-3", sessionId: "S", cwd: "/home/u/proj", agent: "codex" }, "/home/u")).toContain("codex");
+  });
+
+  it("falls back to cell and agent when the slot has no directory", () => {
+    expect(slotLabel({ key: "cell-1", sessionId: "S", cwd: null, agent: "claude" }, null)).toBe("#1 · claude");
   });
 });

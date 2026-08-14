@@ -6,6 +6,16 @@ export interface UpdateNoticeDeps {
   fetchLatest?: () => Promise<string | null>;
 }
 export declare function computeUpdateNotice(pkgDir: string, currentVersion: string, deps?: UpdateNoticeDeps): Promise<string | null>;
+export declare function readInstallInfo(
+  pkgDir: string,
+  currentVersion: string,
+  deps?: UpdateNoticeDeps,
+): Promise<Pick<import("../common/updateStatus.js").UpdateStatus, "install" | "version" | "commit">>;
+export declare function computeUpdateInfo(
+  pkgDir: string,
+  currentVersion: string,
+  deps?: UpdateNoticeDeps,
+): Promise<Omit<import("../common/updateStatus.js").UpdateStatus, "ready">>;
 export declare function isUpdateCheckDisabled(env: Record<string, string | undefined>): boolean;
 export declare function hasNodeModulesSegment(pkgDir: string): boolean;
 export declare function classifyInstall(pkgDir: string, isGitWorkTree: boolean): "npm" | "git";

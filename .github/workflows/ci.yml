@@ -26,6 +26,17 @@ jobs:
 
       - run: yarn install --frozen-lockfile
 
+      # A per-run key with a prefix restore, so each run picks up the newest previous cache and
+      # saves its own. Deliberately NOT keyed on file contents: reuse across commits that changed
+      # source is the whole saving, and eslint already decides per file what is still valid —
+      # including dropping the lot when eslint.config.js changes.
+      - uses: actions/cache@v5
+        with:
+          path: .eslintcache
+          key: eslint-cache-${{ runner.os }}-${{ github.run_id }}
+          restore-keys: |
+            eslint-cache-${{ runner.os }}-
+
       - name: Lint
         run: yarn lint
 

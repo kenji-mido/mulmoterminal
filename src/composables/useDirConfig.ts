@@ -5,9 +5,11 @@ import { isThemeIdLike } from "../../common/themeVars";
 // Shared with the server config schema so the two can't drift — see common/themeColors.ts.
 import { THEME_COLOR_KEYS } from "../../common/themeColors";
 import { EMPTY_DIR_CHROME, type DirChrome } from "../../common/dirChrome";
+import { sanitizeHeaderStatusColors, sanitizeHeaderStatusTint, type HeaderStatusColors } from "../../common/headerStatusColors";
 import { normalizeFontSize } from "../../common/terminalFontSize";
 import { normalizeFontFamily } from "../../common/terminalFontFamily";
 import { normalizeOrderPriority } from "../../common/orderPriority";
+import { isUsableDirIconSrc } from "../../common/dirIcon";
 import { isRecord } from "../../common/isRecord";
 import { dirChipColor } from "../components/dirChipColor";
 import { fetchWithTimeout } from "../utils/fetchWithTimeout";
@@ -23,9 +25,19 @@ export interface DirConfig extends DirChrome {
   // Per-key xterm palette overrides applied on top of `theme` (or the app theme).
   colors: Partial<ITheme> | null;
   hasSound: boolean;
+  // Ready for an `<img src>` — this app's /api/dir-icon route, or the remote URL the directory
+  // named. The file path itself never reaches the browser, same as the attention sound's.
+  iconUrl: string | null;
 }
 
-const EMPTY: DirConfig = { ...EMPTY_DIR_CHROME, theme: null, colors: null, hasSound: false };
+const EMPTY: DirConfig = { ...EMPTY_DIR_CHROME, theme: null, colors: null, hasSound: false, iconUrl: null };
+
+// null, not `{}`, when nothing is configured: that is what lets mergeHeaderStatusColors tell
+// "this directory says nothing" from "this directory says exactly nothing applies".
+function dirStatusColors(input: unknown): HeaderStatusColors | null {
+  const colors = sanitizeHeaderStatusColors(input);
+  return Object.keys(colors).length ? colors : null;
+}
 
 function parseColors(input: unknown): Partial<ITheme> | null {
   if (!isRecord(input)) return null;
@@ -67,6 +79,11 @@ function parse(c: unknown): DirConfig {
     badgeColor: typeof c.badgeColor === "string" ? c.badgeColor : null,
     headerColor: typeof c.headerColor === "string" ? c.headerColor : null,
     headerTextColor: typeof c.headerTextColor === "string" ? c.headerTextColor : null,
+    // Re-sanitized here rather than trusted, for the reason `fontSize` states below: the server
+    // validates, but this parser is the boundary, and these values are written into a style
+    // declaration.
+    headerStatusColors: dirStatusColors(c.headerStatusColors),
+    headerStatusTint: sanitizeHeaderStatusTint(c.headerStatusTint),
     cellColor: typeof c.cellColor === "string" ? c.cellColor : null,
     cellBorderColor: typeof c.cellBorderColor === "string" ? c.cellBorderColor : null,
     dotColor: typeof c.dotColor === "string" ? c.dotColor : null,
@@ -79,6 +96,9 @@ function parse(c: unknown): DirConfig {
     theme: isThemeIdLike(c.theme) ? c.theme : null,
     colors: parseColors(c.colors),
     hasSound: c.hasSound === true,
+    // Re-checked here for the same reason `fontSize` is re-clamped: this parser is the boundary
+    // between the wire and the DOM, and this value goes straight into an `<img src>`.
+    iconUrl: isUsableDirIconSrc(c.iconUrl) ? c.iconUrl : null,
   };
 }
 
@@ -213,6 +233,12 @@ export function useDirPriorities(cwds: Ref<string[]>) {
 // configured colours wins. Directories that configured none are absent, and stay uncoloured.
 export function useDirColors(cwds: Ref<string[]>) {
   return { colors: useDirField(cwds, dirChipColor) };
+}
+
+// The icon image for each directory (#1421), for the launch chips — which show directories that
+// have no cell of their own, so they can't read one cell's config.
+export function useDirIcons(cwds: Ref<string[]>) {
+  return { icons: useDirField(cwds, (config) => config.iconUrl) };
 }
 
 // One process-wide subscription, established by the first cell that asks for a dir config.

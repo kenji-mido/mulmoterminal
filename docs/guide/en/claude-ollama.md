@@ -2,7 +2,7 @@
 title: Local models with claude-ollama
 layout: default
 parent: English
-nav_order: 12
+nav_order: 16
 description: Run Claude Code against a fully local model with claude-ollama and Ollama.
 ---
 

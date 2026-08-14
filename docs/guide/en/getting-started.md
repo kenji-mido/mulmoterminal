@@ -288,7 +288,8 @@ npx mulmoterminal@latest init
 ```
 
 - Reports your Node version and `claude` / `git` / `gh` / `glab` / `tmux` / `codex` /
-  `ffmpeg` / `ollama` as **`✓` (found), `✗` (required, missing), `○` (optional)**
+  `ffmpeg` / `ollama` as **`✓` (found), `✗` (required, missing), `○` (optional)** — plus, on
+  Linux, whatever this host opens a file dialog with
 - Seeds the launcher's **directory presets** from your Claude Code history
 - Writes `~/.mulmoterminal/config.json`, keeping your other settings
 - With `claude` installed, offers to hand off to the `/mulmoterminal-config` skill
@@ -379,6 +380,7 @@ costs you that one feature.
 | Optional | `codex` | [Codex sessions](basics.html#claude-and-codex) in a cell, alongside Claude | `npm i -g @openai/codex` |
 | Optional | `ffmpeg` | video rendering from the [GUI panel](features.html)'s mulmo-script plugin | `brew install ffmpeg` · `sudo apt install ffmpeg` |
 | Optional | `ollama` | [claude-ollama](claude-ollama.html) — Claude Code against a fully local model | [ollama.com/download](https://ollama.com/download) |
+| Linux only | a file dialog | the **Choose a folder** / **Insert a file path** buttons, which open an OS dialog on the machine the server runs on. macOS and Windows have one built in, and **WSL** uses the Windows one — nothing to install. A Linux desktop needs one; without any, the buttons say so and you type the path instead | `sudo apt install zenity` · `sudo dnf install zenity` · `kdialog`, `qarma` and `yad` also work |
 
 [`init`](#init) reports which of these it can find on this machine.
 

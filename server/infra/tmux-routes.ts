@@ -1,5 +1,7 @@
 import type { Express } from "express";
 import { requestOriginAllowed } from "../routes/same-origin-guard.js";
+import type { SurvivingSession } from "../../common/survivingSessions.js";
+import type { ReapSweepResult } from "../session/reap-idle-sessions.js";
 
 // Deps injected from index.ts so the origin guard, session-id validation, and the
 // orphan-selection boundary are unit-testable without booting the server (mirrors
@@ -11,18 +13,17 @@ export interface TmuxRouteDeps {
   reapSession: (id: string) => void;
   hasTmux: (id: string) => boolean;
   killTmux: (id: string) => void;
-  listTmuxIds: () => string[];
-  // Clients attached to a tmux session, or null when tmux can't say. Each mulmoterminal
-  // holds ONE client per session it is live on; the cleanup only reaches ids this process
-  // is NOT live on, so any count >= 1 means ANOTHER process is holding it.
-  attachedClientCount: (id: string) => number | null;
-  // Build the resumability predicate for a cleanup pass (awaits any hydration, snapshots
-  // the live / grid / on-disk sets). A tmux id is reaped only when it returns false.
-  resumablePredicate: () => Promise<(id: string) => boolean>;
   // Persist a user hide (hidden-store) / remove the session's transcripts (transcript-delete).
   // Injected like the rest so the hide/delete routes are unit-testable.
   hideSession: (id: string) => void;
   deleteTranscripts: (id: string) => boolean;
+  // Run the same sweep the server runs at boot, and say what it did. The route used to carry the
+  // decision itself, against a predicate made of permanent records — which is why it reaped almost
+  // nothing (#1467). One rule now, in session/reap-idle-sessions.ts.
+  sweep: () => ReapSweepResult;
+  // Every surviving tmux session, annotated for the Settings list (#1478). Injected like the rest,
+  // so the route is testable without tmux, a registry or a clock.
+  survivingSessions: () => Promise<SurvivingSession[]>;
 }
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -32,16 +33,6 @@ const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const DELETE_TMUX_WAIT_TRIES = 20;
 const DELETE_TMUX_WAIT_STEP_MS = 100;
 const DELETE_STRAGGLER_SWEEP_MS = 2000;
-
-// Whether an orphan tmux session is safe to reap. Not resumable is necessary but not
-// sufficient: a second mulmoterminal process may have just created it (no transcript yet)
-// and be attached to it. We only reach here for ids THIS process isn't live on, so any
-// attached client is someone else — and a null count (tmux couldn't say) is treated as
-// "held", never killing what we can't confirm is free. Pure, hence unit-testable.
-export function orphanReapable(resumable: boolean, attachedCount: number | null): boolean {
-  if (resumable) return false;
-  return attachedCount === 0;
-}
 
 export function mountTmuxRoutes(app: Express, deps: TmuxRouteDeps): void {
   // Explicit close (the cell's close button): reap NOW — kill the pty AND its tmux — instead of
@@ -88,20 +79,26 @@ export function mountTmuxRoutes(app: Express, deps: TmuxRouteDeps): void {
     return res.json({ ok: true, removed });
   });
 
-  // One-shot cleanup of orphaned tmux sessions: reap any that is neither live nor
-  // resumable (a persisted grid session, or a Claude/Codex transcript on disk). These
-  // accumulate across server restarts, which the in-memory reap bookkeeping can't reach.
-  app.post("/api/tmux/cleanup-orphans", async (req, res) => {
+  // Every session that outlived the server, for the Settings list (#1478). A GET, and read-only:
+  // what it shows is what the other two routes act on, which is why it is mounted beside them.
+  //
+  // The guard is asked exactly as its neighbours ask it, and — being a safe method — EXEMPT, the
+  // same way google.ts's GET /status is (#1094): a cross-site `<img>` sends no Origin header and
+  // neither does a legitimate local fetch, so refusing by origin would block the second without
+  // stopping the first. What keeps this list private is that a cross-origin caller cannot READ the
+  // reply; the rule lives in routes/same-origin-guard.ts.
+  app.get("/api/tmux/sessions", async (req, res) => {
     if (!requestOriginAllowed(req, deps.isAllowedOrigin)) return res.status(403).json({ error: "forbidden origin" });
-    const isResumable = await deps.resumablePredicate();
-    const killed: string[] = [];
-    for (const id of deps.listTmuxIds()) {
-      // Skip a session another running mulmoterminal is attached to — killing it would
-      // yank a live session out from under that process (#747).
-      if (!orphanReapable(isResumable(id), deps.attachedClientCount(id))) continue;
-      deps.killTmux(id);
-      killed.push(id);
-    }
-    return res.json({ killed, killedCount: killed.length });
+    return res.json({ sessions: await deps.survivingSessions() });
+  });
+
+  // The same sweep on demand: end every session nothing is using — nobody attached, no pty of
+  // ours, no output for the configured number of days. The server runs it at boot; this is the way
+  // to run it without restarting.
+  app.post("/api/tmux/cleanup-orphans", (req, res) => {
+    if (!requestOriginAllowed(req, deps.isAllowedOrigin)) return res.status(403).json({ error: "forbidden origin" });
+    const { reaped } = deps.sweep();
+    // `killed` keeps its name: this route's answer is read by whatever anyone wired to it before.
+    return res.json({ killed: reaped, killedCount: reaped.length });
   });
 }

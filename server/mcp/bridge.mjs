@@ -11,19 +11,70 @@
 // is the user's project and has no tsx. Nothing here needs compiling, so nothing does.
 import { createInterface } from "node:readline";
 
-// The GROUP is static per server entry and comes from the config file's own `env` block; the
-// SESSION is dynamic and comes from the agy process this was spawned by. That split is the whole
-// reason one shared file can serve every session in a directory.
-const port = process.env.MULMOTERMINAL_PORT;
-const sessionId = process.env.MULMOTERMINAL_SESSION_ID;
-const group = process.env.MULMOTERMINAL_TOOL_GROUP;
+// TWO WAYS IN, because the hosts differ in what they can hand a child process.
+//
+//   agy and grok write the group into the server entry's own `env` block, and the SESSION reaches
+//   this process by inheritance: the bridge is a child of the agent, which was spawned with
+//   guiMcpEnv. One shared config file therefore serves every session in a directory.
+//
+//   muse hands over NOTHING. Its registration is a plugin, and a plugin's MCP server is started
+//   with a curated environment — measured at 16 variables, all muse's own — so neither the muse
+//   process's environment nor the manifest's own `env` block arrives here. What is ours is the
+//   COMMAND LINE, so the group and the port come in as `--group` and `--port`, and the session is
+//   asked for: /api/mcp-resolve maps this process's own pid back to the session whose pane — or
+//   whose pty — it is running under (server/session/bridge-session.ts). NOT `/api/mcp/resolve`:
+//   that path is one segment and `/api/mcp/:sessionId` answers it with a 400.
+const argv = process.argv.slice(2);
+const flag = (name) => (argv.indexOf(name) >= 0 ? argv[argv.indexOf(name) + 1] : undefined);
+const port = flag("--port") || process.env.MULMOTERMINAL_PORT;
+const group = flag("--group") || process.env.MULMOTERMINAL_TOOL_GROUP;
+const envSessionId = process.env.MULMOTERMINAL_SESSION_ID;
 
-// Both segments are encoded and both are REQUIRED. They arrive from a config file on disk, which
-// a user can edit by hand, so a missing group must read as an error rather than build a path with
-// the literal text "undefined" in it — and a value carrying `/` or `..` must not steer the request
-// somewhere other than the tool-group route it names.
-const missing = ["MULMOTERMINAL_SESSION_ID", "MULMOTERMINAL_TOOL_GROUP", "MULMOTERMINAL_PORT"].find((name) => !process.env[name]) ?? null;
-const url = missing ? null : `http://127.0.0.1:${port}/api/mcp/${encodeURIComponent(group)}/${encodeURIComponent(sessionId)}`;
+// The group is encoded into the URL path, so a value carrying `/` or `..` must not steer the
+// request somewhere other than the tool-group route it names; the port is needed to build one at
+// all. The SESSION is not checked here — it may still be resolved below.
+let missing = null;
+if (!group) missing = "the tool group";
+else if (!port) missing = "the mulmoterminal port";
+
+const origin = `http://127.0.0.1:${port}`;
+const groupUrl = (session) => `${origin}/api/mcp/${encodeURIComponent(group)}/${encodeURIComponent(session)}`;
+
+/**
+ * Who this bridge is serving, and what that session may reach.
+ *
+ * Asked ONCE and remembered: a session cannot change under a running bridge — the bridge dies with
+ * the agent process that started it — and this is on the path of every tool call.
+ *
+ * A session that cannot be resolved is not an error. A muse the user started in a plain terminal
+ * has a plugin registration and no session, and the honest answer there is a server with no tools
+ * rather than a broken one.
+ */
+// The PROMISE is cached, not its result. Requests arrive on a line reader and are handled
+// concurrently, so caching the answer still lets the first few calls of a session each start their
+// own resolve — three tools/list at once asked three times (caught by the spec).
+let resolving = null;
+function session() {
+  if (envSessionId) return Promise.resolve({ sessionId: envSessionId, groups: null });
+  resolving ??= (async () => {
+    try {
+      const res = await fetch(`${origin}/api/mcp-resolve`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ pid: process.pid, cwd: process.cwd() }),
+      });
+      const body = res.ok ? await res.json() : {};
+      return { sessionId: body.sessionId ?? null, groups: Array.isArray(body.groups) ? body.groups : [] };
+    } catch {
+      return { sessionId: null, groups: [] };
+    }
+  })();
+  return resolving;
+}
+
+// Which groups THIS SESSION may reach. `null` means the host did not say — agy and grok are already
+// narrowed by the config file they read, and adding an opinion here would withhold their tools.
+const entitled = (groups) => groups === null || groups.includes(group);
 
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\n");
 
@@ -47,13 +98,35 @@ function responses(body) {
     .filter(Boolean);
 }
 
+// A session that cannot be resolved, or a group it is not entitled to, answers as a HEALTHY server
+// with no tools rather than as an error. The distinction matters because muse starts all four of
+// them for every session: erroring would show three broken servers in a session that switched one
+// group on, which reads as a bug in the app. An empty toolset reads as what it is.
+function standDown(id, method, reason) {
+  if (id === undefined || id === null) return;
+  if (method === "initialize")
+    return send({
+      jsonrpc: "2.0",
+      id,
+      result: { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: `mulmoterminal-${group}`, version: "0" } },
+    });
+  if (method === "tools/list") return send({ jsonrpc: "2.0", id, result: { tools: [] } });
+  return fail(id, `mulmoterminal: ${reason}`);
+}
+
 createInterface({ input: process.stdin, terminal: false }).on("line", async (line) => {
   if (line.trim() === "") return;
   let id;
   try {
-    id = JSON.parse(line).id;
+    const message = JSON.parse(line);
+    id = message.id;
     if (missing) return fail(id, `mulmoterminal: ${missing} is not set — this MCP server only runs inside a mulmoterminal session`);
-    const res = await fetch(url, {
+
+    const { sessionId, groups } = await session();
+    if (!sessionId) return standDown(id, message.method, "no mulmoterminal session owns this process");
+    if (!entitled(groups)) return standDown(id, message.method, `the ${group} tools are not switched on for this session`);
+
+    const res = await fetch(groupUrl(sessionId), {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json, text/event-stream" },
       body: line,

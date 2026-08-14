@@ -10,11 +10,13 @@ defineProps<{
   // `title` is the command behind the chip, shown on hover.
   chips: { key: string | number; label: string; title: string }[];
 }>();
+import { LAUNCH_ROW } from "./launchFormClasses";
+
 const emit = defineEmits<{ (e: "pick", index: number): void }>();
 </script>
 
 <template>
-  <div v-if="chips.length" class="flex w-full max-w-[360px] flex-col items-center gap-1.5">
+  <div v-if="chips.length" class="flex flex-col items-center gap-1.5" :class="LAUNCH_ROW">
     <span class="font-sans text-[11px] uppercase tracking-[0.05em] text-dim">{{ heading }}</span>
     <div class="flex w-full flex-wrap justify-center gap-1.5">
       <button

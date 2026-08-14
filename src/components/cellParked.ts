@@ -26,7 +26,8 @@ export function isCellSunk(parked: boolean, status: AttentionStatus): boolean {
 // Opacity ALONE. Every status branch in TerminalCell (CELL_STATUS / HEADER_STATUS / DOT_STATUS)
 // names its own border, background and ink, and two utilities setting one property are resolved
 // by Tailwind's output order rather than by intent — so the sunk look may only use a property
-// none of them touch.
+// none of them touch. That rule is why a cell being REMOVED (#1551) shares this one class rather
+// than adding a second opacity of its own: same property, so one caller has to win.
 export const SUNK_CELL = "opacity-40";
 
 // The dot while sunk. A second complete map rather than a conditional edit of DOT_STATUS, so

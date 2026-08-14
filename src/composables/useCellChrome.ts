@@ -16,6 +16,9 @@ export function useCellChrome(cwd: Ref<string | null | undefined>) {
     // Emitted as variables rather than plain background/border, so a status tint (working /
     // blocked) still overrides while idle keeps the directory's colour.
     cellStyle: computed(() => cellStyleFor(config.value.cellColor, config.value.cellBorderColor, config.value.dotColor, config.value.buttonColor)),
+    // The cells that take their header style from here (CellShell's command / launcher cells)
+    // paint the directory's colour in every state. TerminalCell is the exception — a status
+    // replaces its header background, so it resolves its own per status.
     headerStyle: computed(() => headerStyleFor(config.value.headerColor, config.value.headerTextColor)),
   };
 }

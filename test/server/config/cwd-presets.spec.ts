@@ -92,6 +92,29 @@ describe("deriveCwdPresets", () => {
     ]);
   });
 
+  // The second door onto the same list: `mulmoterminal init` seeds it from Claude's history, and a
+  // session run inside a worktree would put that task branch among the user's real projects — the
+  // browser's auto-record already refuses it, and both ask the one predicate in common/.
+  //
+  // The root is passed in rather than taken from MULMOTERMINAL_HOME, so this pins the rule without
+  // depending on where the test process thinks home is.
+  const WORKTREES_ROOT = "/home/me/.mulmoterminal/worktrees";
+
+  it("drops a managed worktree, keeping the repository it came from", () => {
+    const records = [
+      { cwd: "/home/me/myrepo", mtimeMs: 100 },
+      { cwd: `${WORKTREES_ROOT}/myrepo-1a2b3c4d/fix-bug`, mtimeMs: 300 },
+    ];
+    expect(deriveCwdPresets(records, () => true, 10, WORKTREES_ROOT)).toEqual([{ label: "myrepo", path: "/home/me/myrepo" }]);
+  });
+
+  // Anchored on the root, so a directory laid out the same way somewhere else stays a real working
+  // directory (Codex on #1543).
+  it("keeps a same-shaped directory outside the managed root", () => {
+    const outside = "/home/me/dev/worktrees/myrepo-1a2b3c4d/fix-bug";
+    expect(deriveCwdPresets([{ cwd: outside, mtimeMs: 1 }], () => true, 10, WORKTREES_ROOT)).toEqual([{ label: "fix-bug", path: outside }]);
+  });
+
   it("labels with the trailing segment (handles hyphenated dir names)", () => {
     expect(deriveCwdPresets([{ cwd: "/x/my-app", mtimeMs: 1 }], () => true)).toEqual([{ label: "my-app", path: "/x/my-app" }]);
   });

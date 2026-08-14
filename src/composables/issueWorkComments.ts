@@ -1,10 +1,10 @@
-// Whether MulmoTerminal may comment on the issue a cell is working on (#979), hydrated once from
-// /api/config. A plain module value for the same reasons as copyOnSelect.ts: nothing renders it,
-// one answer applies to every cell, and the composable that acts on it stays free of the config
-// layer.
-let enabled = false;
+import { createGlobalFlag } from "./globalFlag";
 
-export const isIssueWorkCommentsEnabled = (): boolean => enabled;
-export const setIssueWorkComments = (value: unknown): void => {
-  enabled = value === true;
-};
+// Whether MulmoTerminal may comment on the issue a cell is working on (#979). Off unless asked
+// for — it writes to GitHub, on issues that are often somebody else's.
+const flag = createGlobalFlag("issueWorkComments", false);
+
+export const issueWorkComments = flag.state;
+export const isIssueWorkCommentsEnabled = flag.read;
+export const setIssueWorkComments = flag.set;
+export const saveIssueWorkComments = flag.save;

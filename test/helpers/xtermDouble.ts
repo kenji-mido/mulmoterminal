@@ -50,6 +50,8 @@ export interface XtermTermState {
   bufferLength: number;
   bufferBaseY: number;
   bufferCursorY: number;
+  /** The wheel guard's buffer-change subscriber, so a spec can fire the transition. */
+  onBufferChange: (() => void) | null;
   /** How many terminals the manager has constructed for this state. The rebuild (#846) is
    *  otherwise invisible from outside: it swaps `c.term` for a fresh one behind the slot key. */
   constructed: number;
@@ -73,9 +75,27 @@ export function createXtermState(): { termState: XtermTermState; keyState: Xterm
       bufferLength: 24,
       bufferBaseY: 0,
       bufferCursorY: 0,
+      onBufferChange: null,
       constructed: 0,
     },
     keyState: { handler: () => true },
+  };
+}
+
+// The buffer namespace the manager reads: `active` for the #846 health probe, and
+// `onBufferChange` for the wheel guard's scroll-debt reset (#1546). Its own function so the
+// module factory below stays inside the line budget.
+function bufferNamespace(termState: XtermTermState) {
+  return {
+    active: {
+      type: termState.bufferType,
+      length: termState.bufferLength,
+      baseY: termState.bufferBaseY,
+      cursorY: termState.bufferCursorY,
+    },
+    onBufferChange(fn: () => void) {
+      termState.onBufferChange = fn;
+    },
   };
 }
 
@@ -116,14 +136,7 @@ export function xtermModule(termState: XtermTermState, keyState: XtermKeyState) 
         termState.wheelHandler = fn;
       }
       get buffer() {
-        return {
-          active: {
-            type: termState.bufferType,
-            length: termState.bufferLength,
-            baseY: termState.bufferBaseY,
-            cursorY: termState.bufferCursorY,
-          },
-        };
+        return bufferNamespace(termState);
       }
       // The clipboard decision asks the terminal whether anything is selected (#900), so the
       // double has to answer. Selection-specific behaviour is covered in terminalClipboard.spec.

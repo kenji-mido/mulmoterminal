@@ -29,10 +29,12 @@ export interface GuiCallRecorder {
  * Should the broker record this session's GUI tool calls itself?
  *
  * The question is NOT "is this codex or agy" — that was the first version of this gate and it was
- * wrong. A codex LAUNCHER CHIP runs `zsh -lc exec codex …` (ws-routes.ts hands it the same GUI MCP
- * URLs), so its PtyEntry is honestly labelled `"shell"`, and matching on the agent name left that
- * cell — a real codex session, calling our tools — with an empty pane while the agent-toggle one
- * worked. No agent name identifies a session started by a command the user wrote.
+ * wrong: it asked what a session IS, when what matters is who is already writing its history.
+ *
+ * (It was wrong for a second reason that has since gone away. A launcher chip running codex used to
+ * be handed the GUI MCP too, while its PtyEntry said `"shell"`, so matching on the agent name left
+ * a real codex session with an empty pane. Chips get no GUI MCP now and call no tools of ours, so
+ * they reach this gate with nothing to record either way.)
  *
  * The real question is whether something ELSE is already recording these calls, and exactly one
  * thing does: claude's `--settings` hooks. So the gate is an exclusion, on two independent

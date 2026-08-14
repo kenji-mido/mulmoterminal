@@ -9,12 +9,21 @@
 import { computed, ref } from "vue";
 import { MODAL_FOCUSABLE } from "../utils/focusTrap";
 import { useModalKeyboard } from "../composables/useModalKeyboard";
+import { notOfferedReason } from "./launchOffer";
 import type { LaunchProviderOption } from "../../common/launchOptions";
 
 const props = defineProps<{ providers: LaunchProviderOption[] }>();
 const emit = defineEmits<{ (e: "close"): void }>();
 
-const blocked = computed(() => props.providers.filter((provider) => !provider.ready));
+// Every configured backend the picker does not offer, each with its own sentence — a missing
+// key, an unusable base URL, or nothing to pick. The last one used to be invisible: the picker
+// showed the provider's name over an empty list, and the help said nothing at all (#1432).
+const notOffered = computed(() =>
+  props.providers.flatMap((provider) => {
+    const reason = notOfferedReason(provider);
+    return reason === null ? [] : [{ id: provider.id, reason }];
+  }),
+);
 
 const CONFIG_EXAMPLE = `{
   "providers": [
@@ -63,10 +72,10 @@ useModalKeyboard({ modalEl, onClose: () => emit("close"), trapSelector: MODAL_FO
         <em>server</em> was started with — never from a file it serves.
       </p>
 
-      <!-- The one sentence that matters when something is already configured but unusable. -->
-      <section v-if="blocked.length" class="flex flex-col gap-1.5 rounded-md border border-border bg-elevated p-3">
+      <!-- The one sentence that matters about a backend that is configured and still not offered. -->
+      <section v-if="notOffered.length" class="flex flex-col gap-1.5 rounded-md border border-border bg-elevated p-3">
         <span class="font-sans text-[11px] uppercase tracking-[0.05em] text-dim">Needs attention</span>
-        <p v-for="provider in blocked" :key="provider.id" class="m-0 font-mono text-[11px] leading-relaxed text-fg">{{ provider.reason }}</p>
+        <p v-for="provider in notOffered" :key="provider.id" class="m-0 font-mono text-[11px] leading-relaxed text-fg">{{ provider.reason }}</p>
       </section>
 
       <section class="flex flex-col gap-1.5">
@@ -82,6 +91,11 @@ useModalKeyboard({ modalEl, onClose: () => emit("close"), trapSelector: MODAL_FO
         <p class="m-0 font-sans text-[11px] leading-relaxed text-secondary">
           <code class="font-mono">baseUrl</code> must not end in <code class="font-mono">/v1</code> — Claude Code appends
           <code class="font-mono">/v1/messages</code> itself. <code class="font-mono">tokenEnv</code> is the <em>name</em> of the variable holding the key.
+        </p>
+        <p class="m-0 font-sans text-[11px] leading-relaxed text-secondary">
+          The measured models below come with the id <code class="font-mono">openrouter</code> and no other. Under any other <code class="font-mono">id</code>,
+          add the ids you want to run — <code class="font-mono">"models": ["deepseek-chat"]</code> — or the picker has nothing to offer. Ids may contain
+          letters, digits and <code class="font-mono">. _ : / - ~</code>; anything else in the list is dropped, and the server's log says which.
         </p>
       </section>
 

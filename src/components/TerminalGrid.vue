@@ -15,12 +15,15 @@ import type { RunCommand } from "./runCommand";
 import type { PrPhase, WorkPhase } from "./rosterPhase";
 import type { CwdPreset } from "./presets";
 import type { Launcher, LaunchPick } from "./launchers";
+import type { CustomAgent } from "../../common/customAgents";
 import { shouldFlipZoom } from "./cellChromeRules";
 import { rosterAlertClass } from "./rosterAlertClasses";
 import { useRosterAlert } from "../composables/useRosterAlert";
 import { formatCwd } from "./cwdDisplay";
 import FilesPane, { type FilesPaneState } from "./FilesPane.vue";
 import GuiPanel from "./GuiPanel.vue";
+import CollectionsPane from "./CollectionsPane.vue";
+import GithubPane from "./GithubPane.vue";
 import ToolsPane from "./ToolsPane.vue";
 import {
   clampPaneWidth,
@@ -39,11 +42,11 @@ import { paneCanShowClick } from "./paneClickTarget";
 import { onToolGroupsAnnounced } from "../composables/useToolGroupsAnnounce";
 import { usePubSub } from "../composables/usePubSub";
 import { isDrawnResult } from "../utils/drawnResult";
-import { hasCanvasGroup } from "../../common/toolGroups";
+import { hasCanvasGroup, hasCollectionsGroup } from "../../common/toolGroups";
 import type { RightPane } from "./gridCell";
 import { parsePaneStore, rememberPane, recallPane } from "./filesPaneStore";
 import { isRecord } from "../../common/isRecord";
-import type { TerminalAgent } from "../../common/sessionAgent";
+import type { SessionAgent, TerminalAgent } from "../../common/sessionAgent";
 import { buildCanvasCard, seedCanvasCard, hasStoredCard, absoluteUnder } from "../composables/canvasOpenFile";
 import { jsonBody } from "../jsonBody";
 import { isUnknownArray } from "../../common/isUnknownArray";
@@ -60,7 +63,10 @@ import { fetchWithTimeout } from "../utils/fetchWithTimeout";
 export interface CockpitRow {
   uid: number;
   cwd: string | null;
-  agent: string;
+  // What the row runs: an agent, "shell" for a launcher or a run-command cell, or null for a cell
+  // that has launched nothing yet. Null rather than a default, so the header can decline to mark
+  // a row it cannot name — see rosterAgent() in GridView.vue.
+  agent: SessionAgent | null;
   status: AttentionStatus;
   memo: string | null; // the user's own one-line note (#1084)
   summary: string | null; // AI title
@@ -71,6 +77,7 @@ export interface CockpitRow {
   workPhase: WorkPhase | null; // planning vs editing while working; null when unknown / not working
   headerColor: string | null; // the directory's configured header background, tinting the row
   headerTextColor: string | null; // and its text colour, so the row stays legible on that tint
+  iconUrl: string | null; // the directory's `icon` image (#1421), or null when it sets none
   parked: boolean; // set aside by the user (#992) — the row sinks, unless it is blocked
 }
 const props = defineProps<{
@@ -82,6 +89,10 @@ const props = defineProps<{
   defaultCwd: string | null;
   presets: CwdPreset[];
   launchers: Launcher[];
+  // The user's own ways of starting Claude Code, for the Agent Picker in an empty cell (#1414).
+  // Optional, unlike `launchers`: an install with none configured is the normal case, and the
+  // picker's built-in options are the whole list then.
+  customAgents?: CustomAgent[];
   home: string | null;
   // Manual sort mode: each cell shows move buttons to reorder.
   reorderable?: boolean;
@@ -183,7 +194,8 @@ const remember = (key: string, value: string): void => {
 //   files  — the file tree/editor (the original occupant).
 //   canvas — what the agent DREW: the GUI plugin views for this cell's session.
 //   tools  — which GUI tools this session actually has, read-only.
-const isRightPane = (value: unknown): value is RightPane => value === "files" || value === "canvas" || value === "tools";
+const isRightPane = (value: unknown): value is RightPane =>
+  value === "files" || value === "canvas" || value === "tools" || value === "collections" || value === "github";
 
 // Which cell the pane is on — the identity everything else hangs off. The UID rather than the
 // directory: two terminals in the same repository is the ordinary case here, and keying on the
@@ -254,7 +266,8 @@ function restoreSessionPane(uid: number): void {
 // where you asked for it, and the thing it hid is the thing you were working in. So it lasts as
 // long as the pane does — closing it, or switching to another one, is the end of the takeover.
 const paneExpanded = ref(false);
-const paneFull = computed(() => paneExpanded.value && (rightPane.value === "canvas" || rightPane.value === "tools"));
+// Collections joins canvas/tools in the full-width mode: it is a browser, not a sidebar strip.
+const paneFull = computed(() => paneExpanded.value && rightPane.value !== null && rightPane.value !== "files");
 function togglePaneExpanded(): void {
   paneExpanded.value = !paneExpanded.value;
 }
@@ -477,12 +490,20 @@ const canvasChecked = ref(false);
 const canvasHasCard = ref(false);
 /** Whether the Canvas button can be pressed: the tools say so, or there is already a card. */
 const canvasOpenable = computed(() => canvasAvailable.value || canvasHasCard.value);
+// Whether this cell's directory registered the `data` MCP group, i.e. whether the agent beside
+// the pane can manage collections at all. Answered from the SAME reply as the canvas question —
+// one request, two groups — so the two buttons can never disagree about what a session has.
+const collectionsAvailable = ref(false);
+
 watch(
   [expandedSessionId, () => props.expandedUid],
   async ([sessionId]) => {
     canvasAvailable.value = false;
     canvasChecked.value = false;
     canvasHasCard.value = false;
+    // A cell with no session has no MCP client and therefore no groups: no Collections button,
+    // which is the honest answer rather than one that opens a pane the agent cannot act on.
+    collectionsAvailable.value = false;
     if (!sessionId) return;
     // Asked beside the tools question rather than folded into it: `/api/tools` answers what the
     // session CAN draw, this answers what it already HAS. A failure here leaves the flag false —
@@ -505,11 +526,15 @@ watch(
       // presentCollection, which belongs to `data` and draws nothing without the collection
       // store behind it.
       canvasAvailable.value = hasCanvasGroup(body.groups);
+      collectionsAvailable.value = hasCollectionsGroup(body.groups);
       canvasChecked.value = true;
     } catch {
       // Unreachable server: no button rather than one that opens an empty panel. Left unchecked
       // so the panel does not blame the session for what is our own failure to ask.
-      if (sessionId === expandedSessionId.value) canvasAvailable.value = false;
+      if (sessionId === expandedSessionId.value) {
+        canvasAvailable.value = false;
+        collectionsAvailable.value = false;
+      }
     }
   },
   { immediate: true },
@@ -525,6 +550,7 @@ onToolGroupsAnnounced((announcement) => {
   // "my MCP client is up" one is a cue to ask again, not an empty answer.
   if (!announcement.groups) return;
   canvasAvailable.value = hasCanvasGroup(announcement.groups);
+  collectionsAvailable.value = hasCollectionsGroup(announcement.groups);
   canvasChecked.value = true;
 });
 
@@ -544,6 +570,10 @@ const gridCellProps = (cell: Cell) => ({
   filesOpen: paneOf(cell.uid) === "files",
   rightPane: paneOf(cell.uid),
   canvasAvailable: canvasOpenable.value,
+  // The raw answer. The "an open pane must keep its only close" clause is CellChromeButtons'
+  // own, where the button is rendered and where `rightPane` names that cell's pane rather than
+  // the one the grid happens to be showing.
+  collectionsAvailable: collectionsAvailable.value,
   zoomed: zoomed.value,
   home: props.home,
   // Grid-wide, so it is bound here rather than per cell type: every cell compares its own cwd
@@ -560,6 +590,8 @@ const gridCellEvents = (cell: Cell) => ({
   "toggle-canvas": () => toggleRightPane("canvas", cell.uid),
   "open-canvas": () => openCanvasFor(cell.uid),
   "toggle-tools": () => toggleRightPane("tools", cell.uid),
+  "toggle-collections": () => toggleRightPane("collections", cell.uid),
+  "toggle-github": () => toggleRightPane("github", cell.uid),
   close: () => emit("close", cell.uid),
   move: (dir: -1 | 1) => emit("move", cell.uid, dir),
   status: (value: AttentionStatus) => emit("status", cell.uid, value),
@@ -979,12 +1011,22 @@ watch(
 <template>
   <div ref="stage" class="stage" :class="{ zoomed, listmode: listMode, flipping: flippingUids.size > 0 }" :style="flipVars" @focusin="onFocusIn">
     <!-- Cockpit roster: a tall text row per cell (status / dir / memo / summary / prompt / latest
-         reply). Click a row to swap which terminal is enlarged. -->
+         reply). Click a row to swap which terminal is enlarged.
+         The 9px gap is 5px of visible channel plus the 2px ring every row paints on each side
+         (rosterAlertClasses). At the old 5px two neighbours' rings came within a pixel of each
+         other and the column read as one fused block.
+
+         `pr-0` is deliberate, and the right gutter is on the ROWS instead (`mr-1.5`, named by every
+         branch in rosterAlertClasses). The expanded row names none, so it ends flush with this
+         aside's edge and butts against the splitter — the shape that says it IS the terminal beside
+         it. Putting the gutter back here would reinstate the 6px of `bg-deep` that made the row
+         read as a card floating near the edge, and the negative margin that used to cancel it
+         silently mis-aligned the moment this padding changed. -->
     <aside
       v-if="zoomed && listMode"
       ref="roster"
       data-testid="cockpit"
-      class="flex min-w-0 shrink-0 grow-0 flex-col gap-[5px] overflow-y-auto bg-deep p-1.5"
+      class="flex min-w-0 shrink-0 grow-0 flex-col gap-[9px] overflow-y-auto bg-deep py-1.5 pr-0 pl-1.5"
       :style="{ flexBasis: `${rosterWidth}px` }"
     >
       <div
@@ -994,7 +1036,7 @@ watch(
         role="button"
         :tabindex="0"
         data-testid="cockpit-row"
-        class="flex shrink-0 cursor-pointer flex-col gap-1 overflow-hidden rounded-lg border border-l-[3px] px-2.5 py-2 text-left text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#4a9eff]"
+        class="flex shrink-0 cursor-pointer flex-col gap-1 overflow-hidden rounded-lg border px-2.5 py-2 text-left text-fg focus-visible:outline focus-visible:outline-2 focus-visible:outline-[#4a9eff]"
         :class="rosterAlertClass(row.status, { expanded: row.uid === expandedUid, blink: rosterBlink, parked: row.parked })"
         @click="row.uid !== expandedUid && emit('toggle-expand', row.uid)"
         @keydown.enter.self.prevent="row.uid !== expandedUid && emit('toggle-expand', row.uid)"
@@ -1011,6 +1053,7 @@ watch(
           :home="home"
           :header-color="row.headerColor"
           :header-text-color="row.headerTextColor"
+          :icon-url="row.iconUrl"
           :work-phase="row.workPhase"
           :phase="row.phase"
         >
@@ -1128,6 +1171,7 @@ watch(
         <GuiPanel
           v-else-if="rightPane === 'canvas'"
           :session-id="expandedSessionId"
+          :cwd="expandedCwd"
           :send-text-message="sendToExpandedCell"
           :unavailable="canvasUnavailable"
           :expanded="paneFull"
@@ -1140,6 +1184,28 @@ watch(
         <ToolsPane
           v-else-if="rightPane === 'tools'"
           :session-id="expandedSessionId"
+          :expanded="paneFull"
+          :style="paneFull ? { flex: '1 1 0%', width: 'auto' } : { flex: `0 0 ${paneWidth}px` }"
+          class="border-l border-border"
+          @toggle-expand="togglePaneExpanded"
+          @close="setRightPane(null, paneUid)"
+        />
+        <!-- Scoped by the CELL's directory, not by a picker: a Project is a directory, and the
+             cell already names one. -->
+        <CollectionsPane
+          v-else-if="rightPane === 'collections'"
+          :cwd="expandedCwd"
+          :style="paneFull ? { flex: '1 1 0%', width: 'auto' } : { flex: `0 0 ${paneWidth}px` }"
+          class="border-l border-border"
+        />
+        <!-- Every configured repo, whatever the cell is: what the cell's directory decides is
+             which repo's section LEADS (common/githubPaneOrder.ts). A directory that names no
+             repository is an ordinary case and gets the configured order — a plain shell cell can
+             still read the list. -->
+        <GithubPane
+          v-else-if="rightPane === 'github'"
+          :cwd="expandedCwd"
+          can-expand
           :expanded="paneFull"
           :style="paneFull ? { flex: '1 1 0%', width: 'auto' } : { flex: `0 0 ${paneWidth}px` }"
           class="border-l border-border"
@@ -1188,8 +1254,10 @@ watch(
           :initial-session-id="cell.session"
           :initial-cwd="cell.cwd"
           :initial-agent="cell.agent"
+          :auto-start="cell.autoStart === true"
           :presets="presets"
           :launchers="launchers"
+          :custom-agents="customAgents ?? []"
           :open-session-ids="openSessionIds"
           :open-cwds="openCwds"
           :cancellable="cell.uid === cancelUid"

@@ -12,14 +12,15 @@ import { makeTempDir } from "../../support/tempDir";
 const stubResize = async (input: Buffer, maxEdge: number) => Buffer.from(`RESIZED:${maxEdge}:${input.length}`);
 
 describe("thumbnail resolver", () => {
-  const resolve = createThumbnailResolver(stubResize);
+  // The root is passed EXPLICITLY, as production does (`thumbnailResolverFor(scope)`): the
+  // engine host runs in explicit-root mode, so there is no ambient root to fall back to.
   let ws = "";
+  const resolve = createThumbnailResolver(stubResize, () => ws);
 
   beforeAll(() => {
     ws = makeTempDir("mt-thumb-");
     mkdirSync(path.join(ws, "data"), { recursive: true });
     writeFileSync(path.join(ws, "data", "pic.png"), Buffer.from([1, 2, 3, 4]));
-    // Sets the workspace root the resolver reads via getWorkspaceRoot().
     initCollectionsBackend({ workspace: ws });
   });
 
@@ -50,10 +51,13 @@ describe("thumbnail resolver", () => {
   it("caches by (path, mtime, maxEdge) so a repeated page doesn't re-decode", async () => {
     clearThumbnailCache();
     let calls = 0;
-    const counting = createThumbnailResolver(async (_buf, edge) => {
-      calls += 1;
-      return Buffer.from(`X:${edge}`);
-    });
+    const counting = createThumbnailResolver(
+      async (_buf, edge) => {
+        calls += 1;
+        return Buffer.from(`X:${edge}`);
+      },
+      () => ws,
+    );
     await counting("data/pic.png", 256);
     await counting("data/pic.png", 256);
     expect(calls).toBe(1);

@@ -34,14 +34,18 @@ export const CELL_HEADER =
 // Added only while a click on the header background zooms the cell.
 export const CELL_HEADER_ZOOMABLE = "cursor-pointer hover:bg-hover";
 
-// The header's left half — dot, path, chips, title — and it must be `flex-1`, NOT `flex-auto`.
+// The header's left half — icon, dot, chips, title — and it must be `flex-1`, NOT the `flex-auto`
+// upstream writes inline. A constant rather than a class string in the template because that
+// distinction has a spec on it (test/src/components/cellHeaderRow.spec.ts) and is one edit away
+// from being lost again.
 //
-// The two differ only in flex-basis (0 against auto), and under `flex-wrap` that decides whether
-// the header is one row or two. Wrapping is settled BEFORE shrinking, using each item's basis:
-// with `auto` this group asks for its whole content width, so the moment the chips get wordy the
-// actions no longer fit beside it and drop to a second row — while the group itself then sits on
-// row one with space to spare, having never been asked to give any of it up. With a basis of 0 it
-// asks for nothing, both fit on one line, and it grows into whatever the actions leave.
+// The two differ only in flex-basis (0 against auto), and under CELL_HEADER's `flex-wrap` that
+// decides whether the header is one row or two. Wrapping is settled BEFORE shrinking, using each
+// item's basis: with `auto` this group asks for its whole content width, so the moment the chips
+// get wordy the actions no longer fit beside it and drop to a second row — while the group itself
+// then sits on row one with space to spare, having never been asked to give any of it up. With a
+// basis of 0 it asks for nothing, both fit on one line, and it grows into whatever the actions
+// leave.
 //
 // So the wrap stays as the guarantee it was added to be (the close button can still move down
 // rather than off the edge, on a width where the buttons alone do not fit), but it stops firing
@@ -124,12 +128,20 @@ export const CELL_CLOSE_BTN = `${CELL_BTN_BOX} ${CELL_BTN_SIZE} cursor-pointer t
 export const DIR_TRUNCATE_FRONT = "truncate text-left [direction:rtl]";
 export const CELL_DIR_PATH = "[unicode-bidi:plaintext]";
 
+// The quiet ink for text sitting ON a header surface — the path, the model/context badge, the
+// token counts, a custom chip. It has to name --cell-header-fg first: a directory paints that
+// header with its own `headerColor`, and a utility that goes straight to the theme's dim keeps a
+// colour chosen for the theme's panel, which on a saturated header is the background (#1591).
+// The chips beside these reach the same colour by inheriting it (GitBranchChip, WorkItemChip);
+// this chain is for the ones that must stay DIMMER than the header's own text.
+export const CELL_HEADER_INK_DIM = "text-[var(--cell-header-fg,var(--text-dim))]";
+
 // Floored at ~15 characters of path so it stays readable in a narrow cell.
 // The 16ch floor keeps a path readable in a narrow cell — but only where there IS room for it.
 // A phone pane is ~390px: the dot, the floor, the dir badge and seven action buttons do not fit,
 // and what goes over the edge is the LAST thing on the row, which is the close button. Below
 // 640px the path shrinks instead; the controls are the part that has to survive.
-export const CELL_DIR = `min-w-0 sm:min-w-[16ch] max-w-[45%] flex-initial ${DIR_TRUNCATE_FRONT} font-mono text-[11px] text-[var(--cell-header-fg,var(--text-dim))]`;
+export const CELL_DIR = `min-w-0 sm:min-w-[16ch] max-w-[45%] flex-initial ${DIR_TRUNCATE_FRONT} font-mono text-[11px] ${CELL_HEADER_INK_DIM}`;
 
 export const CELL_CMD = "min-w-0 flex-auto truncate font-mono text-[12px] text-secondary";
 

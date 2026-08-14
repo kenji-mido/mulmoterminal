@@ -12,6 +12,7 @@
 // root would drop both — the same failure mode that made scoped CSS silently miss (#787).
 import { computed, toRef } from "vue";
 import DirBadge from "./DirBadge.vue";
+import DirIcon from "./DirIcon.vue";
 import CellChromeButtons from "./CellChromeButtons.vue";
 import { cellChromeBinding, type CellChromeSource } from "./cellChromeBinding";
 import { useCellChrome } from "../composables/useCellChrome";
@@ -62,7 +63,7 @@ const props = defineProps<
 >();
 
 const emit = defineEmits<{
-  (e: "toggle-expand" | "close" | "toggle-files" | "toggle-canvas" | "toggle-tools"): void;
+  (e: "toggle-expand" | "close" | "toggle-files" | "toggle-canvas" | "toggle-tools" | "toggle-collections" | "toggle-github"): void;
   (e: "move", dir: -1 | 1): void;
 }>();
 
@@ -92,6 +93,8 @@ function onHeaderClick(event: MouseEvent) {
   <div class="cell" :class="CELL_FRAME" :style="cellStyle">
     <div :class="CELL_INNER">
       <div class="cell-header" :class="[CELL_HEADER, expanded ? '' : `is-zoomable ${CELL_HEADER_ZOOMABLE}`]" :style="headerStyle" @click="onHeaderClick">
+        <!-- Leads the row, ahead of the status dot — the browser-tab position (see TerminalCell). -->
+        <DirIcon :src="dirConfig.iconUrl" />
         <span
           class="cell-dot"
           :class="[CELL_DOT, finished ? `is-idle ${CELL_DOT_IDLE}` : `is-working ${CELL_DOT_WORKING}`]"

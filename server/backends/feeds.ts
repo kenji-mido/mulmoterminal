@@ -17,6 +17,7 @@ import { loadCollection } from "@mulmoclaude/core/collection/server";
 import type { FeedSummary } from "@mulmoclaude/core/collection";
 import { writeFileAtomic } from "../files/atomic-write.js";
 import { feedSummary } from "./feed-summary.js";
+import { errorStatus, resolveProjectRoot } from "../infra/project-root.js";
 
 const log: FeedsLogger = {
   error: (prefix, msg, data) => console.error(`[${prefix}] ${msg}`, data ?? ""),
@@ -25,12 +26,13 @@ const log: FeedsLogger = {
   debug: (prefix, msg, data) => console.debug(`[${prefix}] ${msg}`, data ?? ""),
 };
 
-let workspaceRoot = "";
-
 /** Wire the feeds engine to the shared workspace. Call once at boot, after pubsub +
- *  the collection backend. `spawnWorker` is supplied by server/index.ts. */
+ *  the collection backend. `spawnWorker` is supplied by server/index.ts.
+ *
+ *  No module-level root is kept any more: every route on the collection surface resolves its own
+ *  (`resolveProjectRoot`), and a second copy of "the root" is what let one route answer for a
+ *  project while the helper beside it answered for the workspace. */
 export function initFeedsBackend(deps: { workspace: string; spawnWorker: AgentWorkerRunner }): void {
-  workspaceRoot = deps.workspace;
   configureFeedsHost({ workspaceRoot: deps.workspace, log, writeFileAtomic, spawnWorker: deps.spawnWorker });
 }
 
@@ -39,8 +41,12 @@ function errorMessage(err: unknown): string {
 }
 
 // One feeds-index row: the registered feed's schema + its last-fetch state.
-async function toFeedSummary(feed: Awaited<ReturnType<typeof listFeeds>>[number]): Promise<FeedSummary> {
-  const state = await readFeedState(workspaceRoot, feed);
+//
+// The ROOT is passed in. Reading the module-level workspace here made a project's feeds report
+// the workspace feed's `lastFetchedAt` — or none at all — while the row beside it came from the
+// project: one list, two roots, and no way to tell which number belonged to which.
+async function toFeedSummary(root: string, feed: Awaited<ReturnType<typeof listFeeds>>[number]): Promise<FeedSummary> {
+  const state = await readFeedState(root, feed);
   return feedSummary(feed, state.lastFetchedAt);
 }
 
@@ -51,29 +57,43 @@ async function toFeedSummary(feed: Awaited<ReturnType<typeof listFeeds>>[number]
 export function mountFeedsRoutes(app: Express): void {
   // The feeds index (data-source collections in the workspace's feeds/ registry),
   // each enriched with its last-fetch state. Backs collectionUi.listFeeds.
-  app.get("/api/feeds", async (_req: Request, res: Response) => {
+  app.get("/api/feeds", async (req: Request, res: Response) => {
     try {
-      const feeds = await listFeeds(workspaceRoot);
-      res.json({ feeds: await Promise.all(feeds.map(toFeedSummary)) });
+      // Feeds live under `<root>/feeds`, so they follow the named project like collections do —
+      // a collections surface showing one project's cards beside another's feeds would be a
+      // list nobody could reason about.
+      const root = resolveProjectRoot(req).workspaceRoot;
+      const feeds = await listFeeds(root);
+      res.json({ feeds: await Promise.all(feeds.map((feed) => toFeedSummary(root, feed))) });
     } catch (err) {
       log.warn("feeds", "list failed", { error: errorMessage(err) });
-      res.status(500).json({ error: errorMessage(err) });
+      res.status(errorStatus(err)).json({ error: errorMessage(err) });
     }
   });
 
   // Remove a feed's registry entry (its records under dataPath are kept).
   app.delete("/api/feeds/:slug", async (req: Request<{ slug: string }>, res: Response) => {
     try {
-      const removed = await removeFeed(workspaceRoot, req.params.slug);
+      const removed = await removeFeed(resolveProjectRoot(req).workspaceRoot, req.params.slug);
       res.json({ removed });
     } catch (err) {
       log.warn("feeds", "delete failed", { slug: req.params.slug, error: errorMessage(err) });
-      res.status(500).json({ error: errorMessage(err) });
+      res.status(errorStatus(err)).json({ error: errorMessage(err) });
     }
   });
 
+  // Sits on the collection surface, so it honours `?project=` like the rest of it. Reading the
+  // module-level workspace here instead would refresh — and WRITE — the workspace collection
+  // that happens to share the slug, or 404 while the named project holds the feed.
   app.post("/api/collections/:slug/refresh", async (req: Request<{ slug: string }>, res: Response) => {
-    const collection = await loadCollection(req.params.slug);
+    let scope;
+    try {
+      scope = resolveProjectRoot(req);
+    } catch (err) {
+      res.status(errorStatus(err)).json({ error: errorMessage(err) });
+      return;
+    }
+    const collection = await loadCollection(req.params.slug, scope);
     if (!collection) {
       res.status(404).json({ error: `collection '${req.params.slug}' not found` });
       return;
@@ -83,7 +103,7 @@ export function mountFeedsRoutes(app: Express): void {
       return;
     }
     try {
-      const result = await refreshOne(workspaceRoot, collection, { hidden: false });
+      const result = await refreshOne(scope.workspaceRoot, collection, { hidden: false });
       res.json({ refreshed: true, written: result.written, errors: result.errors, dispatched: result.dispatched, chatId: result.chatId });
     } catch (err) {
       log.warn("feeds", "refresh failed", { slug: collection.slug, error: errorMessage(err) });

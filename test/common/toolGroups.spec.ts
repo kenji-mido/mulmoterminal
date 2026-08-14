@@ -12,6 +12,8 @@ import {
   CANVAS_TOOL_GROUPS,
   TOOL_GROUP_HEADINGS,
   hasCanvasGroup,
+  hasCollectionsGroup,
+  COLLECTIONS_TOOL_GROUPS,
 } from "../../common/toolGroups.js";
 
 describe("tool groups", () => {
@@ -142,6 +144,32 @@ describe("CANVAS_TOOL_GROUPS", () => {
     expect(hasCanvasGroup(["renderer"])).toBe(false);
     expect(hasCanvasGroup(undefined)).toBe(false);
     expect(hasCanvasGroup("render")).toBe(false);
+  });
+});
+
+// The Collections pane is a window onto the `data` store, so the button that opens it is absent
+// where that group is not registered. The group has to be the one manageCollection is served
+// under, or the button hides itself from directories that do have the tools.
+describe("COLLECTIONS_TOOL_GROUPS", () => {
+  it("is the group manageCollection and presentCollection belong to", () => {
+    for (const tool of ["manageCollection", "presentCollection"] as const) {
+      expect(COLLECTIONS_TOOL_GROUPS).toContain(groupOfTool(tool));
+    }
+  });
+
+  it("does not include a group that carries no collection tool", () => {
+    expect(COLLECTIONS_TOOL_GROUPS).not.toContain("render");
+    expect(COLLECTIONS_TOOL_GROUPS).not.toContain("media");
+  });
+
+  it("detects a collections group in a reported group list", () => {
+    expect(hasCollectionsGroup(["data"])).toBe(true);
+    expect(hasCollectionsGroup(["render", "data"])).toBe(true);
+    expect(hasCollectionsGroup(["render", "media"])).toBe(false);
+    expect(hasCollectionsGroup([])).toBe(false);
+    expect(hasCollectionsGroup(["database"])).toBe(false);
+    expect(hasCollectionsGroup(undefined)).toBe(false);
+    expect(hasCollectionsGroup("data")).toBe(false);
   });
 });
 

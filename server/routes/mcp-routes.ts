@@ -15,6 +15,10 @@ import { buildGuiMcpServer } from "../mcp/broker.js";
 import type { GuiCallRecorder } from "../mcp/gui-call-history.js";
 import { translationWorkerIds, markSessionToolGroup, sessionToolGroups, markAllToolsSession, hasAllGuiTools } from "../session/registry.js";
 import { isToolGroup, TOOL_GROUPS, type ToolGroup } from "../../common/toolGroups.js";
+import { isRecord } from "../../common/isRecord.js";
+import { entitledToolGroups, liveMuseSessions, resolveBridgeSession } from "../session/bridge-session.js";
+import { ancestorPids } from "../infra/process-tree.js";
+import { tmuxPanePids } from "../infra/tmux.js";
 import { submitTranslation } from "../session/translation-worker.js";
 import { translationSubmitOutcome } from "../session/translation-submit.js";
 
@@ -46,6 +50,36 @@ export interface McpRouteDeps {
 // rather than on every tool call. In-memory only: after a restart a session announcing itself
 // again is exactly right, since the panel it is telling has also just reconnected.
 const announcedSessions = new Set<string>();
+
+// Where a bridge that was told NOTHING finds out who it is serving.
+//
+// Only muse needs it, and only because a plugin's MCP server is started with a curated
+// environment that carries none of ours (server/session/bridge-session.ts). The bridge sends the
+// two things it does have — its own pid and its working directory — and gets back the session
+// its process tree belongs to, plus the groups that session's directory registered.
+//
+// Answering `{ sessionId: null }` with a 200 rather than a 404: "no session owns you" is a
+// normal state (a muse the user started in a plain terminal, a session that has already ended),
+// and the bridge's response to it is to serve no tools, not to report a transport failure.
+function resolveBridge(req: Request, res: Response) {
+  const body: unknown = req.body;
+  const pid = isRecord(body) && typeof body.pid === "number" ? body.pid : null;
+  const cwd = isRecord(body) && typeof body.cwd === "string" ? body.cwd : "";
+  if (pid === null || !Number.isInteger(pid) || pid <= 1) return res.status(400).json({ error: "pid is required" });
+  // `cwd` is read for the log line and NOTHING else: a shared directory is not evidence of
+  // anything (see bridge-session.ts), and treating it as such let an unrelated muse claim a cell.
+  const sessionId = resolveBridgeSession({ panePids: tmuxPanePids(), ancestors: ancestorPids(pid), museSessions: liveMuseSessions() });
+  // Logged on BOTH outcomes, and it is the only place this can be seen: an unresolved bridge is
+  // silent by design — it serves an empty toolset — so without this line "muse has no GUI tools"
+  // is indistinguishable from "muse was never given any".
+  if (!sessionId) {
+    console.warn(`[muse] a GUI MCP bridge (pid ${pid}) in ${cwd || "an unknown directory"} belongs to no live muse session — it will serve no tools`);
+    return res.json({ sessionId: null, groups: [] });
+  }
+  const groups = entitledToolGroups(sessionId);
+  console.log(`[muse] GUI MCP bridge (pid ${pid}) resolved to session ${sessionId} — groups: ${groups.join(", ") || "none"}`);
+  return res.json({ sessionId, groups });
+}
 
 export function mountMcpRoutes(app: Express, deps: McpRouteDeps): void {
   /**
@@ -172,6 +206,12 @@ export function mountMcpRoutes(app: Express, deps: McpRouteDeps): void {
     // the answer depend on connection order.
     return handleMcpRequest(req, res, sessionId, group, hasAllGuiTools(sessionId));
   });
+  // NOT `/api/mcp/resolve`: that is one segment, so the all-tools route above — `/api/mcp/:sessionId`,
+  // registered first — swallows it and answers 400 "invalid sessionId". Which it did, silently, until
+  // a bridge was run by hand against a live server (the bridge treats an unreachable resolve as "no
+  // session" and stands down, so the whole feature failed by serving zero tools with nothing logged).
+  app.post("/api/mcp-resolve", resolveBridge);
+
   app.get("/api/mcp/:group/:sessionId", rejectNonPost);
   app.delete("/api/mcp/:group/:sessionId", rejectNonPost);
 

@@ -386,6 +386,7 @@ describe("buildScreenMeta", () => {
     cwdOf: () => "/repo",
     branchOf: async () => "feat/1110",
     githubUrlOf: async () => "https://github.com/o/r",
+    iconOf: () => "data:image/png;base64,AAA=",
     memoOf: () => "ask Tom before merging",
     summaryOf: () => "Adding meta to the phone view",
     promptOf: () => "add the memo",
@@ -397,6 +398,7 @@ describe("buildScreenMeta", () => {
     expect(await buildScreenMeta("a", sources())).toEqual({
       cwd: "/repo",
       branch: "feat/1110",
+      icon: "data:image/png;base64,AAA=",
       memo: "ask Tom before merging",
       summary: "Adding meta to the phone view",
       prompt: "add the memo",
@@ -472,13 +474,24 @@ describe("buildScreenMeta", () => {
     expect(githubUrlOf).not.toHaveBeenCalled();
   });
 
-  // A detached HEAD has no branch name, and a session with no note has no memo: both lose the
-  // key rather than arriving as "", which the phone would draw as an empty labelled row.
+  // A detached HEAD has no branch name, a session with no note has no memo, and a directory with
+  // no image has no icon: all lose the key rather than arriving as "", which the phone would draw
+  // as an empty labelled row — or, for the icon, as a broken picture.
   it("drops what the host could not answer, key and all", async () => {
-    const meta = await buildScreenMeta("a", sources({ branchOf: async () => null, memoOf: () => "", githubUrlOf: async () => null }));
+    const unanswered = { branchOf: async () => null, memoOf: () => "", githubUrlOf: async () => null, iconOf: () => "" };
+    const meta = await buildScreenMeta("a", sources(unanswered));
     expect(meta).toEqual({ cwd: "/repo", summary: "Adding meta to the phone view", prompt: "add the memo" });
     expect(Object.hasOwn(meta, "memo")).toBe(false);
     expect(Object.hasOwn(meta, "branch")).toBe(false);
+    expect(Object.hasOwn(meta, "icon")).toBe(false);
+  });
+
+  // A session that outlived the server has no cwd, so there is no directory to have an icon —
+  // and asking for one would resolve it against "" (dirIconFor's own base).
+  it("does not look for an icon when the session has no directory", async () => {
+    const iconOf = vi.fn(() => "data:image/png;base64,AAA=");
+    await buildScreenMeta("a", sources({ cwdOf: () => "", iconOf }));
+    expect(iconOf).not.toHaveBeenCalled();
   });
 });
 

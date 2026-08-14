@@ -67,6 +67,42 @@ describe("a model id from .mulmoterminal.json", () => {
     expect(resolveDir({ provider: "openrouter", model }).ok).toBe(true);
   });
 
+  // #1503: `[1m]` is Claude Code's own way of asking for the 1M context window, and the id
+  // shape rejected it, so a directory had no way to write what the CLI documents. Asserted
+  // through buildClaudeArgs rather than on the resolution alone — the value has to arrive at
+  // argv unchanged, since stripping the suffix is Claude Code's job and not this repo's.
+  it("carries the [1m] extended-context suffix through to claude --model", () => {
+    const result = resolveDir({ model: "claude-opus-5[1m]" });
+    expect(result.ok && result.value.model).toBe("claude-opus-5[1m]");
+    const args = buildClaudeArgs({
+      sessionId: "s1",
+      resume: null,
+      canResume: false,
+      settings: "{}",
+      permissionMode: "auto",
+      attachGuiMcp: false,
+      mcpConfig: "{}",
+      allowedTools: "",
+      model: result.ok ? result.value.model : null,
+      appendedPrompt: null,
+    });
+    expect(args).toContain("claude-opus-5[1m]");
+  });
+
+  // A gateway is where the suffix does real work, so it must survive the provider branch as
+  // well — and reach the environment Claude Code reads, not only argv.
+  it("keeps the suffix on a provider-backed model, in argv and in the environment", () => {
+    const result = resolveDir({ provider: "openrouter", model: "~anthropic/claude-opus-latest[1m]" });
+    expect(result.ok && result.value.model).toBe("~anthropic/claude-opus-latest[1m]");
+    expect(result.ok && result.value.env.ANTHROPIC_MODEL).toBe("~anthropic/claude-opus-latest[1m]");
+  });
+
+  // The suffix is one documented literal, not a family. Anything bracket-shaped that Claude
+  // Code has no meaning for is still refused rather than posted into argv on the hope it works.
+  it.each(["claude-opus-5[2m]", "claude-opus-5[1m", "[1m]"])("still refuses the bracketed id %s", (model) => {
+    expect(resolveDir({ model }).ok).toBe(false);
+  });
+
   it("is refused when it is absurdly long", () => {
     expect(resolveDir({ model: "m".repeat(121) }).ok).toBe(false);
     expect(resolveDir({ model: "m".repeat(120) }).ok).toBe(true);

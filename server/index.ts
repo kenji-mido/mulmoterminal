@@ -10,7 +10,7 @@ import { toolSummaries } from "./infra/plugins-registry.js";
 import { initMarkdownBackend } from "./backends/markdown.js";
 import { initArtifactsBackend } from "./backends/artifacts.js";
 import { initOpenPathBackend } from "./backends/openPath.js";
-import { getUserMcpServers, getWorklogConfig, getTerminalSubmit, getQuickCommands, APP_CONFIG_FILE } from "./config/config-routes.js";
+import { getUserMcpServers, getWorklogConfig, getTerminalSubmit, getQuickCommands, getSessionIdleReapDays, APP_CONFIG_FILE } from "./config/config-routes.js";
 import { enforceKeymap } from "./config/keymap-check.js";
 import { readFileSync } from "node:fs";
 import { submitSequenceForAgent } from "../common/terminalSubmit.js";
@@ -43,9 +43,8 @@ import { startRateLimitProbe } from "./agents/rate-limit-probe.js";
 import { hasBinary } from "./infra/has-binary.js";
 import { newProbeSessionId } from "./agents/probe-session.js";
 import { writeProbeScreen } from "./agents/probe-stall.js";
-import { removeProbeTranscript, sweepLegacyProbeTranscriptsOnce } from "./agents/probe-transcript.js";
-import { sweepOrphanHeadlessTranscripts } from "./session/headless-session.js";
-import { removeLegacySandboxCredentials, removeLegacySandboxContainers } from "./infra/fs-cleanup.js";
+import { removeProbeTranscript } from "./agents/probe-transcript.js";
+import { runBootSweeps } from "./session/boot-sweeps.js";
 import { newestRolloutFile, codexSessionsDir, readRolloutTail } from "./agents/codex-rollout.js";
 import { latestRateLimitsInRollout } from "./agents/codex-rate-limits.js";
 import { rateLimitCacheFile, readRateLimitCache, createRateLimitCacheWriter } from "./agents/rate-limit-persist.js";
@@ -56,6 +55,7 @@ import { createTitleManager } from "./session/session-title.js";
 import { generateTitleFromTurns } from "./config/header-title.js";
 import { mountTerminalWebSockets } from "./routes/ws-routes.js";
 import { createConnectionHandlers } from "./session/pty-connection.js";
+import { boundedTail } from "./session/terminal-replay.js";
 import { createTmuxSizeSync } from "./session/tmux-size-sync.js";
 import type { SpawnDeps } from "./session/spawn-deps.js";
 import {
@@ -83,7 +83,11 @@ import { createScheduledSessionRegistry, scheduledSessionInUse, scheduledSession
 import { claudeAdapter } from "./agents/claude.js";
 import { codexAdapter } from "./agents/codex.js";
 import { antigravityAdapter } from "./agents/antigravity.js";
+import { grokAdapter } from "./agents/grok.js";
+import { museAdapter } from "./agents/muse.js";
 import { createAntigravitySpawner } from "./session/spawn-antigravity.js";
+import { createGrokSpawner } from "./session/spawn-grok.js";
+import { createMuseSpawner } from "./session/spawn-muse.js";
 import { renderScreen } from "./session/headlessScreen.js";
 import {
   agentFromPaneCommand,
@@ -95,6 +99,8 @@ import {
   type SessionScreenMeta,
   type SessionWorkSummary,
 } from "./backends/remoteHost/terminalScreen.js";
+import { dirIconSrc, readIconFile, withDirIcons, type DirIconSources } from "./backends/remoteHost/dirIcons.js";
+import { dirIconFor } from "./config/dir-config.js";
 import type { SessionAgent } from "../common/sessionAgent.js";
 import { quickCommandsForAgent } from "./backends/remoteHost/quickCommands.js";
 import { decideLaunchTerminal, NO_BROWSER_ERROR } from "./backends/remoteHost/launchTerminal.js";
@@ -105,6 +111,7 @@ import { repoForDir } from "./git/forge-support.js";
 import { resolveGithubUrl } from "./git/gitRemote.js";
 import { canClearInputBox } from "./backends/remoteHost/terminalInput.js";
 import { initCollectionsBackend } from "./backends/collections.js";
+import { initSharedCollections } from "./backends/sharedCollections.js";
 import { initGoogleBackend } from "./backends/google.js";
 import { initPluginRuntime } from "./infra/pluginRuntime.js";
 import { initAccountingBackend } from "./backends/accounting.js";
@@ -122,6 +129,9 @@ import { stopWhisperSidecar } from "./backends/whisper.js";
 import { startCollectionCompletionWatchers } from "./backends/collectionWatchers.js";
 import { initUserTaskScheduler } from "./backends/scheduler.js";
 import { buildSystemTasks } from "./backends/system-tasks.js";
+import { feedWorkerSpawnOptions } from "./backends/feed-worker-options.js";
+// The projects a request may name — and, at boot, the roots whose feeds refresh on schedule.
+import { listProjectRoots } from "./infra/project-root.js";
 import { initMulmoScriptBackend } from "./backends/mulmoscript.js";
 import { createSessionLifecycle, SESSIONS_CHANNEL } from "./session/lifecycle.js";
 import { mountAppRoutes } from "./routes/app-routes.js";
@@ -129,6 +139,7 @@ import { allowedToolNames, autoAllowedToolNames } from "./infra/plugins-registry
 import { GUI_SERVER_ID } from "../common/toolGroups.js";
 
 import { resumableSessionPredicate } from "./session/resumable-sessions.js";
+import { reapSweepLines, survivingAfterSweep, sweepIdleSessions } from "./session/reap-idle-sessions.js";
 import { installProcessGuards } from "./infra/process-guards.js";
 import { pruneOrphanSettings } from "./session/session-settings.js";
 import { earliestStartedAt, liveInstances, registerInstance } from "../bin/instances.js";
@@ -146,9 +157,13 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLAUDE_BIN = claudeAdapter.bin();
 const CODEX_BIN = codexAdapter.bin();
 const ANTIGRAVITY_BIN = antigravityAdapter.bin();
+const GROK_BIN = grokAdapter.bin();
+const MUSE_BIN = museAdapter.bin();
 // Model override for codex sessions (--model); null uses codex's own configured default.
 const CODEX_MODEL = process.env.CODEX_MODEL || null;
 const ANTIGRAVITY_MODEL = process.env.ANTIGRAVITY_MODEL || null;
+const GROK_MODEL = process.env.GROK_MODEL || null;
+const MUSE_MODEL = process.env.MUSE_MODEL || null;
 // Permission mode for backend-spawned Claude sessions. Defaults to "auto" so
 // the backend runs hands-off; override with CLAUDE_PERMISSION_MODE (e.g.
 // "default" / "acceptEdits" / "bypassPermissions" / "plan") when needed.
@@ -247,6 +262,7 @@ const tmuxSizeSync = createTmuxSizeSync({
 // Per-connection plumbing (session/pty-connection.ts). The reap decisions stay here —
 // they read activity state and schedule timers that outlive any one connection.
 const { reattachPty, handleClientFrame, handleClientClose } = createConnectionHandlers({
+  outputBufferLimit: OUTPUT_BUFFER_LIMIT,
   cancelReap: (id) => cancelReap(id),
   reap: (id) => reap(id),
   setWaiting: (id, waiting) => setWaiting(id, waiting),
@@ -302,6 +318,10 @@ const spawnDeps: SpawnDeps = {
   codexModel: CODEX_MODEL,
   antigravityBin: ANTIGRAVITY_BIN,
   antigravityModel: ANTIGRAVITY_MODEL,
+  grokBin: GROK_BIN,
+  grokModel: GROK_MODEL,
+  museBin: MUSE_BIN,
+  museModel: MUSE_MODEL,
   permissionMode: CLAUDE_PERMISSION_MODE,
   guiMcpTools: GUI_MCP_TOOLS,
   gridMcpTools: GRID_MCP_TOOLS,
@@ -314,10 +334,13 @@ const spawnDeps: SpawnDeps = {
   setWaiting: (id, waiting, event) => setWaiting(id, waiting, event),
   uiPort: String(process.env.CLIENT_PORT || PORT),
   publishSessionCreated: (sessionId) => pubsub?.publish(SESSIONS_CHANNEL, { id: sessionId, working: false, event: "created" }),
+  publishActivity: (sessionId) => publishActivity(sessionId),
 };
 const { spawnClaudePty } = createClaudeSpawner(spawnDeps);
 const { spawnCodexPty } = createCodexSpawner(spawnDeps);
 const { spawnAntigravityPty } = createAntigravitySpawner(spawnDeps);
+const { spawnGrokPty } = createGrokSpawner(spawnDeps);
+const { spawnMusePty } = createMuseSpawner(spawnDeps);
 const { spawnCommandPty, spawnLauncherPty, resolveLauncher } = createShellSpawners(spawnDeps);
 
 // The hidden translation worker (session/translation-worker.ts). It drives a headless
@@ -437,26 +460,7 @@ const startClaudeRateLimitProbe = (): void => {
   });
 };
 
-// Probes that ran before their ids identified them left transcripts nothing can address by name —
-// 41 of one reporter's 50 listed sessions (#1010). Swept ONCE on this machine, never again: the
-// content test cannot tell those files from a person who typed the probe's exact words, so the
-// window in which that matters is closed rather than reopened on every boot (Codex review on
-// #1030). It also means a 500MB transcript directory is read once, not once per `yarn dev` save.
-void sweepLegacyProbeTranscriptsOnce(CLAUDE_CWD, MULMOTERMINAL_HOME).catch(() => {});
-// The removed Docker sandbox left two things behind when a server was killed or upgraded
-// mid-session: a per-session export of the Keychain credential on disk, and a container still
-// running with the workspace and ~/.claude mounted. Both deleters went with the feature.
-//
-// The directory is the EVIDENCE that this machine ever ran the sandbox, so the container sweep is
-// gated on it: nearly every install never turned it on (opt-in, macOS-only) and never invokes
-// docker here at all (Codex, PR #1195).
-if (removeLegacySandboxCredentials(MULMOTERMINAL_HOME)) void removeLegacySandboxContainers(MULMOTERMINAL_HOME).catch(() => {});
-
-// A headless run deletes its own transcript when it ends, so whatever is left belongs to one that
-// never got to: the server was killed mid-title, or the delete failed. Every boot, not once ever —
-// the files are addressed by a NAME only this server can mint, so there is no content guess to
-// regret and no user conversation it could reach. It reads the directory listing and nothing else.
-void sweepOrphanHeadlessTranscripts(CLAUDE_CWD).catch(() => {});
+runBootSweeps(CLAUDE_CWD, MULMOTERMINAL_HOME); // one-shot cleanups from earlier versions — see session/boot-sweeps.ts
 
 // Codex costs nothing to read, so it is current before the first browser arrives.
 refreshCodexRateLimits();
@@ -483,6 +487,8 @@ mountAppRoutes(app, {
   spawnClaudePty,
   spawnCodexPty,
   spawnAntigravityPty,
+  spawnGrokPty,
+  spawnMusePty,
   translateViaHiddenChat,
   freshenRosterTitle,
   forgetTitle,
@@ -538,6 +544,14 @@ initMulmoScriptBackend({ workspace: CLAUDE_CWD, pubsub });
 // path layout matches MulmoClaude's so discovery sees the same collection skills.
 initCollectionsBackend({ workspace: CLAUDE_CWD });
 
+// Shared (firestore-backed) collections. MulmoTerminal is their host — its roots
+// are project repositories, which is what one `app.json` per roster requires —
+// and MulmoClaude unbound its own accessor for that reason (mulmoclaude#2870).
+// Wired HERE rather than inside initCollectionsBackend because that file is at
+// its line budget, and because the Firebase session this reads is a boot-level
+// concern of this file's, not of the collection engine's configuration.
+initSharedCollections();
+
 // Give factory-style gui-chat-protocol plugins their scoped runtime (per-package
 // data/config under <workspace>, namespaced pub/sub, prefixed log) — see
 // infra/pluginRuntime.ts. This necessarily lands AFTER the plugin registry built
@@ -568,10 +582,13 @@ initAccountingBackend({ workspace: CLAUDE_CWD, pubsub });
 // completion hook (#1070), which is what turns a failed refresh into a bell instead of silence.
 // `scheduledSessions` is defined further down, which is safe because the system task that calls
 // this is registered later still (initUserTaskScheduler).
-const feedsSpawnWorker: AgentWorkerRunner = async ({ message, hidden, onComplete }) => {
+const feedsSpawnWorker: AgentWorkerRunner = async ({ message, hidden, onComplete, workspaceRoot }) => {
   const sessionId = randomUUID();
   try {
-    runWithHiddenMarker(hidden, sessionId, backgroundMarkers, () => spawnClaudePty(sessionId, null, null, { initialPrompt: message }));
+    // SPAWNED IN THE ROOT THE REFRESH IS FOR (core >= 3.2.0) — see feed-worker-options.ts for why
+    // that one option is the difference between refreshing a project and filling the workspace's
+    // same-named collection instead.
+    runWithHiddenMarker(hidden, sessionId, backgroundMarkers, () => spawnClaudePty(sessionId, null, null, feedWorkerSpawnOptions(message, workspaceRoot)));
     if (hidden) scheduledSessions.register(sessionId);
     // AFTER a successful spawn: a launch that threw has no session to report on, and
     // registering first would leave a hook nothing will ever fire or clear.
@@ -635,6 +652,11 @@ const workByCwd = async (cwds: readonly string[]): Promise<Map<string, SessionWo
   return out;
 };
 
+// Where the phone's copy of a directory's picture comes from (#1556). `dirIconFor` is the same
+// resolution the browser's cells use — the configured `icon` and, failing that, the detected
+// favicon — so the two clients never disagree about which image a project has.
+const dirIconSources: DirIconSources = { iconOf: dirIconFor, readIcon: readIconFile };
+
 const remoteHostListTerminalSessions = async () => {
   // A live PTY knows where claude actually runs, so it wins. A session that outlived this process
   // has none — that is what the remembered cwd is for (#1021), and without it the phone shows the
@@ -646,7 +668,7 @@ const remoteHostListTerminalSessions = async () => {
   // case that mark exists for is a server that restarted before any tab opened, where the answer
   // lives only on disk.
   await Promise.all([unplacedSessionsHydrated, placedSessionsHydrated]);
-  return buildSessionList({
+  const sessions = buildSessionList({
     liveIds: [...ptys.keys()],
     tmuxIds: tmuxListSessionIds(),
     isResumable: await resumableSessionPredicate(),
@@ -673,6 +695,8 @@ const remoteHostListTerminalSessions = async () => {
       };
     },
   });
+  // After the sort, so the budget is spent on the rows the phone shows first.
+  return withDirIcons(sessions, dirIconSources);
 };
 
 // Write a chunk to a session's live PTY for the phone's terminal input (#445).
@@ -709,6 +733,12 @@ const remoteHostSessionScreenMeta = (sessionId: string): Promise<SessionScreenMe
     // does not. A per-poll `ls-remote` is the only local fix and costs a network round trip
     // on a screen the phone polls (#832).
     githubUrlOf: resolveGithubUrl,
+    // Inlined rather than the /api/dir-icon URL the browser gets: the phone has no route to
+    // this host at all, so the picture travels in the reply or not at all (#1556).
+    iconOf: (cwd) => {
+      const icon = dirIconFor(cwd);
+      return (icon && dirIconSrc(icon, readIconFile)) || "";
+    },
     memoOf: (id) => sessionMemos.get(id) ?? "", // beside the summary, never instead of it — see SessionScreenMeta (#1110)
     summaryOf: (id) => aiTitles.get(id) ?? "",
     promptOf: (id) => lastPrompts.get(id) ?? "",
@@ -722,7 +752,9 @@ const remoteHostCaptureTerminalScreen = (sessionId: string) =>
     captureStyledPane: (id) => tmuxCaptureStyledPane(id, SCREEN_HISTORY_ROWS),
     sourceOf: (id) => {
       const entry = ptys.get(id);
-      return entry ? { buffer: entry.buffer, cols: entry.term.cols, rows: entry.term.rows } : undefined;
+      // Cut to the bound: the buffer runs over it (PtyEntry.buffer), and every extra character
+      // is one more the headless emulator has to parse to answer one screen.
+      return entry ? { buffer: boundedTail(entry.buffer, OUTPUT_BUFFER_LIMIT), cols: entry.term.cols, rows: entry.term.rows } : undefined;
     },
     render: (source) => renderScreen({ ...source, historyLines: SCREEN_HISTORY_ROWS }),
     metaOf: remoteHostSessionScreenMeta,
@@ -822,22 +854,35 @@ setInterval(refreshDecisionDigests, DECISION_DIGEST_INTERVAL_MS).unref();
 
 // A user's scheduled task runs as a BACKGROUND WORKER — see scheduled-chat.ts for why, and for
 // what follows from it (no grid cell, but a failed one still says so).
-function spawnScheduledChat(message: string): void {
+//
+// A failed spawn is left to throw: whichever scheduler dispatched it records the failure and
+// logs it. Swallowing it here is how a task that never once started looked exactly like a task
+// that had not come due yet.
+function spawnScheduledChat(message: string, onComplete?: (outcome: { didError: boolean }, sessionId: string) => void | Promise<void>): string {
   const sessionId = randomUUID();
-  try {
-    spawnScheduledWorker(sessionId, {
-      spawn: (id) => spawnClaudePty(id, null, null, { initialPrompt: message }),
-      retain: (id) => scheduledSessions.register(id),
-    });
-  } catch (err) {
-    console.error(`[scheduler] failed to spawn chat for a scheduled task: ${messageOf(err)}`);
-  }
+  spawnScheduledWorker(sessionId, {
+    spawn: (id) => spawnClaudePty(id, null, null, { initialPrompt: message }),
+    retain: (id) => scheduledSessions.register(id),
+    onComplete,
+  });
+  return sessionId;
 }
 try {
   // Which tasks and why: system-tasks.ts. Both hosts are already configured above
   // (initFeedsBackend, initGoogleBackend, initCollectionsBackend), so both engines can run.
   const systemTasks = buildSystemTasks({
     workspaceRoot: CLAUDE_CWD,
+    // Every project the server serves gets its feeds refreshed on schedule, not just the
+    // workspace — the same set the collection watchers mount for. Read HERE, at boot, because the
+    // scheduler registers once: a directory saved later starts refreshing after the next restart,
+    // and its feeds still update on demand meanwhile.
+    //
+    // This waited on core 3.2.0. An `ingest.kind: "agent"` collection refreshes by dispatching a
+    // worker whose seed prompt addresses records ROOT-RELATIVELY, and the runner used to be handed
+    // no root — so a project's scheduled refresh resolved `data/collections/<slug>/items` against
+    // the WORKSPACE and wrote there instead. It shipped once and was reverted for exactly that
+    // (#1582); `feedsSpawnWorker` now spawns in the root core gives it.
+    feedRoots: listProjectRoots().map((project) => project.cwd),
     worklog: getWorklogConfig(),
     spawnChat: spawnScheduledChat,
   });
@@ -862,6 +907,8 @@ mountTerminalWebSockets({
   spawnClaudePty,
   spawnCodexPty,
   spawnAntigravityPty,
+  spawnGrokPty,
+  spawnMusePty,
   spawnCommandPty,
   spawnLauncherPty,
   resolveLauncher,
@@ -886,9 +933,18 @@ server.listen(Number(PORT), BIND_HOST, () => {
     console.warn(bindSecurityWarning(BIND_HOST, PORT, browserHostnames));
   }
   const surviving = tmuxAvailable() ? tmuxListSessionIds() : [];
+  const reaped: string[] = [];
   if (tmuxAvailable()) {
     const detail = surviving.length ? ` — ${surviving.length} session(s) survived; reattach on connect` : "";
     console.log(`[tmux] persistence on${detail}`);
+    // Then end the ones nothing is using. Here rather than on a timer: a restart is when none of
+    // OUR ptys hold anything, so "in use" means somebody else's, and it is the moment the pile is
+    // largest. `cleanup-orphans` has existed since #367 with no caller — this is that caller, with
+    // a rule that is about now instead of about the past (#1467).
+    const idleDays = getSessionIdleReapDays();
+    const sweep = sweepIdleSessions(Date.now(), idleDays);
+    reaped.push(...sweep.reaped);
+    reapSweepLines(sweep, idleDays).forEach((line) => console.log(line));
   } else {
     console.log("[tmux] not found — terminals are not persistent across a server restart");
   }
@@ -907,7 +963,10 @@ server.listen(Number(PORT), BIND_HOST, () => {
   // that cutoff applies to every sweep here, not just the one the bug was reported against.
   const peers = liveInstances();
   const peerCutoff = earliestStartedAt(peers);
-  const liveSessionIds = new Set(surviving);
+  // Minus what the sweep just ended: those files are orphans as of a moment ago, and one of them
+  // may hold a provider's API token — waiting a whole boot to remove it is the cost of using the
+  // list as it was read (#1467).
+  const liveSessionIds = survivingAfterSweep(surviving, reaped);
   const droppedSettings = pruneOrphanSettings(liveSessionIds, undefined, peerCutoff);
   if (droppedSettings.length) console.log(`[settings] removed ${droppedSettings.length} orphaned session settings file(s)`);
   // Dropped files are the same story: copies in tmp that only their session referred to.

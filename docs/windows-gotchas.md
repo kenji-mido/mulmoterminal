@@ -89,6 +89,19 @@ machine that runs the suite. Not `endsWith` either: `unplaced-sessions.json` end
 `yarn test` on macOS/Linux cannot see any of this — the whole class only appears where the
 separator and the drive letter differ.
 
+## File permissions
+
+**`chmod` moves the read-only attribute and nothing else.** There are no POSIX permission bits
+on NTFS, so `chmodSync(file, 0o000)` leaves the file perfectly **readable** — only writing is
+refused. A test that makes a file unreadable to prove a read failure is reported (rather than
+answered as "empty") therefore proves nothing there: the read succeeds and the assertion fails
+(`rooms.spec.ts` and `room-routes.spec.ts`, #1484).
+
+A `process.getuid?.() !== 0` guard does not cover this. It is there because root defeats the
+bit too — but on Windows `process.getuid` is **undefined**, so `undefined !== 0` is true and the
+assertion runs anyway. Skip the whole test with `it.skipIf(process.platform === "win32")`, the
+way `test/server/session/session-settings.spec.ts` does for the owner-only-mode check.
+
 ## Filesystem watching
 
 **`fs.watch` on an 8.3 short path is unreliable, and can abort the process.** `os.tmpdir()`

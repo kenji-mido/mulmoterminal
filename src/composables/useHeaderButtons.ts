@@ -9,6 +9,7 @@ import type { TerminalAgent } from "../../common/sessionAgent";
 import { isRecord, optionalBoolean, optionalString } from "../../common/isRecord";
 import { isUnknownArray } from "../../common/isUnknownArray";
 import { jsonBody } from "../jsonBody";
+import type { WorktreeEnvValue } from "../../common/worktreeEnv";
 import { fetchWithTimeout } from "../utils/fetchWithTimeout";
 
 export interface OpenTarget {
@@ -60,6 +61,11 @@ const isResolvedChip = (value: unknown): value is ResolvedChip =>
   ((value.kind === "builtin" && typeof value.id === "string") ||
     (value.kind === "custom" && typeof value.label === "string" && typeof value.text === "string"));
 
+// A reserved per-tree value (#1367). `url` is what makes a port a link, so it is checked as
+// carefully as the value itself — a non-string there would be rendered into an href.
+const isWorktreeEnvValue = (value: unknown): value is WorktreeEnvValue =>
+  isRecord(value) && typeof value.name === "string" && typeof value.value === "string" && (value.url === null || typeof value.url === "string");
+
 // Whether the resolved header offers a file-path picker (an `open` button with `pickFile`).
 // Header buttons are user-configurable and the default picker can be removed, so anything that
 // points the user at "the file-picker button" must first confirm it is actually present.
@@ -77,6 +83,7 @@ interface Params {
 export function useHeaderButtons(params: Params) {
   const buttons = ref<HeaderButton[]>([]);
   const chips = ref<ResolvedChip[] | null>(null);
+  const env = ref<WorktreeEnvValue[]>([]);
   let requestSeq = 0;
 
   async function refresh(): Promise<void> {
@@ -84,6 +91,7 @@ export function useHeaderButtons(params: Params) {
     if (!cwd) {
       buttons.value = [];
       chips.value = null;
+      env.value = [];
       return;
     }
     const query = new URLSearchParams({ cwd, agent: params.agent.value });
@@ -97,15 +105,17 @@ export function useHeaderButtons(params: Params) {
       if (seq !== requestSeq) return;
       buttons.value = isUnknownArray(data.buttons) ? data.buttons.filter(isHeaderButton) : [];
       chips.value = isUnknownArray(data.chips) ? data.chips.filter(isResolvedChip) : null;
+      env.value = isUnknownArray(data.env) ? data.env.filter(isWorktreeEnvValue) : [];
     } catch {
       if (seq === requestSeq) {
         buttons.value = [];
         chips.value = null;
+        env.value = [];
       }
     }
   }
 
   useAutoRefresh(refresh, [params.cwd, params.session, params.agent, () => params.model?.value]);
 
-  return { buttons, chips, refresh };
+  return { buttons, chips, env, refresh };
 }

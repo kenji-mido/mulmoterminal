@@ -58,6 +58,17 @@ describe("antigravity-session", () => {
     expect(await watchForAntigravitySession(brainDir, before, { pollMs: 20, maxWaitMs: 1000 })).toBe(uuid);
   });
 
+  // Two watchers awaiting the same poll interval both saw a lone conversation unclaimed when the
+  // claim waited for the caller's `.then` (#1533) — so the watcher claims at the moment it selects.
+  it("claims the conversation it selects, synchronously with the selection", async () => {
+    const before = snapshotAntigravitySessions(brainDir);
+    const uuid = "d5e26682-7e52-4e43-a25a-83c464fd4e88";
+    fs.mkdirSync(path.join(brainDir, uuid));
+    const claimed = new Set<string>();
+    expect(await watchForAntigravitySession(brainDir, before, { pollMs: 20, maxWaitMs: 1000, claimed })).toBe(uuid);
+    expect(claimed.has(uuid)).toBe(true);
+  });
+
   // The cold-resume guard. Without it every requested key is handed to `agy --conversation`,
   // and agy answers a conversation it cannot find by silently starting a fresh one under the
   // old session's id.

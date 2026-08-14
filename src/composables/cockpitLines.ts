@@ -1,5 +1,6 @@
 import { computed, ref, type ComputedRef } from "vue";
 import { sanitizeCockpitLines, DEFAULT_COCKPIT_LINES, type CockpitLines } from "../../common/cockpitLines";
+import { postConfigField } from "./postConfigField";
 
 // How far each cockpit-roster line clamps, hydrated from /api/config and read by the grid.
 //
@@ -15,3 +16,11 @@ export const cockpitLines: ComputedRef<CockpitLines> = computed(() => current.va
 export const setCockpitLines = (input: unknown): void => {
   current.value = sanitizeCockpitLines(input);
 };
+
+// The whole object goes each time: the server merges by FIELD, so posting one line count would
+// sanitize the other two back to their defaults.
+export async function saveCockpitLines(next: CockpitLines): Promise<boolean> {
+  const r = await postConfigField("cockpitLines", next);
+  if (r.ok) setCockpitLines(r.value);
+  return r.ok;
+}

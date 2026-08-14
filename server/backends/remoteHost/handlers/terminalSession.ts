@@ -25,7 +25,9 @@ export const createTerminalSessionHandlers = ({
   // One sender per host, so its per-session ordering actually spans every command.
   const sendInput = createTerminalInputSender({ writeToSession, canClearBox, submitSequence, sessionAgent });
   return {
-    listTerminalSessions: async () => toJsonObject({ sessions: await listTerminalSessions() }),
+    // `{ sessions, icons }` — the rows plus the directory images they point into by `iconId`,
+    // deduplicated by content so a repository's worktrees send one copy between them (#1556).
+    listTerminalSessions: async () => toJsonObject(await listTerminalSessions()),
 
     // `suggestion` is the agent's own dim ghost text — the phone offers it as a chip,
     // since it has no Tab key to accept it with (#563). The screen also carries the

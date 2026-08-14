@@ -9,6 +9,7 @@
 // the open record on any path change — so route-derived state is already gone by the time a spawn
 // resolves. The prompt travels with the chat.
 import { parseCollectionSlashSeed, makeSyntheticCollectionResult } from "../../common/collectionSeed";
+import { withActiveProject } from "./collectionProject";
 import { isRecord } from "../../common/isRecord";
 import { fetchWithTimeout } from "../utils/fetchWithTimeout";
 
@@ -18,7 +19,7 @@ import { fetchWithTimeout } from "../utils/fetchWithTimeout";
  *  a slower first paint, while the cost of guessing wrong is a visible error. */
 async function isKnownCollection(slug: string): Promise<boolean> {
   try {
-    const res = await fetchWithTimeout("/api/collections/list");
+    const res = await fetchWithTimeout(withActiveProject("/api/collections/list"));
     if (!res.ok) return false;
     const body: unknown = await res.json();
     const collections = isRecord(body) && Array.isArray(body.collections) ? body.collections : [];

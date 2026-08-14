@@ -94,6 +94,7 @@ const rosterRow = (uid: number, over: Partial<CockpitRow> = {}): CockpitRow => (
   workPhase: null,
   headerColor: null,
   headerTextColor: null,
+  iconUrl: null,
   parked: false,
   ...over,
 });
@@ -294,7 +295,7 @@ describe("grid cockpit (list view)", () => {
 
   // #1131: the row's status used to live only in an 8px dot and a 10px badge, on a bar painted with
   // the DIRECTORY's colour — so it was invisible at the scale you scan the list at. Asserting on the
-  // row itself, and asserting that the row you are IN stays out of it: that edge already means
+  // row itself, and asserting that the row you are IN stays out of it: that blue ring already means
   // "you are here".
   it("marks a waiting row on the row itself, and leaves the expanded row alone", async () => {
     const w = mountCockpit([cell(0, "s0"), cell(1, "s1"), cell(2, "s2")], 0, [
@@ -304,12 +305,12 @@ describe("grid cockpit (list view)", () => {
     ]);
     await nextTick();
     const rows = w.findAll('[data-testid="cockpit-row"]');
-    expect(rows[0].classes()).toContain("border-l-[#4a9eff]");
+    expect(rows[0].classes()).toContain("shadow-[0_0_0_2px_#4a9eff]");
     expect(rows[0].classes()).not.toContain("animate-roster-alert");
     expect(rows[1].classes()).toContain("animate-roster-alert");
-    expect(rows[1].classes()).toContain("border-l-[#f59e0b]");
+    expect(rows[1].classes()).toContain("shadow-[0_0_0_2px_#f59e0b]");
     // The weak half of the split: finished is coloured, but it does not move.
-    expect(rows[2].classes()).toContain("border-l-done");
+    expect(rows[2].classes()).toContain("shadow-[0_0_0_2px_var(--done)]");
     expect(rows[2].classes()).not.toContain("animate-roster-alert");
   });
 

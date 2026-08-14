@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted } from "vue";
+import { useI18n } from "vue-i18n";
 import { useGoogleLink } from "../../composables/useGoogleLink";
 import SettingsButton from "../SettingsButton.vue";
-import { SECTION_HEADING } from "./sectionClasses";
+
+const { t } = useI18n();
 
 // The modal is v-if'd, so a fresh load on mount also picks up out-of-band changes
 // (`mulmoterminal google login`, a deleted token file).
@@ -17,9 +19,9 @@ const {
 } = useGoogleLink();
 
 const googleStatusText = computed(() => {
-  if (!googleStatus.value) return "Checking…";
-  if (googleStatus.value.pending) return "Waiting for consent in your browser…";
-  return googleStatus.value.linked ? "Linked" : "Not linked";
+  if (!googleStatus.value) return t("settings.google.checking");
+  if (googleStatus.value.pending) return t("settings.google.pending");
+  return t(googleStatus.value.linked ? "settings.google.linked" : "settings.google.notLinked");
 });
 
 // Broker (GCP settings-free link) removes the client secret requirement. When a broker is available,
@@ -27,14 +29,13 @@ const googleStatusText = computed(() => {
 const googleSecretHint = computed(() => {
   if (googleStatus.value?.brokerAvailable) return "";
   const presence = googleStatus.value?.clientSecret;
-  if (presence === "missing")
-    return "No OAuth client secret found in ~/.secrets. Add a Desktop client's client_secret_*.json there to enable sign-in, or use the GCP-settings-free broker link if available.";
-  if (presence === "ambiguous") return "Multiple client_secret_*.json files in ~/.secrets — keep exactly one.";
+  if (presence === "missing") return t("settings.google.secretMissing");
+  if (presence === "ambiguous") return t("settings.google.secretAmbiguous");
   return "";
 });
 
 async function onUnlinkGoogle() {
-  if (!window.confirm("Unlink this Google account? MulmoTerminal will lose Calendar access until you sign in again.")) return;
+  if (!window.confirm(t("settings.google.confirmUnlink"))) return;
   await unlinkGoogle();
 }
 
@@ -43,12 +44,16 @@ onUnmounted(disposeGoogle);
 </script>
 
 <template>
-  <h3 :class="SECTION_HEADING">Google account</h3>
-  <p class="mb-3 mt-1.5 text-[12px] text-dim">
-    Link a Google account so the <code>google</code> tool and your phone can read and create <strong>Calendar</strong> events. Sign-in opens in a new tab and
-    finishes on <strong>this machine</strong>, so use a browser here — over a remote connection, run <code>npx mulmoterminal@latest google login</code> instead.
-    The link is shared with MulmoClaude.
-  </p>
+  <i18n-t keypath="settings.google.intro" tag="p" class="mb-3 mt-1.5 text-[12px] text-dim">
+    <template #tool><code>google</code></template>
+    <template #calendar>
+      <strong>{{ t("settings.google.calendar") }}</strong>
+    </template>
+    <template #thisMachine>
+      <strong>{{ t("settings.google.thisMachine") }}</strong>
+    </template>
+    <template #cli><code>npx mulmoterminal@latest google login</code></template>
+  </i18n-t>
   <p v-if="googleSecretHint" data-testid="google-warn" class="mb-3 mt-1.5 text-[12px] text-err-text">{{ googleSecretHint }}</p>
   <div class="mb-3 flex items-center gap-2.5">
     <span class="text-[12px]" :class="googleStatus?.linked ? 'text-ok' : 'text-muted'">{{ googleStatusText }}</span>
@@ -57,9 +62,9 @@ onUnmounted(disposeGoogle);
       :disabled="googleBusy || googleStatus?.pending || (googleStatus?.clientSecret !== 'found' && !googleStatus?.brokerAvailable)"
       @click="connectGoogle"
     >
-      Sign in with Google
+      {{ t("settings.google.signIn") }}
     </SettingsButton>
-    <SettingsButton v-else :disabled="googleBusy" @click="onUnlinkGoogle">Unlink</SettingsButton>
+    <SettingsButton v-else :disabled="googleBusy" @click="onUnlinkGoogle">{{ t("settings.google.unlink") }}</SettingsButton>
   </div>
   <p v-if="googleError" data-testid="google-warn" class="mb-3 mt-1.5 text-[12px] text-err-text" role="alert">{{ googleError }}</p>
 </template>

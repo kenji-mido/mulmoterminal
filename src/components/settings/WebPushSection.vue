@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, watch } from "vue";
-import { SECTION_HEADING } from "./sectionClasses";
+import { useI18n } from "vue-i18n";
 import { PUSH_KINDS, type PushKind } from "../../../common/pushKinds";
 
 const props = defineProps<{ pushEnabled?: boolean | undefined; pushKinds?: PushKind[] | undefined }>();
@@ -8,6 +8,8 @@ const emit = defineEmits<{
   (e: "update-push-enabled", on: boolean): void;
   (e: "update-push-kinds", kinds: PushKind[]): void;
 }>();
+
+const { t } = useI18n();
 
 // Stateless: reflects props.pushEnabled, emits the new value up (App persists it).
 function onPushToggle(e: Event) {
@@ -17,11 +19,6 @@ function onPushToggle(e: Event) {
 // Which kinds of push to send (#850). The master toggle above says whether to notify at all;
 // this says which moments qualify, so a user who only wants finished turns can decline the ones
 // a blocked agent raises. Editable mirror of the saved value, like the other lists here.
-const PUSH_KIND_LABEL: Record<PushKind, string> = { finished: "Turn finished", waiting: "Waiting for you" };
-const PUSH_KIND_HELP: Record<PushKind, string> = {
-  finished: "the agent replied and the output is unread",
-  waiting: "it stopped to ask — a permission prompt or a question. Fires once per prompt, so a task that asks a lot pushes a lot",
-};
 const pushKindList = ref<PushKind[]>([...(props.pushKinds ?? [])]);
 watch(
   () => props.pushKinds,
@@ -36,28 +33,28 @@ function togglePushKind(kind: PushKind) {
 </script>
 
 <template>
-  <h3 :class="SECTION_HEADING">Web Push notifications</h3>
-  <p class="mb-3 mt-1.5 text-[12px] text-dim">
-    Send a push to your registered devices when a background task finishes. Requires the <strong>RemoteHost</strong> connection — its sign-in provides the
-    notification auth, so pushes only send while it's connected.
-  </p>
+  <i18n-t keypath="settings.push.intro" tag="p" class="mb-3 mt-1.5 text-[12px] text-dim">
+    <template #remoteHost>
+      <strong>{{ t("settings.push.remoteHost") }}</strong>
+    </template>
+  </i18n-t>
   <label class="flex cursor-pointer items-center gap-2">
-    <input type="checkbox" class="cursor-pointer" :checked="props.pushEnabled ?? false" aria-label="Send a Web Push to my devices" @change="onPushToggle" />
-    <span>Notify my devices</span>
+    <input type="checkbox" class="cursor-pointer" :checked="props.pushEnabled ?? false" :aria-label="t('settings.push.master')" @change="onPushToggle" />
+    <span>{{ t("settings.push.masterLabel") }}</span>
   </label>
   <div class="mt-2.5" :class="pushEnabled ? '' : 'pointer-events-none opacity-50'">
-    <p class="mb-1.5 text-[12px] text-dim">Which moments are worth a push:</p>
+    <p class="mb-1.5 text-[12px] text-dim">{{ t("settings.push.whichMoments") }}</p>
     <label v-for="kind in PUSH_KINDS" :key="kind" class="flex cursor-pointer items-start gap-2 py-0.5">
       <input
         type="checkbox"
         class="mt-1 cursor-pointer"
         :checked="pushKindList.includes(kind)"
         :disabled="!pushEnabled"
-        :aria-label="`Push when a session is ${kind}`"
+        :aria-label="t('settings.push.kindAria', { kind })"
         @change="togglePushKind(kind)"
       />
       <span class="text-[12px]">
-        <strong>{{ PUSH_KIND_LABEL[kind] }}</strong> — {{ PUSH_KIND_HELP[kind] }}
+        <strong>{{ t(`settings.push.kinds.${kind}`) }}</strong> — {{ t(`settings.push.help.${kind}`) }}
       </span>
     </label>
   </div>

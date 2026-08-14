@@ -9,9 +9,10 @@
 // Only a MANAGED worktree is limited. An ordinary directory takes as many terminals as the user
 // wants — that is what the grid is for.
 
-import { canonicalPath, isManagedWorktree, repoRoot } from "../git/worktrees.js";
+import { isManagedWorktree, repoRoot } from "../git/worktrees.js";
+import { canonicalPath } from "../infra/canonical-path.js";
 import { tmuxAttachedCounts } from "../infra/tmux.js";
-import { dirSession, type DirSession } from "./dir-session.js";
+import { dirSession, survivorSnapshot, type DirSession } from "./dir-session.js";
 
 export interface WorktreeOccupancy {
   /** Whether the directory is a managed worktree at all. Only those are limited. */
@@ -32,7 +33,7 @@ const NOT_A_WORKTREE: WorktreeOccupancy = { isWorktree: false, session: null };
 export async function worktreeOccupancy(cwd: string): Promise<WorktreeOccupancy> {
   const repo = await repoRoot(cwd).catch(() => null);
   if (!repo || !isManagedWorktree(repo, cwd)) return NOT_A_WORKTREE;
-  return { isWorktree: true, session: await dirSession(cwd, tmuxAttachedCounts(), Date.now()) };
+  return { isWorktree: true, session: await dirSession(cwd, tmuxAttachedCounts(), Date.now(), await survivorSnapshot()) };
 }
 
 // Launches on their way into a directory but not yet visible as a pty, counted by canonical path.

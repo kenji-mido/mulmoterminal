@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { useI18n } from "vue-i18n";
 // The user guide's per-language landing pages, surfaced where a first-time user is most
 // likely stuck: the empty grid and the settings modal. Both languages are offered as
 // self-labelled links (日本語 / English) rather than a locale-detected single one — each
@@ -7,11 +8,13 @@
 const GUIDE_JA = "https://receptron.github.io/mulmoterminal/guide/ja/";
 const GUIDE_EN = "https://receptron.github.io/mulmoterminal/guide/en/";
 const LINK_CLASS = "font-medium text-accent hover:underline";
+
+const { t } = useI18n();
 </script>
 
 <template>
   <p class="m-0 font-sans text-[12px] text-dim">
-    <span class="material-symbols-outlined" aria-hidden="true">menu_book</span> Not sure how to use MulmoTerminal? Read the guide —
+    <span class="material-symbols-outlined" aria-hidden="true">menu_book</span> {{ t("settings.guide.prompt") }}
     <a :class="LINK_CLASS" :href="GUIDE_JA" target="_blank" rel="noopener noreferrer">日本語</a>
     <span aria-hidden="true"> · </span>
     <a :class="LINK_CLASS" :href="GUIDE_EN" target="_blank" rel="noopener noreferrer">English</a>

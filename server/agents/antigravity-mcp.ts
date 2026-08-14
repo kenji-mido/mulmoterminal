@@ -20,19 +20,14 @@
 // answer what is registered.
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { TOOL_GROUPS, toolGroupServerId, LEGACY_GUI_SERVER_IDS, type ToolGroup } from "../../common/toolGroups.js";
+import { toolGroupServerId, type ToolGroup } from "../../common/toolGroups.js";
 import { isRecord } from "../../common/isRecord.js";
+import { symlinkFreeWriteTarget } from "../infra/symlink-guard.js";
+import { bridgeCommand, OUR_GUI_SERVER_IDS } from "./gui-mcp-bridge.js";
+import { excludeFromGit } from "./git-exclude.js";
 
 /** agy's workspace customization dir. `.agent`/`_agents`/`_agent` are also accepted by agy; we write one. */
 const CUSTOMIZATION_DIR = ".agents";
-
-// The absolute path of the node running THIS server, not the name `node`: the bridge is spawned
-// by agy, whose PATH is the user's login shell's and need not have the same node (nvm) on it.
-const bridgeCommand = (): { command: string; args: string[] } => ({
-  command: process.execPath,
-  args: [fileURLToPath(new URL("../mcp/bridge.mjs", import.meta.url))],
-});
 
 export const antigravityMcpConfigFile = (cwd: string): string => path.join(cwd, CUSTOMIZATION_DIR, "mcp_config.json");
 
@@ -43,16 +38,9 @@ export interface AntigravityMcpServer {
 }
 
 // Ours to rewrite, so an entry for a group that was switched OFF is removed rather than left
-// behind. Exactly the ids this file has ever WRITTEN, and nothing else — an id in here is an id we
-// delete out of a file the user owns.
-//
-// So `GUI_SERVER_ID` is deliberately NOT in it. This path only ever writes per-group ids; the
-// all-tools entry belongs to the claude/codex spawn config, not to `.agents/mcp_config.json`.
-// Listing it would mean a user's own agy server called `mt` is deleted on the next sync, by code
-// that never created it (Codex review on #1355). The LEGACY ids stay because an older version of
-// THIS file really did write the all-tools entry, and cleaning that up is what stops it outliving
-// the code that made it.
-const OUR_SERVER_IDS = new Set([...LEGACY_GUI_SERVER_IDS, ...TOOL_GROUPS.map(toolGroupServerId)]);
+// behind. Shared with grok's config-file path, which owes the user's file the same restraint —
+// see gui-mcp-bridge.ts for which ids are in it and why the all-tools id is not.
+const OUR_SERVER_IDS = OUR_GUI_SERVER_IDS;
 
 // The merged `mcpServers` map: the user's own entries untouched, ours replaced by exactly the
 // groups given. Pure, so the "never clobber a server we don't own" rule is testable without a
@@ -83,34 +71,19 @@ function readMcpServers(file: string): Record<string, unknown> | null {
   }
 }
 
-// Keep the file we write out of the user's `git status`, through `.git/info/exclude` rather than
-// their `.gitignore`: this is a local switch on a local machine, so it must not turn up in a diff
-// or be pushed to their team — the same reason claude's registration uses `-s local` scope
-// (infra/gui-mcp-registration.ts).
-//
-// Only when `.git/info` is really there: a worktree or a submodule keeps `.git` as a FILE pointing
-// elsewhere, and a session can also run in a directory below the repo root, where this path means
-// nothing. Both are left alone rather than guessed at — the cost is a line in `git status`, not a
-// broken session.
+// Kept out of the user's `git status` — see git-exclude.ts for why it is `.git/info/exclude` and
+// not their `.gitignore`.
 const EXCLUDE_ENTRY = `${CUSTOMIZATION_DIR}/mcp_config.json`;
-
-function excludeFromGit(cwd: string): void {
-  const exclude = path.join(cwd, ".git", "info", "exclude");
-  try {
-    if (!existsSync(path.dirname(exclude))) return;
-    const current = existsSync(exclude) ? readFileSync(exclude, "utf8") : "";
-    if (current.split("\n").includes(EXCLUDE_ENTRY)) return;
-    writeFileSync(exclude, current + (current === "" || current.endsWith("\n") ? "" : "\n") + EXCLUDE_ENTRY + "\n", "utf8");
-  } catch {
-    // Not ours to insist on. The config itself is already written; this only affects tidiness.
-  }
-}
 
 // Point this directory's agy sessions at the GUI MCP for exactly `groups`. Idempotent, and safe
 // to call on a directory that has none: the file is removed once nothing is left in it, so a
 // project stops carrying a config for a feature it no longer has switched on.
 export function syncAntigravityMcpConfig(cwd: string, groups: readonly ToolGroup[]): void {
   const file = antigravityMcpConfigFile(cwd);
+  // Same guard as the skills config beside it: a checkout can commit `.agents` or the file
+  // itself as a symlink to somewhere of the repo author's choosing, and every fs call below
+  // follows links (symlink-guard.ts).
+  if (!symlinkFreeWriteTarget(file)) return;
   const existing = readMcpServers(file);
   if (existing === null) return;
   const mcpServers = mergeAntigravityMcpServers(existing, groups);
@@ -121,7 +94,7 @@ export function syncAntigravityMcpConfig(cwd: string, groups: readonly ToolGroup
     }
     mkdirSync(path.dirname(file), { recursive: true });
     writeFileSync(file, JSON.stringify({ mcpServers }, null, 2) + "\n", "utf8");
-    excludeFromGit(cwd);
+    excludeFromGit(cwd, EXCLUDE_ENTRY);
   } catch (err) {
     // A read-only project is a reason for agy to have no GUI tools there, not for the session to
     // fail to start.

@@ -2,6 +2,7 @@
 // The model id and token count come from the transcript (server /api/session/:id); the agent kind
 // is known client-side.
 import { presetFor } from "./modelOption";
+import type { TerminalAgent } from "../../common/sessionAgent";
 
 // Substring → short label for Claude's model families, matched case-insensitively. Anything else
 // (a codex model, a future provider) falls back to the id's tail.
@@ -21,6 +22,9 @@ const K200_TOKENS = 200_000;
 // 200k entries. Add new 1M ids here when they ship, ahead of the bare-family fallbacks, or the
 // fallback claims them and the reading comes out 5x too large (#985).
 const CONTEXT_WINDOWS: { match: string; tokens: number }[] = [
+  // Every muse model shipped so far is 1M (muse-spark-1.2 measured); the family entry covers the
+  // ids beneath it, so there is no per-id row to keep in step.
+  { match: "muse", tokens: MILLION_TOKENS },
   { match: "opus-4-6", tokens: MILLION_TOKENS },
   { match: "opus-4-7", tokens: MILLION_TOKENS },
   { match: "opus-4-8", tokens: MILLION_TOKENS },
@@ -35,18 +39,39 @@ const CONTEXT_WINDOWS: { match: string; tokens: number }[] = [
 ];
 const PERCENT = 100;
 
-const AGENT_NAME = { claude: "Claude", codex: "Codex", antigravity: "Antigravity" } as const;
-export type BadgeAgent = keyof typeof AGENT_NAME;
+// A Record over TERMINAL_AGENTS rather than a free object: this is what the badge CALLS each agent,
+// and an agent missing from it would otherwise badge a session `undefined · <model>`.
+const AGENT_NAME: Record<TerminalAgent, string> = { claude: "Claude", codex: "Codex", antigravity: "Antigravity", grok: "Grok", muse: "Muse" };
+export type BadgeAgent = TerminalAgent;
+
+// A trailing qualifier in brackets — agy names a model `Gemini 3.6 Flash (High)`, where `(High)` is
+// the reasoning effort. The badge is `whitespace-nowrap flex-none`, so it does not truncate: it
+// pushes the rest of the header's chips out instead. Dropped here and kept in the tip, which is
+// where this file already puts the full name. Sliced rather than matched: the regex for it
+// backtracks super-linearly, and this runs on every model a cell renders.
+function withoutTrailingQualifier(name: string): string {
+  if (!name.endsWith(")")) return name;
+  const open = name.lastIndexOf("(");
+  if (open <= 0) return name; // no bracket, or a name that is nothing but one
+  return name.slice(0, open).trimEnd() || name;
+}
 
 export function shortModelLabel(model: string): string {
   const preset = presetFor(model);
   if (preset) return preset.label;
   const lower = model.toLowerCase();
   const family = CLAUDE_FAMILIES.find((f) => lower.includes(f.match));
-  return family ? family.label : (model.split("/").pop() ?? model);
+  if (family) return family.label;
+  return withoutTrailingQualifier(model.split("/").pop() ?? model);
 }
 
-function contextWindowTokens(model: string): number | null {
+function contextWindowTokens(model: string, reported: number | null | undefined): number | null {
+  // What the AGENT said, ahead of everything below: codex writes `model_context_window` into its
+  // rollout, grok `contextWindowTokens` into its signals and agy the window into its accounting
+  // store, and a number the running agent states beats one this file infers from a substring —
+  // which is how a 1M model was read against a 200k window and the badge came out 5x too high
+  // (#985). Absent means nobody told us, so the table still answers for Claude.
+  if (reported && reported > 0) return reported;
   // A preset carries the window its provider publishes, so a session on one shows a real % instead
   // of nothing — the substring list only knows Claude's own families.
   const preset = presetFor(model);
@@ -62,9 +87,12 @@ type ContextReading = { kind: "measured"; windowTokens: number; percent: number 
 // percentage tells us is that CONTEXT_WINDOWS has the wrong window for this model. Reported as
 // unknown rather than clamped — a precise wrong number gets acted on, and a clamp would hide the
 // gap entirely (#985).
-function readContext(model: string, contextTokens: number): ContextReading {
-  const windowTokens = contextWindowTokens(model);
+function readContext(model: string, contextTokens: number, reportedWindow: number | null | undefined): ContextReading {
+  const windowTokens = contextWindowTokens(model, reportedWindow);
   if (windowTokens === null) return { kind: "no-window" };
+  // Nothing measured yet — any session before its first turn, and an antigravity one whose
+  // accounting store cannot be read. `ctx 0%` would be a reading; there isn't one.
+  if (contextTokens <= 0) return { kind: "no-window" };
   const percent = Math.round((contextTokens / windowTokens) * PERCENT);
   return percent > PERCENT ? { kind: "overflow", windowTokens } : { kind: "measured", windowTokens, percent };
 }
@@ -84,7 +112,9 @@ function badgeTitle(agent: BadgeAgent, model: string, contextTokens: number, rea
 
 export type ModelBadge = { text: string; title: string };
 
-export function modelBadge(agent: BadgeAgent, model: string, contextTokens: number): ModelBadge {
-  const reading = readContext(model, contextTokens);
+// `contextWindow` is the window the agent itself reported, when it reported one — every agent but
+// Claude does.
+export function modelBadge(agent: BadgeAgent, model: string, contextTokens: number, contextWindow?: number | null): ModelBadge {
+  const reading = readContext(model, contextTokens, contextWindow);
   return { text: badgeText(shortModelLabel(model), reading), title: badgeTitle(agent, model, contextTokens, reading) };
 }

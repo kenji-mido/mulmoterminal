@@ -71,10 +71,14 @@ let changesDuringFetch: LiveChange<NotifierEntry>[] | null = null;
 // newest answer may be applied — an older one describes a moment already overtaken.
 let latestFetch = 0;
 
-/** Parse a collection deep-link (`/collections/<slug>?selected=<itemId>`) into its
- *  parts. String ops + URLSearchParams only — no regex (lint bans backtracking-prone
- *  patterns). Returns null for anything that isn't a collection target. */
-export function parseCollectionTarget(target: string | undefined): { slug: string; itemId?: string | undefined } | null {
+/** Parse a collection deep-link (`/collections/<slug>?selected=<itemId>&project=<id>`) into
+ *  its parts. String ops + URLSearchParams only — no regex (lint bans backtracking-prone
+ *  patterns). Returns null for anything that isn't a collection target.
+ *
+ *  `project` is the opaque project id the bell was published with, absent for the workspace
+ *  (and always absent on a link MulmoClaude wrote — it has one root). Without it the row would
+ *  open the same-named collection of whichever project is on screen. */
+export function parseCollectionTarget(target: string | undefined): { slug: string; itemId?: string | undefined; project?: string | undefined } | null {
   if (!target) return null;
   const prefix = "/collections/";
   if (!target.startsWith(prefix)) return null;
@@ -83,18 +87,22 @@ export function parseCollectionTarget(target: string | undefined): { slug: strin
   const rawSlug = queryAt === -1 ? rest : rest.slice(0, queryAt);
   if (!rawSlug) return null;
   let itemId: string | undefined;
+  let project: string | undefined;
   if (queryAt !== -1) {
     // URLSearchParams.get() returns an already-decoded value — decoding again would
     // throw "URI malformed" on a valid id containing a literal "%" (e.g. "100% done").
-    const selected = new URLSearchParams(rest.slice(queryAt + 1)).get("selected");
+    const query = new URLSearchParams(rest.slice(queryAt + 1));
+    const selected = query.get("selected");
     if (selected) itemId = selected;
+    const named = query.get("project");
+    if (named) project = named;
   }
   // The slug was string-sliced (not via URLSearchParams), so it is still encoded.
   // A malformed escape (e.g. "%E0%A4%A") makes decodeURIComponent throw; since this
   // runs from the row-click handler, treat a bad slug as non-actionable (return null)
   // rather than letting it crash activation.
   try {
-    return { slug: decodeURIComponent(rawSlug), itemId };
+    return { slug: decodeURIComponent(rawSlug), itemId, project };
   } catch {
     return null;
   }
@@ -210,7 +218,10 @@ export function useNotifications() {
   function activate(entry: NotifierEntry): boolean {
     const parsed = parseCollectionTarget(entry.navigateTarget);
     if (!parsed) return false;
-    browseNavigateToRecord(parsed.slug, parsed.itemId);
+    // The bell's OWN project, passed explicitly rather than left to the open page: a bell is
+    // app-wide and its record may live in a project the browser is not currently showing —
+    // `null` for a workspace bell, which must not inherit an open project either.
+    browseNavigateToRecord(parsed.slug, parsed.itemId, parsed.project ?? null);
     return true;
   }
 

@@ -168,15 +168,12 @@ export function gitUpdateNotice({ localSha, localShort, remoteSha, defaultBranch
 const LS_REMOTE_TIMEOUT_MS = 6000;
 
 // The git branch of the check: local HEAD vs the remote's, read with ls-remote so no fetch is
-// forced. Silent on a dirty tree (can't fast-forward) or any unreadable probe.
-async function gitUpdateNotice_(git) {
+// forced. Silent on a dirty tree (can't fast-forward) or any unreadable probe. `localShort` is
+// passed in because the caller has already read it for the version display.
+async function gitUpdateNotice_(git, localShort) {
   const status = await git(["status", "--porcelain"]);
   if (status === null || isTreeDirtyForUpdate(status)) return null;
-  const [localSha, localShort, lsRemote] = await Promise.all([
-    git(["rev-parse", "HEAD"]),
-    git(["rev-parse", "--short", "HEAD"]),
-    git(["ls-remote", "--symref", "origin", "HEAD"], LS_REMOTE_TIMEOUT_MS),
-  ]);
+  const [localSha, lsRemote] = await Promise.all([git(["rev-parse", "HEAD"]), git(["ls-remote", "--symref", "origin", "HEAD"], LS_REMOTE_TIMEOUT_MS)]);
   return gitUpdateNotice({
     localSha,
     localShort,
@@ -186,14 +183,32 @@ async function gitUpdateNotice_(git) {
   });
 }
 
-// The whole check, front to back: which install this is, then its notice (or null when
-// current). `pkgDir` is where the tool lives — a node_modules dir (→ npm) or a bare checkout
-// (→ git). `deps` lets tests drive it without spawning git or hitting the network; production
-// callers pass nothing and get the real git/registry probes bound to pkgDir.
-export async function computeUpdateNotice(pkgDir, currentVersion, deps = {}) {
+// What is running, without asking the network: the install kind and — for a checkout, where the
+// package.json version is only the last release — the commit that identifies the build. Local
+// probes only, so this is also what the UI gets when the update check is opted out.
+export async function readInstallInfo(pkgDir, currentVersion, deps = {}) {
+  const git = deps.runGit ?? ((args, timeout_ms) => runGit(pkgDir, args, timeout_ms));
+  const inWorkTree = hasNodeModulesSegment(pkgDir) ? false : (await git(["rev-parse", "--is-inside-work-tree"])) === "true";
+  const install = classifyInstall(pkgDir, inWorkTree);
+  return { install, version: currentVersion, commit: install === "git" ? await git(["rev-parse", "--short", "HEAD"]) : null };
+}
+
+// The whole check, front to back: what is running, what is newer, and the one line that says so
+// (null when current). `pkgDir` is where the tool lives — a node_modules dir (→ npm) or a bare
+// checkout (→ git). `deps` lets tests drive it without spawning git or hitting the network;
+// production callers pass nothing and get the real git/registry probes bound to pkgDir.
+export async function computeUpdateInfo(pkgDir, currentVersion, deps = {}) {
   const git = deps.runGit ?? ((args, timeout_ms) => runGit(pkgDir, args, timeout_ms));
   const fetchLatest = deps.fetchLatest ?? fetchLatestVersion;
-  const inWorkTree = hasNodeModulesSegment(pkgDir) ? false : (await git(["rev-parse", "--is-inside-work-tree"])) === "true";
-  if (classifyInstall(pkgDir, inWorkTree) === "git") return gitUpdateNotice_(git);
-  return npmUpdateNotice(currentVersion, await fetchLatest());
+  const info = await readInstallInfo(pkgDir, currentVersion, { runGit: git });
+  if (info.install === "git") return { ...info, latest: null, notice: await gitUpdateNotice_(git, info.commit) };
+  const latest = await fetchLatest();
+  // `latest` is what the UI OFFERS, so it carries only a version worth moving to — the registry
+  // answering with the version already installed is not news.
+  return { ...info, latest: latest && isNewerVersion(latest, currentVersion) ? latest : null, notice: npmUpdateNotice(currentVersion, latest) };
+}
+
+// The notice alone, for the launcher's console line.
+export async function computeUpdateNotice(pkgDir, currentVersion, deps = {}) {
+  return (await computeUpdateInfo(pkgDir, currentVersion, deps)).notice;
 }

@@ -148,6 +148,33 @@ describe("buildAgentWsUrl — antigravity", () => {
   });
 });
 
+describe("buildTerminalWsUrl — a custom agent (#1414)", () => {
+  const base = { host: "h", secure: false, sessionId: null };
+
+  it("sends no param when the built-in claude was picked", () => {
+    expect(new URL(buildTerminalWsUrl({ ...base })).searchParams.has("customAgent")).toBe(false);
+    expect(new URL(buildTerminalWsUrl({ ...base, customAgent: null })).searchParams.has("customAgent")).toBe(false);
+  });
+
+  // Only the ID travels: the configured list is the allowlist, resolved server-side at spawn,
+  // exactly as a launcher index is. A command line never crosses the wire.
+  it("sends the id alone, never the command", () => {
+    const q = new URL(buildTerminalWsUrl({ ...base, customAgent: "nemotron" })).searchParams;
+    expect(q.get("customAgent")).toBe("nemotron");
+  });
+
+  // It rides /ws with agent "claude", because Claude Code is what it runs — the wrapper only
+  // decides which command line starts it.
+  it("goes to /ws alongside the session's own query", () => {
+    const url = connWsUrl({ cwd: "/w", devTerminal: true, command: null, launcher: null, agent: "claude", customAgent: "nemotron" }, "sess-1", "h", false);
+    expect(new URL(url).pathname).toBe("/ws");
+    const q = new URL(url).searchParams;
+    expect(q.get("customAgent")).toBe("nemotron");
+    expect(q.get("session")).toBe("sess-1");
+    expect(q.get("cwd")).toBe("/w");
+  });
+});
+
 describe("buildTerminalWsUrl — the launch picker's choice (#584)", () => {
   const base = { host: "h", secure: false, sessionId: null };
 

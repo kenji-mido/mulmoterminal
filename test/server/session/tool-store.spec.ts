@@ -6,6 +6,11 @@ import path from "node:path";
 import { capToolOutput, createSessionStore, createToolStores, toolCallsChannel } from "../../../server/session/tool-store.js";
 import { isRecord } from "../../../common/isRecord.js";
 
+// Captured before any spy replaces the property, so a mock can still do the real write.
+const actualWriteFile = fs.writeFile;
+// Longer than the store's own coalescing window, so a save made after this starts a new write.
+const PAST_THE_SAVE_WINDOW_MS = 60;
+
 const SESSION = "11111111-2222-4333-8444-555555555555";
 const OTHER = "99999999-2222-4333-8444-555555555555";
 
@@ -63,6 +68,96 @@ describe("createSessionStore", () => {
     list.push({ n: 1 });
     await store.save(SESSION);
     expect(JSON.parse(await fs.readFile(path.join(root, "things", `${SESSION}.json`), "utf8"))).toEqual([{ n: 1 }]);
+  });
+
+  // A tool call saves twice (PreToolUse, then PostToolUse), and each save re-serialises the whole
+  // list. Both landing in one write is the point of the coalescing window (#1507).
+  it("folds saves that land in one window into a single write", async () => {
+    let writes = 0;
+    const store = createSessionStore("things", isThing, root);
+    const list = await store.get(SESSION);
+    const file = path.join(root, "things", `${SESSION}.json`);
+    const spy = vi.spyOn(fs, "writeFile").mockImplementation((...args: Parameters<typeof fs.writeFile>) => {
+      writes++;
+      return actualWriteFile(...args);
+    });
+    list.push({ n: 1 });
+    const first = store.save(SESSION);
+    list.push({ n: 2 });
+    const second = store.save(SESSION);
+    expect(second).toBe(first); // the second call joins the pending write rather than adding one
+    await Promise.all([first, second]);
+    spy.mockRestore();
+    expect(writes).toBe(1);
+    // And the one write carries BOTH changes, not just the one that scheduled it.
+    expect(JSON.parse(await fs.readFile(file, "utf8"))).toEqual([{ n: 1 }, { n: 2 }]);
+  });
+
+  it("writes again for a save that arrives after the window has closed", async () => {
+    const store = createSessionStore("things", isThing, root);
+    const list = await store.get(SESSION);
+    const file = path.join(root, "things", `${SESSION}.json`);
+    list.push({ n: 1 });
+    await store.save(SESSION);
+    list.push({ n: 2 });
+    await store.save(SESSION);
+    expect(JSON.parse(await fs.readFile(file, "utf8"))).toEqual([{ n: 1 }, { n: 2 }]);
+  });
+
+  // Two writeFile calls truncating and refilling one path at once can leave a file that is
+  // neither version, so a save must queue behind whatever is already writing.
+  it("never runs two writes for one session at the same time", async () => {
+    const store = createSessionStore("things", isThing, root);
+    const list = await store.get(SESSION);
+    let concurrent = 0;
+    let peak = 0;
+    const spy = vi.spyOn(fs, "writeFile").mockImplementation(async (...args: Parameters<typeof fs.writeFile>) => {
+      peak = Math.max(peak, ++concurrent);
+      await new Promise((r) => setTimeout(r, 20));
+      concurrent--;
+      return actualWriteFile(...args);
+    });
+    list.push({ n: 1 });
+    const saves = [store.save(SESSION)];
+    await new Promise((r) => setTimeout(r, PAST_THE_SAVE_WINDOW_MS)); // let the first write start
+    list.push({ n: 2 });
+    saves.push(store.save(SESSION));
+    await Promise.all(saves);
+    spy.mockRestore();
+    expect(peak).toBe(1);
+  });
+
+  // A write slower than the coalescing window is where a naive queue grows one entry per save —
+  // and since each write serialises the list as it stands when it RUNS, they would all put the
+  // same bytes on disk. Everything arriving before the waiting write starts must fold into it.
+  it("keeps at most one write waiting, however many saves arrive while one is running", async () => {
+    let writes = 0;
+    const store = createSessionStore("things", isThing, root);
+    const list = await store.get(SESSION);
+    const spy = vi.spyOn(fs, "writeFile").mockImplementation(async (...args: Parameters<typeof fs.writeFile>) => {
+      writes++;
+      await new Promise((r) => setTimeout(r, 150)); // slower than the window, so saves pile up behind it
+      return actualWriteFile(...args);
+    });
+    list.push({ n: 0 });
+    const saves = [store.save(SESSION)];
+    await new Promise((r) => setTimeout(r, PAST_THE_SAVE_WINDOW_MS)); // the first write is now running
+    for (let i = 1; i <= 5; i++) {
+      list.push({ n: i });
+      saves.push(store.save(SESSION));
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    await Promise.all(saves);
+    spy.mockRestore();
+    expect(writes).toBe(2); // the one that was running, plus one carrying all five
+    expect(JSON.parse(await fs.readFile(path.join(root, "things", `${SESSION}.json`), "utf8"))).toEqual([
+      { n: 0 },
+      { n: 1 },
+      { n: 2 },
+      { n: 3 },
+      { n: 4 },
+      { n: 5 },
+    ]);
   });
 
   it("reloads a session's list from disk in a fresh store", async () => {

@@ -3,7 +3,7 @@ title: 用語集 — 並列エージェント・worktree・バイブコーディ
 nav_title: 用語集
 layout: default
 parent: 日本語
-nav_order: 13
+nav_order: 17
 description: バイブコーディング（vibe coding）、並列エージェント、AI コーディングエージェント、git worktree、コックピットなど、MulmoTerminal のドキュメントに出てくる言葉を、実際の画面と結びつけて説明します。
 ---
 
@@ -59,6 +59,15 @@ MulmoTerminal はこのやり方を**ターミナルで**やるための画面�
 
 → [基本編](basics.html)
 
+## Agent Picker（エージェント選択）
+
+空きセルのランチャフォーム上部にある **Claude / Codex / Antigravity / Grok / Shell** のトグル。その
+セルを何として起動するかを決めます。**エージェントセッション**（再開できるトランスクリプト、
+コスト・コンテキスト表示、「入力待ち」状態）を開始するのはこれ。ユーザーが書いたコマンドを
+そのまま実行する **launch command**（ランチャチップ）とは別物です。
+
+→ [基本編](basics.html)
+
 ## コックピット・ロスター
 
 セルを拡大したときに横に出る、**全セッションの 1 行サマリー一覧**。ディレクトリ・AI 要約・
@@ -83,7 +92,7 @@ MulmoTerminal はこのやり方を**ターミナルで**やるための画面�
 Collections・Wiki・Accounting が読み書きするのはここで、MulmoClaude と併用するなら**両者で同じディレクトリ**（既定 `~/mulmoclaude`）にします。
 MulmoClaude を clone したディレクトリのことではありません。
 
-プロジェクトのディレクトリとは扱いが違い、**ワークスペースで起動した Claude のセルだけ**が GUI MCP をフルで持ちます（3.x までの単一ビューと同じ状態）。
+プロジェクトのディレクトリとは扱いが違い、**ここで起動した Claude / Codex のセッションは GUI ツールを全部持ちます**（3.x までの単一ビューと同じ状態）。Agent Picker でどちらを選んでも同じです。Antigravity と Grok は対象外（ワークスペースでも、それぞれそのディレクトリに登録されたものだけ → [Antigravity と Grok はどこでも登録が要る](basics.html#antigravity-gui-tools)）で、Shell や**起動コマンド**にはそもそも GUI ツールが付きません — コマンドラインが `claude` であっても同じです。起動コマンドは逐語的に実行されるだけで、エージェントのセッションにはなりません。
 
 → [どのディレクトリで起動するか](basics.html#launch-dir)
 
@@ -93,7 +102,7 @@ MulmoClaude を clone したディレクトリのことではありません。
 **複数のエージェントを同じリポジトリで走らせても衝突しない**ので、並列作業の前提になります。
 MulmoTerminal はセルのランチャから worktree を作って、そこでセッションを起動できます。
 
-→ [応用編](scenarios.html)
+→ [worktree で作業を隔離する](worktree.html)
 
 ## セッション永続化（tmux）
 

@@ -16,7 +16,7 @@ import {
   activityStateHydrated,
   aiTitles,
   antigravityConversations,
-  antigravityConversationsHydrated,
+  codexRollouts,
   backgroundSessionsHydrated,
   failedWorkersHydrated,
   unplacedSessionsHydrated,
@@ -44,14 +44,24 @@ import {
 import { formatHandoff, type HandoffShape } from "../session/handoff-text.js";
 import { projectSessionsDir } from "../session/project-dir.js";
 import { isUserHidden } from "../session/hidden-store.js";
-import { sessionAttached } from "../session/dir-session.js";
+import { runningKeyOf, runningSessionKeys, sessionAttached, survivorSnapshot } from "../session/dir-session.js";
+import type { SessionOccupancy } from "../../common/sessionOccupancy.js";
+import type { SessionRunning } from "../../common/sessionRunning.js";
 import { tmuxAttachedCounts } from "../infra/tmux.js";
 import { codexSessionsRoot } from "../agents/codex-session.js";
 import { listCodexSessions } from "../agents/codex-sessions.js";
 import { antigravityBrainRoot } from "../agents/antigravity-session.js";
 import { listAntigravitySessions } from "../agents/antigravity-sessions.js";
+import { grokSessionsRoot } from "../agents/grok-session.js";
+import { listGrokSessions } from "../agents/grok-sessions.js";
+import { listMuseSessionsForCwd, museSessionLogPath } from "../agents/muse-session.js";
+import { museConversations, museConversationsHydrated } from "../session/registry.js";
+import { conversationSessionKeys, type AgentConversation } from "../session/agent-conversations.js";
+import { AGENT_SESSION_LIST_PATHS } from "../../common/agentSessionList.js";
+import { TERMINAL_AGENTS, type TerminalAgent } from "../../common/sessionAgent.js";
 import type { SessionMeta } from "../session/types.js";
 import { parseActivityIds, selectSessionRows } from "../session/session-list.js";
+import { agentBadges } from "../session/agent-badges.js";
 import { sessionDetailView } from "../session/session-detail-view.js";
 import { clearedTranscripts } from "../session/cleared-transcripts.js";
 import { requestBody } from "./requestBody.js";
@@ -85,7 +95,32 @@ async function sessionDetail(req: Request<{ id: string }>, res: Response, freshe
   const cwd = workspaceForRoute(req.query.cwd, res);
   if (cwd === null) return;
   await activityStateHydrated; // a reconnect re-fetch must see the restored working/waiting, not idle
+  // `?agent=` decides where the two header badges are read from — nothing else on this route. It
+  // defaults to Claude, so a client that does not send it (an older build, the single view) gets
+  // exactly what it got before.
+  const agent = normalizeAgent(req.query.agent);
   const { lastPrompt: transcriptPrompt, lastResponse: transcriptResponse, userTurns, usage, context, workPhase } = await readSessionSummary(cwd, id);
+  let badges = agent === "claude" ? { usage, context } : await agentBadges(cwd, id, agent);
+  // A cell that is actually running Muse but whose persisted `agent` is still "claude" (created
+  // before the Muse feature, or reconnecting from an older client) would otherwise show no badge:
+  // the Claude transcript has no file for this id, so the read above is empty. Muse's own log
+  // answers it, and the header self-heals.
+  //
+  // Gated rather than run on the empty read alone: empty is also the normal state of every claude
+  // cell before its first turn, and the unguarded version folded a session log on each of those
+  // polls to answer for a session muse has never heard of.
+  //
+  // Two gates, cheapest first, because the map alone is not the whole answer (Codex on #1513). The
+  // in-memory map knows every session THIS SERVER started as muse, across a restart too — but a
+  // history row opened before its spawn recorded the mapping, and a session started from a plain
+  // terminal, are muse's own ids and appear in no map of ours. One indexed lookup covers those.
+  if (agent === "claude" && badges.context.model === null && badges.usage.inputTokens === 0) {
+    await museConversationsHydrated;
+    if (museConversations.has(id) || (await museSessionLogPath(id).catch(() => null))) {
+      const museFallback = await agentBadges(cwd, id, "muse").catch(() => null);
+      if (museFallback && museFallback.context.model !== null) badges = museFallback;
+    }
+  }
   // If we haven't titled it yet, kick off a summary; sessionDetailView falls back meanwhile.
   freshenRosterTitle(id, cwd, userTurns);
   await sessionMemosHydrated; // a cell seeding on boot must not be told its memo is gone
@@ -95,7 +130,7 @@ async function sessionDetail(req: Request<{ id: string }>, res: Response, freshe
     activity.get(id) ?? {},
     clearedTranscripts.has(id),
   );
-  res.json({ id, cwd, ...view, usage, context, workPhase });
+  res.json({ id, cwd, ...view, usage: badges.usage, context: badges.context, workPhase });
 }
 
 // The user's one-line note on a session (#1084). An empty text ERASES it — the same route, so a
@@ -169,6 +204,24 @@ async function lastTurn(req: Request, res: Response) {
 
 // List the chat sessions for the current project (CLAUDE_CWD), including
 // newly-created sessions that aren't persisted to disk yet.
+// Who is HOLDING each row, from one `list-clients` call for the whole list (#1207). The picker
+// used to answer this from the current page's own grid, which is blind to a second browser tab and
+// to a second mulmoterminal process — the two ways a running session got taken over without
+// anything warning first.
+//
+// `runningKey` is what is still RUNNING for each row, which `list-clients` cannot say: it reports
+// only sessions that have a client, and the ones that accumulate have none (#1467). Claude's key
+// is its conversation id (we pass it as `--session-id`), so unlike the other three agents there is
+// no log to consult — the row's own id is the key.
+//
+// Its own function so sessionList stays inside its line budget; both calls are per-LIST, not
+// per-row, so they belong at this boundary rather than inside the map.
+function withHolders(sessions: SessionMeta[]) {
+  const tmuxCounts = tmuxAttachedCounts();
+  const running = runningSessionKeys();
+  return sessions.map((s) => ({ ...s, attached: sessionAttached(s.id, tmuxCounts), runningKey: runningKeyOf([s.id], running) }));
+}
+
 async function sessionList(req: Request, res: Response) {
   try {
     await activityStateHydrated; // list working/waiting from the restored state, not a racing idle
@@ -239,26 +292,67 @@ async function sessionList(req: Request, res: Response) {
       .filter((s) => !isUserHidden(s.id)) // user hid it from the sidebar (transcript kept)
       .sort((a, b) => b.mtime - a.mtime);
 
-    // Who is HOLDING each row, from one `list-clients` call for the whole list (#1207). The
-    // picker used to answer this from the current page's own grid, which is blind to a second
-    // browser tab and to a second mulmoterminal process — the two ways a running session got
-    // taken over without anything warning first.
-    const tmuxCounts = tmuxAttachedCounts();
-    res.json({ cwd, sessions: sessions.map((s) => ({ ...s, attached: sessionAttached(s.id, tmuxCounts) })) });
+    res.json({ cwd, sessions: withHolders(sessions) });
   } catch (err) {
     console.error("[api] /api/sessions failed:", err);
     res.status(500).json({ error: String(err) });
   }
 }
 
-// codex's own sessions for a workspace (?cwd=, default CLAUDE_CWD), read from ~/.codex rollouts —
-// the single view's sidebar lists these so past codex conversations are switchable + resumable.
+/**
+ * Who is HOLDING each row of an agent's own conversation list, so the launcher can refuse one that
+ * is open somewhere else — the same field `/api/sessions` puts on a Claude row, answered from one
+ * `list-clients` call for the whole list.
+ *
+ * Two ways a conversation can be held, and the second is why this takes the log:
+ *
+ * 1. Resumed FROM this list, the session key IS the conversation id (ws-routes hands the id
+ *    straight to the spawner), so the id can be asked about directly.
+ * 2. Started from a grid cell, the key is one MulmoTerminal minted and only the conversation log
+ *    connects the two. Ask about the id alone and a conversation live in another cell reads as
+ *    free — and resuming it starts a SECOND agent process on it.
+ *
+ * grok needs no log for this: we mint its session id, so key and conversation id are the same
+ * string and case 1 covers it. It still passes an empty iterable rather than skipping the call, so
+ * all three lists answer the question the same way.
+ */
+function withAttached<T extends { id: string }>(
+  sessions: T[],
+  records: Iterable<AgentConversation>,
+  running: ReadonlySet<string>,
+): (T & SessionOccupancy & SessionRunning)[] {
+  // `running` comes from the caller's `survivorSnapshot()`, taken BEFORE the caller built its
+  // list: the snapshot refreshes the shared conversation logs first and reads the running keys
+  // after, so a session another MulmoTerminal process started is in the list, in the holders map
+  // and in `running` alike. Taking it here — after the list was built — left the agy list, whose
+  // ROWS are drawn from the conversation map, missing such a session entirely (#1534 review).
+  const holders = conversationSessionKeys(records);
+  const tmuxCounts = tmuxAttachedCounts();
+  return sessions.map((s) => {
+    const keys = [s.id, ...(holders.get(s.id) ?? [])];
+    return {
+      ...s,
+      attached: keys.some((key) => sessionAttached(key, tmuxCounts)),
+      runningKey: runningKeyOf(keys, running),
+    };
+  });
+}
+
+// codex's own sessions for a workspace (?cwd=, default CLAUDE_CWD), read from ~/.codex rollouts.
+//
+// This and the two below are what the launcher's "or resume here" list reads when the Agent Picker
+// is on something other than Claude (#1417): one list per agent rather than one merged list, so a
+// row is always resumed by the agent that wrote it. Claude's own rows come from /api/sessions
+// above, which reads ~/.claude/projects and nothing else.
 async function codexSessionList(req: Request, res: Response) {
   try {
     const cwd = workspaceForRoute(req.query.cwd, res);
     if (cwd === null) return;
+    const running = await survivorSnapshot();
+    // The hide filter stays in front of withAttached: a session the user set aside should not
+    // come back as a row just because something is attached to it.
     const sessions = (await listCodexSessions(codexSessionsRoot(), cwd, SESSION_LIST_LIMIT)).filter((s) => !isUserHidden(s.id));
-    res.json({ cwd, sessions });
+    res.json({ cwd, sessions: withAttached(sessions, codexRollouts.values(), running) });
   } catch (err) {
     console.error("[api] /api/codex/sessions failed:", err);
     res.status(500).json({ error: String(err) });
@@ -273,14 +367,64 @@ async function antigravitySessionList(req: Request, res: Response) {
   try {
     const cwd = workspaceForRoute(req.query.cwd, res);
     if (cwd === null) return;
-    await antigravityConversationsHydrated;
+    // BEFORE the list is built, not only before occupancy: the agy rows themselves are drawn from
+    // the conversation map (the cwd comes from OUR log), so a mapping another process appended has
+    // to be folded in first or the row is missing from this response entirely (#1534 review).
+    const running = await survivorSnapshot();
     const sessions = await listAntigravitySessions(antigravityBrainRoot(), antigravityConversations.values(), cwd, SESSION_LIST_LIMIT);
-    res.json({ cwd, sessions });
+    res.json({ cwd, sessions: withAttached(sessions, antigravityConversations.values(), running) });
   } catch (err) {
     console.error("[api] /api/antigravity/sessions failed:", err);
     res.status(500).json({ error: String(err) });
   }
 }
+
+// grok's own conversations for a workspace (?cwd=, default CLAUDE_CWD). The cheapest of the three:
+// ~/.grok/sessions is partitioned by working directory, so there is no date tree to scan and no
+// log to consult — the cwd IS the directory name (server/agents/grok-sessions.ts).
+async function grokSessionList(req: Request, res: Response) {
+  try {
+    const cwd = workspaceForRoute(req.query.cwd, res);
+    if (cwd === null) return;
+    const sessions = await listGrokSessions(grokSessionsRoot(), cwd, SESSION_LIST_LIMIT);
+    // No conversation log: grok's session key is the id we minted, which is also the directory
+    // name — so `withAttached` finds a holder by the row's own id (see its header).
+    res.json({ cwd, sessions: withAttached(sessions, [], await survivorSnapshot()) });
+  } catch (err) {
+    console.error("[api] /api/grok/sessions failed:", err);
+    res.status(500).json({ error: String(err) });
+  }
+}
+
+async function museSessionList(req: Request, res: Response) {
+  try {
+    const cwd = workspaceForRoute(req.query.cwd, res);
+    if (cwd === null) return;
+    const running = await survivorSnapshot();
+    const metas = await listMuseSessionsForCwd(cwd);
+    const sorted = [...metas].sort((a, b) => (b.updatedAtUs ?? 0) - (a.updatedAtUs ?? 0));
+    const sessions = sorted.slice(0, SESSION_LIST_LIMIT).map((m) => ({
+      id: m.id,
+      title: m.title || m.id,
+      mtime: m.updatedAtUs ? m.updatedAtUs / 1000 : 0,
+      model: m.modelId ?? undefined,
+    }));
+    res.json({ cwd, sessions: withAttached(sessions, museConversations.values(), running) });
+  } catch (err) {
+    console.error("[api] /api/muse/sessions failed:", err);
+    res.status(500).json({ error: String(err) });
+  }
+}
+
+// Which handler answers each agent's listing. Keyed by the same type as the paths, so the two are
+// added together or not at all.
+const AGENT_SESSION_LISTS: Record<TerminalAgent, (req: Request, res: Response) => Promise<void>> = {
+  claude: sessionList,
+  codex: codexSessionList,
+  antigravity: antigravitySessionList,
+  grok: grokSessionList,
+  muse: museSessionList,
+};
 
 export function mountSessionRoutes(app: Express, deps: SessionRouteDeps): void {
   app.get("/api/session/:id", (req, res) => sessionDetail(req, res, deps.freshenRosterTitle));
@@ -288,7 +432,6 @@ export function mountSessionRoutes(app: Express, deps: SessionRouteDeps): void {
   app.get("/api/activity", activitySnapshot);
   app.get("/api/transcript/timeline", toolTimeline);
   app.get("/api/transcript/last-turn", lastTurn);
-  app.get("/api/sessions", sessionList);
   // The sessions a loading grid should adopt: spawned VISIBLE by the server and never taken by a
   // cell (a scheduled task's chat, one the phone started, one an agent started from another
   // session). Deliberately its own endpoint answering a server-side marker, rather than the grid
@@ -312,6 +455,11 @@ export function mountSessionRoutes(app: Express, deps: SessionRouteDeps): void {
     });
     res.json({ sessions });
   });
-  app.get("/api/codex/sessions", codexSessionList);
-  app.get("/api/antigravity/sessions", antigravitySessionList);
+  // The four conversation listings are mounted FROM the shared map rather than from literals
+  // beside it (CodeRabbit on #1449). The map is what the launcher builds its URL from, so a fifth
+  // agent that adds an entry there and no route here would 404 for that agent alone — and the
+  // `Record<TerminalAgent, …>` on both sides means neither half can be forgotten.
+  for (const agent of TERMINAL_AGENTS) {
+    app.get(AGENT_SESSION_LIST_PATHS[agent], AGENT_SESSION_LISTS[agent]);
+  }
 }

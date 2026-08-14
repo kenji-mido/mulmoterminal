@@ -18,6 +18,9 @@ import { mountFilesBrowseRoutes } from "../files/files-browse.js";
 import { mountTmuxRoutes } from "../infra/tmux-routes.js";
 import { hideSessionId } from "../session/hidden-store.js";
 import { deleteSessionTranscripts } from "../session/transcript-delete.js";
+import { survivingSessions } from "../session/surviving-sessions.js";
+import { getSessionIdleReapDays } from "../config/config-routes.js";
+import { sweepIdleSessions } from "../session/reap-idle-sessions.js";
 import { mountHookRoute } from "../routes/hook-routes.js";
 import { mountPluginRoutes } from "../routes/plugin-routes.js";
 import { mountMcpRoutes } from "../routes/mcp-routes.js";
@@ -39,11 +42,15 @@ import { mountGridStateRoutes } from "../config/grid-state-routes.js";
 import { mountCommandSummaryRoute } from "../session/command-summary.js";
 import { mountCostRoute } from "../session/cost.js";
 import { mountCollectionRoutes } from "../backends/collections.js";
+// "Would this collection survive a clone?" — mounts itself beside the collection routes.
+import { mountSelfContainmentRoutes } from "../backends/collectionSelfContainment.js";
+import { syncCollectionWatcherRoots } from "../backends/collectionWatchers.js";
 import { mountGoogleRoutes } from "../backends/google.js";
 import { mountWikiRoutes } from "../backends/wiki.js";
 import { mountAccountingRoutes } from "../backends/accounting.js";
 import { mountFeedsRoutes } from "../backends/feeds.js";
 import { mountCalendarPushRoutes } from "../backends/calendarPush.js";
+import { listProjectRoots } from "../infra/project-root.js";
 import { mountRemoteHostRoutes } from "../backends/remoteHost/index.js";
 import { mountNotificationRoutes } from "../backends/notifier.js";
 import { mountWhisperRoutes } from "../backends/whisper.js";
@@ -61,6 +68,7 @@ import {
 } from "../session/registry.js";
 import { mountShortcutsRoutes } from "../backends/shortcuts.js";
 import { mountDecisionRoutes } from "./decision-routes.js";
+import { mountRoomRoutes } from "./room-routes.js";
 import { mountTranslationRoutes } from "../backends/translation.js";
 import { mountHtmlDispatchRoute, mountHtmlFileRoute, mountHtmlPreviewRoute } from "../backends/html.js";
 import { mountPresentPathRoot } from "../backends/presentPathRoot.js";
@@ -71,11 +79,12 @@ import { FILE_WRITE_CHANNEL, type FileWriteEvent } from "../../common/fileWriteC
 import type { createToolStores } from "../session/tool-store.js";
 import type { createClaudeSpawner } from "../session/spawn-claude.js";
 import type { createCodexSpawner } from "../session/spawn-codex.js";
+import type { createGrokSpawner } from "../session/spawn-grok.js";
 import type { createAntigravitySpawner } from "../session/spawn-antigravity.js";
+import type { createMuseSpawner } from "../session/spawn-muse.js";
 import type { createTranslationWorker } from "../session/translation-worker.js";
 import type { createTitleManager } from "../session/session-title.js";
-import { tmuxHasSession, tmuxKillSession, tmuxListSessionIds, tmuxAttachedClientCount } from "../infra/tmux.js";
-import { resumableSessionPredicate } from "../session/resumable-sessions.js";
+import { tmuxHasSession, tmuxKillSession } from "../infra/tmux.js";
 import type { SessionActivityDeps } from "../session/session-activity-deps.js";
 import { mountSpaFallback } from "../infra/spa-fallback.js";
 import { mountRateLimitRoutes, type RateLimitRouteDeps } from "../agents/rate-limit-routes.js";
@@ -95,6 +104,8 @@ export interface AppRouteDeps extends SessionActivityDeps {
   spawnClaudePty: ReturnType<typeof createClaudeSpawner>["spawnClaudePty"];
   spawnCodexPty: ReturnType<typeof createCodexSpawner>["spawnCodexPty"];
   spawnAntigravityPty: ReturnType<typeof createAntigravitySpawner>["spawnAntigravityPty"];
+  spawnGrokPty: ReturnType<typeof createGrokSpawner>["spawnGrokPty"];
+  spawnMusePty: ReturnType<typeof createMuseSpawner>["spawnMusePty"];
   translateViaHiddenChat: ReturnType<typeof createTranslationWorker>["translateViaHiddenChat"];
   freshenRosterTitle: ReturnType<typeof createTitleManager>["freshenRosterTitle"];
   reap: (id: string) => void;
@@ -143,6 +154,8 @@ export function mountAppRoutes(app: Express, deps: AppRouteDeps): void {
     spawnClaudePty: deps.spawnClaudePty,
     spawnCodexPty: deps.spawnCodexPty,
     spawnAntigravityPty: deps.spawnAntigravityPty,
+    spawnGrokPty: deps.spawnGrokPty,
+    spawnMusePty: deps.spawnMusePty,
     registerBackgroundSession: deps.registerBackgroundSession,
   });
 
@@ -167,6 +180,7 @@ export function mountAppRoutes(app: Express, deps: AppRouteDeps): void {
   // card and (later) the collections toolbar. The engine itself is configured below
   // once CLAUDE_CWD is the confirmed workspace.
   mountCollectionRoutes(app);
+  mountSelfContainmentRoutes(app);
 
   // Read-only wiki routes (GET /api/wiki[?slug=] + /graph + /lint) over the shared
   // workspace, thin consumers of @mulmoclaude/core/wiki/server. Claude authors the wiki
@@ -191,12 +205,24 @@ export function mountAppRoutes(app: Express, deps: AppRouteDeps): void {
   // workspace from the collection host configured below.
   mountCalendarPushRoutes(app);
 
+  // The projects a request may name, for a picker: ids and labels only — the paths they stand
+  // for stay server-side (server/infra/project-root.ts).
+  //
+  // Deliberately OUTSIDE `/api/collections/*`. MulmoClaude's `src/config/apiRoutes.ts` is the
+  // naming authority in that namespace and has no project concept at all — it is a
+  // single-workspace app — so there is nothing to match and nothing to drift from. Mounting it
+  // there would also shadow `/api/collections/:slug` for a collection named `projects`.
+  app.get("/api/collection-projects", (_req, res) => {
+    res.json({ projects: listProjectRoots() });
+  });
+
   // Notification REST surface (list active / history, dismiss one) — backs the toolbar
   // bell. The engine is configured below once pubsub + the workspace exist.
   mountNotificationRoutes(app);
 
-  // Scheduler REST surface (read-only list of user cron tasks) — backs a future tasks
-  // UI. The tasks themselves are loaded + started below, once the spawn infra exists.
+  // Scheduler REST surface (read-only): every registered task with its execution state, and the
+  // run log. Backs a future tasks UI, and answers "did the worklog ever actually run?" today.
+  // The tasks themselves are loaded + started below, once the spawn infra exists.
   mountSchedulerRoutes(app, { workspace: CLAUDE_CWD });
 
   // Raw file serving (GET /api/files/raw?path=[&cwd=]) — backs collection image/file
@@ -307,7 +333,18 @@ function mountSessionFacingRoutes(app: Express, deps: AppRouteDeps): void {
   // GET/POST /api/config (workspace dir + directory presets) — in its own module.
   // GRID-ONLY (dev_tool): backs the grid launcher's default dir + the settings
   // modal's directory presets. The single view never calls it.
-  mountConfigRoutes(app, CLAUDE_CWD, readBuildId(path.join(deps.clientDir, "../dist")));
+  // A directory saved here is a project the collection watchers should mount for, and the sync
+  // is otherwise a 60s poll — long enough that a new project's first collection looks broken.
+  mountConfigRoutes(
+    app,
+    CLAUDE_CWD,
+    () => {
+      void syncCollectionWatcherRoots().catch((err: unknown) => {
+        console.warn("[collection-watchers] sync after a config write failed", err);
+      });
+    },
+    readBuildId(path.join(deps.clientDir, "../dist")),
+  );
 
   // Project-scoped file browsing + editing for the full-screen Files view
   // (GET /api/files/browse/{list,text,md}, PUT .../write — all ?cwd=&path=). Each
@@ -331,6 +368,7 @@ function mountSessionFacingRoutes(app: Express, deps: AppRouteDeps): void {
   // per-agent worktrees a cell launches into, so several agents work one repo in
   // isolated working trees.
   mountWorktreeRoutes(app, { isAllowedOrigin: deps.isAllowedOrigin });
+  mountRoomRoutes(app, { isAllowedOrigin: deps.isAllowedOrigin });
 
   // POST /api/pick-file opens the OS file dialog and returns the chosen absolute
   // path(s) — how a browser tab inserts a real filesystem path into the terminal
@@ -370,22 +408,25 @@ function mountSessionFacingRoutes(app: Express, deps: AppRouteDeps): void {
   // codex's own sessions (see routes/session-routes.ts).
   mountSessionRoutes(app, { freshenRosterTitle: deps.freshenRosterTitle, publishActivity: deps.publishActivity });
 
-  // Explicit close (reliable deps.reap over HTTP) + one-shot orphan cleanup. Extracted to a
-  // module so the origin guard / id validation / orphan-selection boundary are testable.
-  // Shared by the orphan cleanup (which must never deps.reap a resumable session) and the phone's
-  // session picker (which must never OFFER a non-resumable one) — the same rule read from
-  // both directions, so they can't drift apart.
+  mountSessionLifecycleRoutes(app, deps);
+}
 
+// Explicit close (reliable deps.reap over HTTP), the user's hide/delete, the idle sweep and the
+// surviving-session list. Its own function because the caller above is at its line budget, and
+// because these five belong together: every one of them ENDS or hides a session, and they share
+// the origin guard and the id validation that make that safe.
+function mountSessionLifecycleRoutes(app: Express, deps: AppRouteDeps): void {
   mountTmuxRoutes(app, {
     isAllowedOrigin: deps.isAllowedOrigin,
     isValidSessionId: (id) => SESSION_ID_RE.test(id),
     reapSession: deps.reap,
     hasTmux: tmuxHasSession,
     killTmux: tmuxKillSession,
-    listTmuxIds: tmuxListSessionIds,
-    attachedClientCount: tmuxAttachedClientCount,
-    resumablePredicate: resumableSessionPredicate,
     hideSession: hideSessionId,
     deleteTranscripts: deleteSessionTranscripts,
+    sweep: () => sweepIdleSessions(Date.now(), getSessionIdleReapDays()),
+    // `Date.now()` is read HERE rather than inside the builder, which stays pure and takes the
+    // moment as a number (session/surviving-sessions.ts).
+    survivingSessions: () => survivingSessions(Date.now(), getSessionIdleReapDays()),
   });
 }

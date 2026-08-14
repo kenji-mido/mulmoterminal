@@ -72,13 +72,22 @@ describe.skipIf(!isWindows)("spawnPty on Windows", () => {
 
   it("spawns a PTY for a bare name whose only match is an .exe", async () => {
     const term = spawnPty(PROBE, ["-e", "process.stdout.write('mt-probe ok')"], dir);
-    expect(term.pid).toBeGreaterThan(0);
     let output = "";
     term.onData((data) => {
       output += data;
     });
     expect(await exitCodeOf(term)).toBe(0);
     expect(output).toContain("mt-probe ok");
+    // `pid` is asserted HERE, not the moment spawnPty returned. node-pty fills it in from the
+    // conout worker's ready callback on Windows ("Not available until `ready` event emitted" —
+    // its own comment in windowsTerminal.js), so at spawn it reads 0 however well the spawn went;
+    // that is what broke this test at node-pty 1.2.0-beta.15 while all 18 .cmd spawns passed.
+    //
+    // Still asserted, rather than dropped, because a permanently-zero pid IS a regression worth
+    // catching: liveMuseSessions() hands these pids to the bridge's process-tree walk
+    // (server/session/bridge-session.ts), which is how a muse session is identified at all.
+    // Safe after the exit above — node-pty only ever assigns `_pid`, never clears it.
+    expect(term.pid).toBeGreaterThan(0);
   });
 
   // The reason resolve-bin.ts exists. When this starts failing, node-pty has learned to

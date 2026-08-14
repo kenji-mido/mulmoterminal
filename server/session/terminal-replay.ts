@@ -98,7 +98,59 @@ const splitSequenceLength = (combined: string, cutAt: number, cut: string): numb
 export function appendBoundedOutput(buffer: string, data: string, limit: number): string {
   const combined = buffer + data;
   if (combined.length <= limit) return combined;
-  const cutAt = combined.length - limit;
+  const cutAt = afterOrphanedSurrogate(combined, combined.length - limit);
   const cut = combined.slice(cutAt);
   return cut.slice(splitSequenceLength(combined, cutAt, cut));
+}
+
+// The OTHER boundary a character-count cut can land inside (#1639). `slice` counts UTF-16 code
+// units, so cutting between the halves of a surrogate pair keeps the low half alone — which is
+// not an error anywhere: the string stays a legal JS string, JSON.stringify emits it as
+// "\udf9f", and it first becomes visible as U+FFFD at the top of the restored screen.
+//
+// Resolved where the cut index is decided, so one number answers "where does the tail start"
+// before anything reads it — not because the escape scan below needs it in that order.
+//
+// What it acts on is the POSITION, not the provenance: a low surrogate sitting at the cut is
+// dropped whether this cut orphaned it or it was already there. One further into the retained
+// tail is untouched — nothing here scans the tail.
+//
+// So the helper is not a sanitiser, and does not need to be: its input is decoded pty output,
+// and a UTF-8 decoder answers invalid bytes with U+FFFD — it has no way to emit half a pair.
+//
+// Whether the code unit before it is the matching high half is deliberately not checked: it
+// would only ever agree, since both cases it distinguishes want the same answer.
+const afterOrphanedSurrogate = (text: string, at: number): number => {
+  const code = text.charCodeAt(at);
+  return code >= 0xdc00 && code <= 0xdfff ? at + 1 : at;
+};
+
+// How far past `limit` the retained tail is allowed to run before it is cut back.
+//
+// The slack is what makes the append cheap, and its size is a memory trade, not a speed one.
+// Every value tested appends in ~0.0002 ms; what changes is how much unflattened rope the tail
+// carries between cuts, and a rope of small chunks costs several times its character count in
+// cons nodes and per-string headers. Measured per session at a 1 MiB limit, 40-byte pty chunks:
+// 1.00 MB as it was, 2.54 MB at 1.25, 6.45 MB at 2.
+const TAIL_SLACK = 1.25;
+
+// Append pty output for replay WITHOUT paying for the bound on every chunk.
+//
+// appendBoundedOutput slices, which flattens, so calling it per chunk costs O(limit) however
+// few bytes arrived — 0.1 ms against a full 1 MiB buffer, ~11k times a second under a flooding
+// command. That is one core, and it is spent starving the pty read that would have drained the
+// child: six cells running the same command took 8230 ms instead of 2159 ms (#1506).
+//
+// Concatenation is what V8 keeps as a rope, so this is O(chunk); the exact cut happens once per
+// TAIL_SLACK-worth of appended output. Readers therefore get MORE than `limit` and must cut it
+// back themselves — see PtyEntry.buffer.
+export function growOutputTail(buffer: string, data: string, limit: number): string {
+  const grown = buffer + data;
+  return grown.length > limit * TAIL_SLACK ? appendBoundedOutput(grown, "", limit) : grown;
+}
+
+/** The exact bounded tail, for the two places that read a session's buffer out. Named rather
+ *  than inlined so "the buffer overruns its limit" has one answer instead of two. */
+export function boundedTail(buffer: string, limit: number): string {
+  return appendBoundedOutput(buffer, "", limit);
 }

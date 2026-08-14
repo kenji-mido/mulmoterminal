@@ -1,4 +1,5 @@
 import { isRepoEntry } from "../../common/repoEntry";
+import { normalizeGitlabHost } from "../../common/gitlabHosts";
 // The "may I add this?" rules for the settings lists: a PR repo, a cell launcher, an HTTP MCP
 // server. Each is a format check AND a uniqueness check, and each drives BOTH a button's
 // disabled state and the add handler's guard. They were written twice per rule (the computed
@@ -11,6 +12,14 @@ import { isRepoEntry } from "../../common/repoEntry";
 export function canAddRepo(repo: string, existing: readonly string[]): boolean {
   const trimmed = repo.trim();
   return isRepoEntry(trimmed) && !existing.includes(trimmed);
+}
+
+// A self-hosted GitLab host. Judged with the SAME normalizer the server sanitizes with, so a value
+// the button accepts is one the config will keep — an entry that vanishes on save looks like the
+// save failed. It also means a pasted `https://gitlab.example.com/` is accepted here too.
+export function canAddGitlabHost(host: string, existing: readonly string[]): boolean {
+  const normalized = normalizeGitlabHost(host);
+  return normalized !== null && !existing.includes(normalized);
 }
 
 export function canAddLauncher(label: string, command: string, existing: readonly { label: string }[]): boolean {

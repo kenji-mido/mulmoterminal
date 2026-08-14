@@ -147,6 +147,24 @@ export function wheelNotches(ticker: WheelTicker, ev: WheelDelta, cellHeightPx: 
   return Math.max(-MAX_NOTCHES_PER_EVENT, Math.min(MAX_NOTCHES_PER_EVENT, notches));
 }
 
+/** The notches owed at the END of a gesture, and it empties the bank.
+ *
+ *  Banking alone leaves a hole: an event worth less than a notch is consumed (it has to be — see
+ *  guardMouseWheel) and reports nothing, so a gesture that never adds up to one whole notch does
+ *  NOTHING AT ALL. A gentle nudge on a trackpad is exactly that — four 2px events is 0.7 of a
+ *  notch — and since only an agent cell takes this path, the same nudge scrolls a shell cell
+ *  fine. That reads as "the wheel is broken here" (#1200).
+ *
+ *  Rounded, not truncated: at the end of a gesture the fraction is all there is, so the question
+ *  is whether the user asked for a line or for nothing. Below half a notch is nothing — a stray
+ *  1px from resting a finger must not scroll. `wheelNotches` leaves |residual| < 1, so this is
+ *  -1, 0 or 1. */
+export function flushWheelResidual(ticker: WheelTicker): number {
+  const notches = Math.round(ticker.residual);
+  ticker.residual = 0;
+  return notches;
+}
+
 /** The press/release pair for a main-button click on a 1-based cell. Both are sent because
  *  which of the two a TUI acts on is its own choice — a real terminal delivers both. */
 export function clickReportSequences(col: number, row: number): [string, string] {

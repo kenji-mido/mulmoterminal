@@ -31,11 +31,15 @@ export interface TerminalWsUrlInput {
   devTerminal?: boolean | undefined; // grid dev terminal: no GUI MCP (?gui=0)
   launch?: LaunchChoice | null | undefined; // picked at launch; absent => the directory's default
   size?: TerminalSize | null | undefined; // the fitted geometry, so the pty is born at it
+  // A CUSTOM AGENT (#1414): the id of one of the user's own ways of starting Claude Code. Only the
+  // ID travels — the server resolves it against the configured list, which is the allowlist, the
+  // same way a launcher index is resolved. Absent => the `claude` binary.
+  customAgent?: string | null | undefined;
 }
 
 // The two session-terminal endpoints (/ws for claude, /ws/codex for codex) send the
 // identical session/cwd/gui query, so they share this assembly — only the path differs.
-function sessionTerminalWsUrl(path: string, { host, secure, sessionId, cwd, devTerminal, launch, size }: TerminalWsUrlInput): string {
+function sessionTerminalWsUrl(path: string, { host, secure, sessionId, cwd, devTerminal, launch, size, customAgent }: TerminalWsUrlInput): string {
   const params = new URLSearchParams();
   if (sessionId) params.set("session", sessionId);
   if (cwd) params.set("cwd", cwd);
@@ -44,6 +48,10 @@ function sessionTerminalWsUrl(path: string, { host, secure, sessionId, cwd, devT
   // the directory's own provider/model.
   if (launch?.provider) params.set("provider", launch.provider);
   if (launch?.model) params.set("model", launch.model);
+  // Claude only in practice — the other agents have no wrapper of their own — but sent from the
+  // shared assembly because that is where the session query lives, and a param the server ignores
+  // is cheaper than a second builder that could drift from this one.
+  if (customAgent) params.set("customAgent", customAgent);
   appendSize(params, size);
   const qs = params.toString();
   const suffix = qs ? `?${qs}` : "";
@@ -123,6 +131,8 @@ export interface AgentWsUrlInput {
 const AGENT_WS_PATH: Record<Exclude<TerminalAgent, "claude">, string> = {
   codex: "ws/codex",
   antigravity: "ws/antigravity",
+  grok: "ws/grok",
+  muse: "ws/muse",
 };
 
 export function buildAgentWsUrl(agent: Exclude<TerminalAgent, "claude">, input: AgentWsUrlInput): string {
@@ -141,6 +151,9 @@ export interface ConnTargetUrlInput {
   launcher: { index: number } | { shell: true } | null;
   // Which agent this slot runs. Absent means Claude, the default.
   agent?: TerminalAgent;
+  // A custom agent's id, when this slot was started from one (#1414). It rides `agent: "claude"`,
+  // because that is what it runs — the id only decides which command line spawns it.
+  customAgent?: string | null;
   launch?: LaunchChoice | null;
 }
 
@@ -171,5 +184,14 @@ export function connWsUrl(target: ConnTargetUrlInput, resumeId: string | null, h
   if (target.agent && target.agent !== "claude") {
     return buildAgentWsUrl(target.agent, { host, secure, size, sessionId: resumeId, cwd: target.cwd, devTerminal: target.devTerminal });
   }
-  return buildTerminalWsUrl({ host, secure, size, sessionId: resumeId, cwd: target.cwd, devTerminal: target.devTerminal, launch: target.launch });
+  return buildTerminalWsUrl({
+    host,
+    secure,
+    size,
+    sessionId: resumeId,
+    cwd: target.cwd,
+    devTerminal: target.devTerminal,
+    launch: target.launch,
+    customAgent: target.customAgent,
+  });
 }

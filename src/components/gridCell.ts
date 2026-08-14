@@ -13,7 +13,7 @@ import type { AttentionStatus } from "./attentionStatus";
 // once — the row is already `roster | terminal | pane`, and a fourth column leaves the terminal
 // unreadable on a laptop. Declared with the rest of the grid's contract because every cell type
 // renders the toggles and none of them owns the state.
-export type RightPane = "files" | "canvas" | "tools";
+export type RightPane = "files" | "canvas" | "tools" | "collections" | "github";
 
 export interface GridCellProps {
   expanded: boolean;
@@ -31,6 +31,12 @@ export interface GridCellProps {
   // DISABLED: the pane would open empty, and a button that explains why beats one that isn't
   // there to ask about.
   canvasAvailable?: boolean;
+  // Whether the ENLARGED cell's directory registered the `data` MCP group — the one
+  // manageCollection belongs to. False HIDES the Collections button rather than disabling it:
+  // a directory with no collection tools is not a place where collections are a thing, so there
+  // is nothing for a disabled button to explain. See TerminalGrid's `collectionsOpenable` for
+  // the one case that keeps it visible anyway (the pane is open and this is its only close).
+  collectionsAvailable?: boolean;
   home: string | null;
   // The server's workspace directory. Grid state, not the cell's: a cell compares its OWN cwd
   // against it to know whether it is the workspace, and then says so in its header badge — the
@@ -45,7 +51,7 @@ export interface GridCellEmits {
   // `open-canvas` is the unread-canvas chip on an UN-expanded cell: enlarge me AND open the
   // pane, in one gesture. Distinct from `toggle-canvas`, which toggles the pane on the cell
   // that is already enlarged.
-  (e: "toggle-expand" | "close" | "toggle-files" | "toggle-canvas" | "toggle-tools" | "open-canvas"): void;
+  (e: "toggle-expand" | "close" | "toggle-files" | "toggle-canvas" | "toggle-tools" | "toggle-collections" | "toggle-github" | "open-canvas"): void;
   // Swap this cell left (-1) or right (+1) in manual sort mode.
   (e: "move", dir: -1 | 1): void;
   // Report activity up so the grid can attention-sort in auto mode.

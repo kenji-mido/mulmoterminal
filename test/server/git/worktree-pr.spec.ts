@@ -1,5 +1,5 @@
 // @vitest-environment node
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { makeTempDir } from "../../support/tempDir.js";
 import { writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
@@ -7,6 +7,18 @@ import path from "node:path";
 import { createWorktree, gitTopLevel } from "../../../server/git/worktrees.js";
 import { compareUrl, pushWorktree, createOrOpenPR } from "../../../server/git/worktree-pr.js";
 import { rmDirRetrying, GIT_TEST_TIMEOUT_MS } from "./wtTestUtil.js";
+
+// git runs for real here — the point of these tests is a real repo, a real worktree and a real
+// push. `gh` does not: it is the one external binary the suite would otherwise start, and two
+// cold `gh.exe` starts cost ~19s of this file's 30s budget on the Windows runner while the same
+// tests' git work costs ~2s (#1481). "No CLI can answer here" is the CONDITION being tested, so
+// say it, rather than leaving it to whatever `gh` the machine happens to have.
+vi.mock("../../../server/git/spawn-collect.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../server/git/spawn-collect.js")>();
+  const spawnCollect: typeof actual.spawnCollect = (bin, args, opts) =>
+    bin === "git" ? actual.spawnCollect(bin, args, opts) : Promise.resolve({ ok: false, stdout: "", stderr: `${bin}: no such CLI here` });
+  return { ...actual, spawnCollect };
+});
 
 describe("compareUrl", () => {
   it("builds the GitHub compare/open-PR url, keeping the branch slash raw", () => {
@@ -106,7 +118,8 @@ describe("push / PR actions", () => {
       g(wt.path, "commit", "-m", "work");
 
       const res = await createOrOpenPR(wt.path);
-      // No CLI can make a request here and the remote is on no forge we know → no page to fall back to
+      // No CLI can make or find the request (stubbed above) and the remote is on no forge we
+      // know → no page to fall back to
       expect(res.ok).toBe(false);
       expect(res.reason).toBe("no-forge");
       // but the push half still landed the branch on the remote

@@ -58,16 +58,47 @@ describe("codex-session fs helpers", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it("reads the meta from the first line of a multi-line rollout", () => {
+  it("reads the meta from the first line of a multi-line rollout", async () => {
     const file = writeRollout(root, UUID_A, "/work", ['{"type":"message"}', '{"type":"message"}']);
-    expect(readSessionMeta(file)).toEqual({ id: UUID_A, cwd: "/work" });
+    expect(await readSessionMeta(file)).toEqual({ id: UUID_A, cwd: "/work" });
   });
-  it("returns null reading a missing file", () => {
-    expect(readSessionMeta(path.join(root, "nope.jsonl"))).toBeNull();
+  it("returns null reading a missing file", async () => {
+    expect(await readSessionMeta(path.join(root, "nope.jsonl"))).toBeNull();
   });
   it("lists rollouts under today's day dir", () => {
     writeRollout(root, UUID_A, "/work");
     expect(listRecentRollouts(root)).toHaveLength(1);
+  });
+});
+
+// The read is asynchronous now, so the session a watcher speaks for can die DURING it. A claim that
+// outlives its session is either an attribution to a dead pty or a rollout nothing else can ever
+// take, so the watcher gives it back (Codex on #1555).
+describe("watchForCodexSession cancellation", () => {
+  let root: string;
+  beforeEach(() => {
+    root = mkdtempSync(path.join(tmpdir(), "mt-codex-"));
+  });
+  afterEach(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it("keeps neither the rollout nor its claim when the session was cancelled", async () => {
+    const before = snapshotSessions(root);
+    const file = writeRollout(root, UUID_A, "/a");
+    const claimed = new Set<string>();
+    const result = await watchForCodexSession(root, before, { cwd: "/a", claimed, isCancelled: () => true, maxWaitMs: 0 });
+    expect(result).toBeNull();
+    expect(claimed.has(file)).toBe(false);
+  });
+
+  it("keeps both when it was not cancelled", async () => {
+    const before = snapshotSessions(root);
+    const file = writeRollout(root, UUID_A, "/a");
+    const claimed = new Set<string>();
+    const result = await watchForCodexSession(root, before, { cwd: "/a", claimed, isCancelled: () => false, maxWaitMs: 0 });
+    expect(result?.file).toBe(file);
+    expect(claimed.has(file)).toBe(true);
   });
 });
 
@@ -80,44 +111,72 @@ describe("pickFreshSession", () => {
     rmSync(root, { recursive: true, force: true });
   });
 
-  it("returns null when nothing appeared after the snapshot", () => {
+  it("returns null when nothing appeared after the snapshot", async () => {
     writeRollout(root, UUID_A, "/a");
     const before = snapshotSessions(root);
-    expect(pickFreshSession(root, before, null)).toBeNull();
+    expect(await pickFreshSession(root, before, null)).toBeNull();
   });
-  it("attributes a single fresh rollout (unambiguous)", () => {
+  it("attributes a single fresh rollout whose cwd agrees (unambiguous)", async () => {
     const before = snapshotSessions(root);
     writeRollout(root, UUID_A, "/a");
-    expect(pickFreshSession(root, before, "/anything")?.id).toBe(UUID_A);
+    expect((await pickFreshSession(root, before, "/a"))?.id).toBe(UUID_A);
   });
-  it("attributes the unique cwd match when several are fresh", () => {
+
+  it("attributes a single fresh rollout when the caller has no cwd to check", async () => {
+    const before = snapshotSessions(root);
+    writeRollout(root, UUID_A, "/a");
+    expect((await pickFreshSession(root, before, null))?.id).toBe(UUID_A);
+  });
+
+  // The #1533 case: two spawns in DIFFERENT directories share ~/.codex, so "exactly one new file"
+  // used to fire before the cwd was consulted — and the slower spawn claimed the faster spawn's
+  // rollout across directories. Sole no longer beats a cwd that disagrees.
+  it("refuses a single fresh rollout recorded for another directory", async () => {
+    const before = snapshotSessions(root);
+    writeRollout(root, UUID_A, "/a");
+    expect(await pickFreshSession(root, before, "/somewhere-else")).toBeNull();
+  });
+  it("attributes the unique cwd match when several are fresh", async () => {
     const before = snapshotSessions(root);
     writeRollout(root, UUID_A, "/a");
     writeRollout(root, UUID_B, "/b");
-    expect(pickFreshSession(root, before, "/b")?.id).toBe(UUID_B);
+    expect((await pickFreshSession(root, before, "/b"))?.id).toBe(UUID_B);
   });
-  it("refuses to guess when several fresh rollouts share the cwd", () => {
+  it("refuses to guess when several fresh rollouts share the cwd", async () => {
     const before = snapshotSessions(root);
     writeRollout(root, UUID_A, "/same");
     writeRollout(root, UUID_B, "/same");
-    expect(pickFreshSession(root, before, "/same")).toBeNull();
+    expect(await pickFreshSession(root, before, "/same")).toBeNull();
   });
-  it("refuses to guess when several are fresh and none matches the cwd", () => {
+  it("refuses to guess when several are fresh and none matches the cwd", async () => {
     const before = snapshotSessions(root);
     writeRollout(root, UUID_A, "/a");
     writeRollout(root, UUID_B, "/b");
-    expect(pickFreshSession(root, before, "/other")).toBeNull();
+    expect(await pickFreshSession(root, before, "/other")).toBeNull();
   });
-  it("skips a rollout already claimed by another session", () => {
+  it("skips a rollout already claimed by another session", async () => {
     const before = snapshotSessions(root);
     const a = writeRollout(root, UUID_A, "/same");
     writeRollout(root, UUID_B, "/same");
-    expect(pickFreshSession(root, before, "/same", new Set([a]))?.id).toBe(UUID_B);
+    expect((await pickFreshSession(root, before, "/same", new Set([a])))?.id).toBe(UUID_B);
   });
-  it("returns null when the only fresh rollout is already claimed", () => {
+  // Reading the meta is asynchronous now, so selecting and claiming are no longer one tick apart by
+  // construction. Two watchers polling together must still not both take the same rollout — that is
+  // the duplicate attribution #1533 exists to prevent, and it would map one conversation to two
+  // session ids (Codex on #1555).
+  it("gives one rollout to only ONE of two watchers polling at the same time", async () => {
+    const before = snapshotSessions(root);
+    writeRollout(root, UUID_A, "/a");
+    const claimed = new Set<string>();
+    const picks = await Promise.all([pickFreshSession(root, before, "/a", claimed), pickFreshSession(root, before, "/a", claimed)]);
+    expect(picks.filter((p) => p !== null)).toHaveLength(1);
+    expect(claimed.size).toBe(1);
+  });
+
+  it("returns null when the only fresh rollout is already claimed", async () => {
     const before = snapshotSessions(root);
     const a = writeRollout(root, UUID_A, "/a");
-    expect(pickFreshSession(root, before, null, new Set([a]))).toBeNull();
+    expect(await pickFreshSession(root, before, null, new Set([a]))).toBeNull();
   });
 });
 
@@ -146,5 +205,16 @@ describe("watchForCodexSession", () => {
     const before = snapshotSessions(root);
     const found = await watchForCodexSession(root, before, { pollMs: 10, maxWaitMs: 40 });
     expect(found).toBeNull();
+  });
+
+  // Two watchers awaiting the same poll interval both saw a lone rollout unclaimed when the claim
+  // waited for the caller's `.then` (#1533) — so the watcher claims at the moment it selects.
+  it("claims the rollout it selects, synchronously with the selection", async () => {
+    const before = snapshotSessions(root);
+    const file = writeRollout(root, UUID_A, "/work");
+    const claimed = new Set<string>();
+    const found = await watchForCodexSession(root, before, { pollMs: 10, maxWaitMs: 500, cwd: "/work", claimed });
+    expect(found?.id).toBe(UUID_A);
+    expect(claimed.has(file)).toBe(true);
   });
 });

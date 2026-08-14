@@ -126,7 +126,7 @@ export function resolveHeader(config: HeaderConfig, ctx: HeaderContext): Resolve
   // null buttons == unconfigured → the built-in defaults; an explicit list (even empty) replaces them.
   const buttons = (config.buttons ?? DEFAULT_BUTTONS).filter((b) => isVisible(b, ctx)).map((b) => resolveButton(b, ctx));
   const chips = config.chips === null ? null : config.chips.map((c) => resolveChip(c, ctx)).filter((c): c is ResolvedChip => c !== null);
-  return { buttons, chips };
+  return { buttons, chips, env: ctx.worktreeEnv };
 }
 
 // POSIX/PowerShell single-arg quoting, so a substituted ${branch}/${repo}/${task} can't break out of the

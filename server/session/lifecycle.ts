@@ -32,6 +32,7 @@ import {
   isFailedWorker,
 } from "./registry.js";
 import { clearedTranscripts, forgetClearedTranscript } from "./cleared-transcripts.js";
+import { forgetEntitledToolGroups } from "./bridge-session.js";
 import { parseWaitGraceMs, reapDecisionFor, reapTimerDelay, shouldForgetActivity } from "./reap-policy.js";
 import { sessionRow, shouldRefreshReply } from "./activity-transition.js";
 import { flagEffect, type ActivityFlag } from "./activity-flag.js";
@@ -143,6 +144,12 @@ function reap(deps: SessionLifecycleDeps, id: string) {
   // visible via its on-disk record.
   knownSessions.delete(id);
   launchChoices.delete(id); // the picked backend dies with the session that used it
+  // The GUI tools a muse session was entitled to die with it too: the record exists for a bridge
+  // that is a child of this pty, and there is no bridge left to ask.
+  forgetEntitledToolGroups(id);
+  // NOT customAgentSessions: the transcript outlives the pty, and a resume ignores the picker, so
+  // dropping the mapping here would silently continue that conversation on plain claude (a
+  // different model). Persisted for the same reason — see custom-agent-log.ts.
   lastPrompts.delete(id); // don't leak prompt text for torn-down sessions
   lastResponses.delete(id); // ditto, and keep this map from growing across closed sessions
   // The transcript stops being frozen here: the next claude on this id (`--resume`, or a restart

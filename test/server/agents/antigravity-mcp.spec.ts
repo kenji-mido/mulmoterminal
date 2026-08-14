@@ -104,4 +104,15 @@ describe("syncAntigravityMcpConfig", () => {
     syncAntigravityMcpConfig(dir, ["render"]);
     expect(fs.readFileSync(file, "utf8")).toBe("not json");
   });
+
+  // Same reason as the skills config beside it (antigravity-skills.spec.ts): a checkout can
+  // commit the file as a symlink, and the sync's writes follow links.
+  it.skipIf(process.platform === "win32")("refuses to write through a symlinked mcp_config.json", () => {
+    const target = path.join(dir, "their-own.json");
+    fs.writeFileSync(target, "{}");
+    fs.mkdirSync(path.dirname(antigravityMcpConfigFile(dir)), { recursive: true });
+    fs.symlinkSync(target, antigravityMcpConfigFile(dir));
+    syncAntigravityMcpConfig(dir, ["render"]);
+    expect(fs.readFileSync(target, "utf8")).toBe("{}");
+  });
 });

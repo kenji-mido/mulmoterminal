@@ -26,11 +26,18 @@ export const CELL_STATUS = {
 // `done` mixes its own wash rather than reusing `bg-selected` like `working`: on a tile the frame
 // is thin and the header is a third of what you see, so a header that stayed selection-blue would
 // keep the two states looking alike at grid distance — the complaint that started #1307.
+// Every state's background goes through --cell-header-bg, with the theme's own wash as the
+// var's FALLBACK. The variable is emitted per state (headerStatusStyleFor), so an unconfigured
+// cell never sets it in the three active states and the wash below is what paints — while a
+// directory that recoloured a status replaces the wash without a second class racing this one.
 export const HEADER_STATUS = {
   idle: `bg-[var(--cell-header-bg,var(--bg-panel))] border-b-border ${HEADER_FG}`,
-  working: `bg-selected border-b-accent ${HEADER_FG}`,
-  done: `bg-[color-mix(in_srgb,var(--done)_20%,var(--bg-panel))] border-b-done ${HEADER_FG}`,
-  blocked: "bg-[var(--warn-bg-subtle)] border-b-amber text-warn",
+  working: `bg-[var(--cell-header-bg,var(--bg-selected))] border-b-accent ${HEADER_FG}`,
+  done: `bg-[var(--cell-header-bg,color-mix(in_srgb,var(--done)_20%,var(--bg-panel)))] border-b-done ${HEADER_FG}`,
+  // The ink names --warn rather than inheriting: `blocked` is the one state whose wash carries a
+  // meaning of its own, so its text has always been the amber that goes with it. A configured
+  // blocked colour still wins, through the same variable every other state uses.
+  blocked: "bg-[var(--cell-header-bg,var(--warn-bg-subtle))] border-b-amber text-[var(--cell-header-fg,var(--warn))]",
 } as const satisfies Record<AttentionStatus, string>;
 
 // Every state names its own colour: a base tint plus a status tint would be two `bg-*` utilities

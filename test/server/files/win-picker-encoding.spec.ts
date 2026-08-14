@@ -14,7 +14,7 @@
 // under test is the encoding of its stdout.
 import { describe, it, expect } from "vitest";
 import { spawnSync } from "node:child_process";
-import { parsePickerOutput, pickFileCommand } from "../../../server/files/pick-file.js";
+import { parsePickerOutput, pickFileCandidates } from "../../../server/files/pick-file.js";
 import { PS_UTF8_STDOUT } from "../../../server/files/win-powershell-utf8.js";
 
 const isWindows = process.platform === "win32";
@@ -28,7 +28,7 @@ const NON_ASCII_PATHS = ["C:\\proj\\日本語フォルダ", "C:\\proj\\中文目
 
 // The interpreter the route itself spawns, taken from the route, so this exercises the same
 // resolution rather than a second guess at where PowerShell lives.
-const { cmd: POWERSHELL } = pickFileCommand("win32", true);
+const { cmd: POWERSHELL } = pickFileCandidates("win32", true, process.env)[0];
 
 function powershellStdout(script: string, picked: string): Buffer {
   const result = spawnSync(POWERSHELL, ["-NoProfile", "-Command", script], { env: { ...process.env, [PATH_VAR]: picked } });

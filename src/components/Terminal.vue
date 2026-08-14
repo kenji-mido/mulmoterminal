@@ -22,6 +22,7 @@ import RunMenu from "./RunMenu.vue";
 import SkillMenu from "./SkillMenu.vue";
 import { skillSeed } from "./skillSeed";
 import GitBranchChip from "./GitBranchChip.vue";
+import WorktreeEnvChip from "./WorktreeEnvChip.vue";
 import { useHeaderButtons, hasPickFileButton, type HeaderButton } from "../composables/useHeaderButtons";
 import { useSessionContext } from "../composables/useSessionContext";
 import { runHeaderButton } from "../composables/useHeaderAction";
@@ -59,6 +60,9 @@ const props = defineProps<{
   // Which agent this terminal runs. Anything but "claude" connects to that agent's own
   // endpoint (/ws/codex, /ws/antigravity) instead of /ws. Absent means Claude.
   agent?: TerminalAgent;
+  // A custom agent's id (#1414), when the Agent Picker started this terminal from one of the
+  // user's own ways of running Claude Code. `agent` stays "claude" — that is what it runs.
+  customAgent?: string | null;
   // Provider/model picked in the launch form, for this session only (#584).
   launch?: LaunchChoice | null;
   runMenu?: boolean;
@@ -111,6 +115,7 @@ function currentTarget(): conn.ConnTarget {
     command: props.command ?? null,
     launcher: props.launcher ?? null,
     agent: props.agent ?? "claude",
+    customAgent: props.customAgent ?? null,
     launch: props.launch ?? null,
   };
 }
@@ -146,23 +151,31 @@ const { config: dirConfig } = useDirConfig(dirConfigCwd);
 const { context: sessionContext } = useSessionContext(
   computed(() => props.sessionId),
   serverCwd,
+  computed(() => props.agent ?? "claude"),
 );
-// Resolved header action buttons for this session's dir (GET /api/header) — the user's config, or the
-// built-in defaults when unconfigured. They target the running agent session, so they're suppressed on a
-// command/launcher terminal — those embed Terminal without a session and don't handle `run`.
-const headerButtonsCwd = computed(() => (props.command || props.launcher ? null : serverCwd.value));
-const { buttons: headerButtons } = useHeaderButtons({
-  cwd: headerButtonsCwd,
+// What GET /api/header resolves for this terminal's directory: the user's configured action buttons
+// (or the built-in defaults), and the per-tree values the directory reserved (#1367).
+//
+// Fetched for EVERY terminal, including a command/launcher one. The two halves answer different
+// questions and the fetch used to be skipped on the strength of the first: buttons target a running
+// agent session, which those cells do not have. The env values describe the DIRECTORY, and a
+// launcher cell is where `yarn dev` actually runs — so it is the one cell that most needs to say
+// which port it got. The buttons stay suppressed below rather than by withholding the request.
+const { buttons: resolvedButtons, env: worktreeEnv } = useHeaderButtons({
+  cwd: serverCwd,
   session: computed(() => props.sessionId),
   agent: computed(() => props.agent ?? "claude"),
   model: computed(() => sessionContext.value?.model ?? null),
 });
+const headerButtons = computed(() => (props.command || props.launcher ? [] : resolvedButtons.value));
 
 // `input`/`open` dispatch client-side. `shell` hands off to a command cell: the browser never holds the
 // command — it emits the button id + this session's context, and the server re-resolves it (see /ws/run).
 function onHeaderButton(button: HeaderButton): void {
   if (button.run !== "shell") {
-    runHeaderButton(button, slotKey, serverCwd.value);
+    // The banner the drop/paste hints use: a picker or a reveal that could not run says so HERE,
+    // rather than in a console nobody has open (#1447).
+    runHeaderButton(button, slotKey, serverCwd.value, (message) => void showHint(message, "folder_open"));
     return;
   }
   const command: RunCommand = {
@@ -606,6 +619,11 @@ onUnmounted(() => {
            rather than a `hideGit` prop, so who owns this space is answered by whoever fills it. -->
       <slot name="header-lead">
         <GitBranchChip :status="gitStatus" />
+        <!-- Beside the branch chip and only in the DEFAULT slot, so it lands exactly where the
+             command and launcher cells have room for it (#1367). A session cell fills this slot
+             with its path menu and shows the same values through its own `env` chip, so nothing is
+             drawn twice. -->
+        <WorktreeEnvChip :values="worktreeEnv" />
       </slot>
       <!-- Only while something is wrong with the CONNECTION. This is the socket's state, not the
            agent's — a cell's own dot already says whether the agent is working or waiting — and a

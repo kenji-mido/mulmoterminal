@@ -292,7 +292,8 @@ npx mulmoterminal@latest init
 ```
 
 - Node のバージョン、`claude` / `git` / `gh` / `glab` / `tmux` / `codex` / `ffmpeg` / `ollama` を
-  **`✓`（あり）・`✗`（必須なのに無い）・`○`（任意）** で表示します
+  **`✓`（あり）・`✗`（必須なのに無い）・`○`（任意）** で表示します。Linux では、このホストが
+  ファイルダイアログを何で開くかも確認します
 - Claude Code の履歴から、**よく使うディレクトリのチップ**を作ります
 - `~/.mulmoterminal/config.json` を書き出します（あなたの他の設定は残します）
 - `claude` があれば、そのまま対話設定（`/mulmoterminal-config` スキル）に入るか聞かれます
@@ -383,6 +384,7 @@ MulmoTerminal は普段の開発ツールを操縦するコックピットなの
 | 任意 | `codex` | セルで [Codex セッション](basics.html#claude-and-codex)を Claude と並べて動かす | `npm i -g @openai/codex` |
 | 任意 | `ffmpeg` | [GUI パネル](features.html)の mulmo-script プラグインからの動画生成 | `brew install ffmpeg` · `sudo apt install ffmpeg` |
 | 任意 | `ollama` | [claude-ollama](claude-ollama.html) — 完全ローカルのモデルで Claude Code を動かす | [ollama.com/download](https://ollama.com/download) |
+| Linux のみ | ファイルダイアログ | **Choose a folder** / **Insert a file path** ボタン。サーバが動いているマシンで OS のダイアログを開きます。macOS と Windows は OS 内蔵、**WSL** は Windows 側のダイアログを使うのでインストール不要です。Linux デスクトップではどれか 1 つ必要で、無ければボタンがその旨を表示します（パスを直接入力すれば使えます） | `sudo apt install zenity` · `sudo dnf install zenity` · `kdialog` / `qarma` / `yad` でも可 |
 
 いま何が足りないかは [`init`](#init) が一覧で出します。
 

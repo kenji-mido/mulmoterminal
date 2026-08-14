@@ -265,8 +265,12 @@ export function tmuxHasSession(id: string): boolean {
 
 // End a persistent session (explicit close / reap). Killing the pty only detaches our
 // client — the session (and its program) would otherwise keep running.
-export function tmuxKillSession(id: string): void {
-  tmux(["kill-session", "-t", tmuxSessionName(id)]);
+// Whether tmux actually ended it. Callers that just want it gone can ignore the answer; the boot
+// sweep cannot — it reports what it ended, and `server/index.ts` then deletes the settings file of
+// every session it was told about. A kill that failed silently would take a live session's file,
+// which can hold a provider's API token (CodeRabbit on #1486).
+export function tmuxKillSession(id: string): boolean {
+  return tmux(["kill-session", "-t", tmuxSessionName(id)]).status === 0;
 }
 
 // The rendered contents of a session's pane — the visible screen plus `historyLines` of
@@ -444,6 +448,55 @@ export function tmuxAttachedCounts(): Map<string, number> | null {
   return r.status === 0 ? parseTmuxClientSessions(r.stdout) : null;
 }
 
+// `list-sessions -F '<name> <activity>'` → when tmux last saw each session do anything, as an epoch
+// second. Parsed apart from the call so the shapes tmux can hand back — a name outside our prefix,
+// a line missing its number — are pinned without a tmux server.
+export function parseTmuxSessionActivity(stdout: string): Map<string, number> {
+  const activity = new Map<string, number>();
+  for (const line of stdout.split("\n")) {
+    const [name, seconds] = line.trim().split(/\s+/);
+    if (!name?.startsWith(SESSION_PREFIX) || seconds === undefined) continue;
+    const epoch = Number(seconds);
+    if (Number.isFinite(epoch)) activity.set(name.slice(SESSION_PREFIX.length), epoch);
+  }
+  return activity;
+}
+
+// How long each surviving session has been sitting, in one call (#1478). Null — not an empty map —
+// when tmux could not answer, so a caller can tell "nothing is idle" from "nobody could say"; the
+// list shows no age rather than an invented one.
+export function tmuxSessionActivity(): Map<string, number> | null {
+  const r = tmux(["list-sessions", "-F", "#{session_name} #{session_activity}"]);
+  return r.status === 0 ? parseTmuxSessionActivity(r.stdout) : null;
+}
+
+/** Parse `#{pane_pid} #{session_name}` rows into pane pid -> our session id. Split out so the
+ *  format, which is the one thing that can silently change under us, is asserted by a spec. */
+export function parseTmuxPanePids(stdout: string): Map<number, string> {
+  const panes = new Map<number, string>();
+  for (const line of stdout.split("\n")) {
+    const [pid, name] = line.trim().split(/\s+/, 2);
+    const numeric = Number(pid);
+    if (!Number.isInteger(numeric) || numeric <= 0 || !name?.startsWith(SESSION_PREFIX)) continue;
+    panes.set(numeric, name.slice(SESSION_PREFIX.length));
+  }
+  return panes;
+}
+
+/**
+ * The root process of every pane, keyed to the session it belongs to.
+ *
+ * This is what lets a process started BY an agent be traced back to the session that agent runs
+ * in, when nothing was handed to it: muse gives a plugin's MCP server a curated environment of 16
+ * variables (measured) — none of them ours — so the only thing that survives is the process tree,
+ * and the pane pid is where that tree meets a session id. See server/session/bridge-session.ts.
+ */
+export function tmuxPanePids(): Map<number, string> {
+  const r = tmux(["list-panes", "-a", "-F", "#{pane_pid} #{session_name}"]);
+  if (r.status !== 0) return new Map<number, string>();
+  return parseTmuxPanePids(r.stdout);
+}
+
 // Ids of sessions that survived (e.g. across a crash), for startup visibility.
 export function tmuxListSessionIds(): string[] {
   const r = tmux(["list-sessions", "-F", "#{session_name}"]);
@@ -454,9 +507,14 @@ export function tmuxListSessionIds(): string[] {
     .map((n) => n.slice(SESSION_PREFIX.length));
 }
 
-// A tmux `mt-<id>` is resumable — an orphan cleanup must NOT reap it — when it's live
-// (an attached pty), a persisted grid session, or has a Claude/Codex transcript on disk.
-// Pure so the safe-cleanup rule ("never kill a resumable session") is unit-testable.
+// Whether a tmux `mt-<id>` is worth OFFERING: it's live (an attached pty), a persisted grid
+// session, or has a Claude/Codex transcript on disk — the phone's session picker, which must not
+// list a row that opens onto nothing.
+//
+// It is NOT the rule for ending one, though it was used as that for a long time (#1467). Every limb
+// here except `live` is a record of the PAST — a transcript is never deleted, and the grid log is
+// append-only — so read as "may we reap this?", it answers no forever, and nothing was ever
+// cleaned up. The two questions below are the ones a cleanup actually asks.
 export function isResumableTmuxSession(
   id: string,
   live: ReadonlySet<string>,
@@ -465,4 +523,48 @@ export function isResumableTmuxSession(
   codexOnDisk: (id: string) => boolean,
 ): boolean {
   return live.has(id) || grid.has(id) || claudeOnDisk.has(id) || codexOnDisk(id);
+}
+
+// Whether ending this session keeps the conversation: something on disk can bring it back, so what
+// is lost is the work in flight and the scrollback — not the history.
+//
+// Only the on-disk halves, deliberately. A live pty says the session is in USE, and the grid log
+// says it once was a cell; neither restores anything, and counting them is why the Settings list
+// reported 20 of 22 sessions restorable when 15 were (#1479).
+export function isRestorableSession(id: string, claudeOnDisk: ReadonlySet<string>, codexOnDisk: (id: string) => boolean): boolean {
+  return claudeOnDisk.has(id) || codexOnDisk(id);
+}
+
+/** What ending a session without asking depends on. Every field is about NOW; nothing here is a
+ *  record of the past, which is the whole correction (#1467). */
+export interface ReapFacts {
+  /** Terminals holding it, or null when tmux could not say. */
+  attachedCount: number | null;
+  /** A pty for it in THIS process — a cell has it, whatever tmux thinks. */
+  liveHere: boolean;
+  /** Seconds since tmux last saw output, or null when tmux could not say. */
+  idleSeconds: number | null;
+  /** The threshold, in seconds. Zero means the sweep is off and nothing is reapable. */
+  idleThresholdSeconds: number;
+  /** The id parses as a session id at all. One that does not (a live `mt-undefined` was found —
+   *  #1533) is unreachable by EVERY route: nothing can attach it, resume it, or terminate it (the
+   *  routes validate the id), so it can only leak. Callers compute this with SESSION_ID_RE. */
+  validId: boolean;
+}
+
+/**
+ * May this session be ended on its own?
+ *
+ * Every "unknown" answers NO. An unreadable attach count and an unreadable age are the two ways
+ * tmux can decline to answer, and reaping on either would be killing a session on a guess — the one
+ * outcome worse than the pile-up this exists to clear.
+ */
+export function reapableTmuxSession({ attachedCount, liveHere, idleSeconds, idleThresholdSeconds, validId }: ReapFacts): boolean {
+  if (idleThresholdSeconds <= 0) return false;
+  if (liveHere || attachedCount !== 0) return false;
+  // Unreachable garbage does not get the idle grace: no amount of recency can make an invalid id
+  // reachable, and this sweep is the only thing that can ever end it (the terminate route refuses
+  // the id). Still only when nobody holds it — someone inspecting the pane by hand keeps it.
+  if (!validId) return true;
+  return idleSeconds !== null && idleSeconds >= idleThresholdSeconds;
 }

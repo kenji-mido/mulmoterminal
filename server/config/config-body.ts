@@ -18,6 +18,7 @@ export const ARRAY_FIELDS = [
   "prRepos",
   "gitlabHosts",
   "launchers",
+  "customAgents",
   "quickCommands",
   "pushKinds",
   "soundKinds",
@@ -34,7 +35,7 @@ export const NULLABLE_ARRAY_FIELDS = ["buttons", "chips"] as const;
 // The same deletion-by-malformed-body trap, for a field that is a keyed MAP rather than a
 // list: `{"sounds": []}` sanitizes to `{}`, which reads as "the user cleared every per-kind
 // sound". An array is rejected here rather than accepted as an empty map.
-export const OBJECT_FIELDS = ["sounds", "repoDirs"] as const;
+export const OBJECT_FIELDS = ["sounds", "repoDirs", "headerStatusColors"] as const;
 
 export function badArrayField(body: Record<string, unknown>): string | null {
   return ARRAY_FIELDS.find((field) => body[field] !== undefined && !Array.isArray(body[field])) ?? null;

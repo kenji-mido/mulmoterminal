@@ -4,28 +4,40 @@
 import type { WebSocket } from "ws";
 import { CLAUDE_CWD, PORT } from "../config/env.js";
 import { guiMcpEnv, carriesFullGuiMcp, fullGuiAllowedTools } from "./mcp-config.js";
-import { getUserMcpServers, getPrWorkdirFooter, getAppendSystemPrompt, getTerminalSubmit } from "../config/config-routes.js";
+import { getUserMcpServers, getPrWorkdirFooter, getAppendSystemPrompt, getTerminalSubmit, getCustomAgents } from "../config/config-routes.js";
 import { submitSequenceForAgent } from "../../common/terminalSubmit.js";
 import { buildClaudeArgs } from "../agents/claude-args.js";
 import { claudeAdapter } from "../agents/claude.js";
 import { appendedSystemPrompt } from "../agents/appended-prompt.js";
-import { claimFullGuiMcp, hookedSessions, knownSessions, launchChoices, ptys, resetSessionToolGroups } from "./registry.js";
-import { ptySpawn, ptyWouldReattach } from "./pty-spawn.js";
+import {
+  claimFullGuiMcp,
+  customAgentSessions,
+  hookedSessions,
+  knownSessions,
+  launchChoices,
+  ptys,
+  rememberCustomAgentSession,
+  resetSessionToolGroups,
+} from "./registry.js";
+import { ptySpawn, ptyWouldReattach, type PtySpawnEnv } from "./pty-spawn.js";
 import { ptyExitLine, ptyStartLine } from "./pty-exit-log.js";
 import { attachDraftInjection } from "./draft-injection.js";
-import { sendExitAndClose, sendFrame } from "./ws-frames.js";
-import { appendBoundedOutput } from "./terminal-replay.js";
+import { sendExitAndClose } from "./ws-frames.js";
+import { wireBufferedOutput } from "./output-relay.js";
 import { sessionExistsOnDisk } from "./session-reads.js";
 import type { PtyEntry } from "./types.js";
 import type { SpawnDeps } from "./spawn-deps.js";
+import { handlePtyExit } from "./pty-exit.js";
 import { loadDirConfig } from "../config/dir-config.js";
 import { repoRootSync } from "../git/repo-root-sync.js";
 import { workdirFooter } from "../git/pr-footer.js";
 import { getProviders } from "../config/config-routes.js";
 import { requireResolution, resolveProvider, type DirModelChoice } from "./provider-env.js";
-import { settingsArgument, mcpConfigArgument, withSettingsCleanup } from "./session-settings.js";
+import { settingsArgument, mcpConfigArgument, appendedPromptArgument, withSettingsCleanup, type AppendedPromptArgument } from "./session-settings.js";
 import { ensureDropsDir } from "./session-drops.js";
 import { effectiveChoice } from "./launch-choice.js";
+import { customAgentLaunch } from "./custom-agent-command.js";
+import type { CustomAgent } from "../../common/customAgents.js";
 
 export interface SpawnClaudeOptions {
   // Passed to claude as the first turn, so the session starts working before anyone
@@ -42,6 +54,15 @@ export interface SpawnClaudeOptions {
   // as a PAIR: a provider from one source with a model from the other is a combination
   // neither of them asked for. Absent — the usual case — means "use the directory's".
   launch?: DirModelChoice | undefined;
+  /** The id of a CUSTOM AGENT picked in the Agent Picker: run the user's own command line with
+   *  Claude Code's argv appended to it, instead of the `claude` binary with that argv (#1414).
+   *  Everything else about this session is unchanged — same flags, same hooks, same session id,
+   *  same resume — which is the entire point (common/customAgents.ts).
+   *
+   *  An ID, not the entry: the configured list is the allowlist and it is read HERE, per spawn,
+   *  so an edited command reaches the next session without a restart and the browser can never
+   *  name a program that is not in the config. Absent = plain claude. */
+  customAgentId?: string | undefined;
 }
 
 // The `work in <clone>` line for a session's PRs, or null when the footer is switched off or the
@@ -56,10 +77,15 @@ function sessionWorkdirFooter(cwd: string): string | null {
   return root ? workdirFooter(root) : null;
 }
 
-// What `--append-system-prompt` carries for this session (#1062). Every source is read per spawn,
-// so switching any section off needs no restart.
-function sessionAppendedPrompt(cwd: string, dirSetting: boolean | null): string | null {
-  return appendedSystemPrompt({ dirSetting, globalSetting: getAppendSystemPrompt(), workdirFooter: sessionWorkdirFooter(cwd) });
+// What `--append-system-prompt` carries for this session (#1062), and where it travels. Every
+// source is read per spawn, so switching any section off needs no restart.
+//
+// The placement happens here, beside the other two arguments a Windows spawn has to send as a
+// path (settingsArgument / mcpConfigArgument): the text is multi-line, and a Windows command line
+// cannot carry a newline at all (#1516).
+function sessionAppendedPrompt(sessionId: string, cwd: string, dirSetting: boolean | null): AppendedPromptArgument | null {
+  const prompt = appendedSystemPrompt({ dirSetting, globalSetting: getAppendSystemPrompt(), workdirFooter: sessionWorkdirFooter(cwd) });
+  return prompt === null ? null : appendedPromptArgument(sessionId, prompt);
 }
 
 // The sidebar row a session gets before it has a transcript. A session spawned to run something
@@ -105,14 +131,81 @@ function sessionAddDirs(sessionId: string, configured: string[] | null | undefin
   return dropsDirectory ? [...(configured ?? []), dropsDirectory] : configured;
 }
 
+/**
+ * Which custom agent, if any, this session runs — the request's, or the one it was STARTED on.
+ *
+ * Remembered exactly as the provider/model choice is (launchChoices, #584), and resolved by the
+ * same rule (effectiveChoice): **a resume ignores the picker entirely.** The browser re-sends
+ * whatever its cell still holds on every reconnect, and that value belongs to the session the cell
+ * launched, not to the one being resumed — so picking a custom agent and then clicking a plain
+ * Claude row in "or resume here" would otherwise continue that conversation under a wrapper, on a
+ * different model, mid-thread. What the session was started on is the only defensible answer.
+ *
+ * PERSISTED, unlike launchChoices — it survives reap and a restart (custom-agent-log.ts). It has
+ * to: the transcript outlives the pty, and with the picker ignored on resume there would be
+ * nothing left to say how that conversation was being run. (A tmux REATTACH is unaffected either
+ * way: it picks up the running process and never re-reads argv.)
+ */
+function resolveCustomAgent(sessionId: string, requestedId: string | undefined, resuming: boolean): CustomAgent | undefined {
+  const id = resuming ? customAgentSessions.get(sessionId) : requestedId;
+  if (!id) return undefined;
+  const agent = getCustomAgents().find((candidate) => candidate.id === id);
+  // An id the config no longer has resolves to nothing and this session starts on plain claude —
+  // but the mapping is left alone rather than erased. The log only grows (it is shared between
+  // instances, so nothing rewrites it), and keeping the name costs nothing: re-adding the entry
+  // puts the session back on the agent it was started on, which is what its user chose.
+  if (agent) rememberCustomAgentSession(sessionId, agent.id);
+  return agent;
+}
+
+/**
+ * WHAT program runs this session, and what goes in front of Claude Code's own argv.
+ *
+ * Plain claude is `claudeBin` with nothing in front. A custom agent is the user's command line
+ * split into argv, with claude's flags appended — `ollama launch claude --model … --` becomes
+ * `ollama` + `["launch","claude","--model","…","--", <every claude flag>]`. The entry says which
+ * agent it launches AS (`agent: "claude"`), which is what makes appending claude's argv correct
+ * rather than a guess about the command text.
+ *
+ * `binEnvVar` goes with the program, which is why the spawn ENVIRONMENT is assembled here too: it
+ * names the env override that would FIX an unrunnable one (CLAUDE_BIN), and passing it opts the
+ * spawn into the pre-flight check (see ptySpawn). A custom agent has no such override — the fix is
+ * the config entry — so it is left off, which is the documented "the caller owns the failure" path
+ * and puts the child's own error in the terminal.
+ *
+ * A custom agent whose command tokenizes to nothing falls back to plain claude rather than
+ * refusing: config sanitizing already requires a non-empty command, so this is unreachable short
+ * of a bug, and starting the session the user asked for beats a blank cell.
+ *
+ * `note` is the start-log line's suffix. The wrapper is named there rather than left to be
+ * inferred: `[pty] claude started` for a session actually running `ollama` is exactly what would
+ * mislead someone debugging "why is this session on the wrong model".
+ */
+function sessionProgram(
+  claudeBin: string,
+  sessionId: string,
+  customAgentId: string | undefined,
+  resume: string | null,
+  unset: readonly string[],
+): { file: string; prefixArgs: string[]; spawnEnv: PtySpawnEnv; note: string | null } {
+  // `resume` is non-null exactly when this is a continuation (the caller passes it only for a
+  // resumable transcript), which is the same signal effectiveChoice takes as `resuming`.
+  const customAgent = resolveCustomAgent(sessionId, customAgentId, resume !== null);
+  const note = [customAgent ? `via ${customAgent.id}` : null, resume ? `resume ${resume}` : null].filter(Boolean).join(" ") || null;
+  const env = { unset, env: guiMcpEnv(sessionId, PORT) };
+  const launch = customAgent ? customAgentLaunch(customAgent.command) : null;
+  if (!launch) return { file: claudeBin, prefixArgs: [], spawnEnv: { ...env, binEnvVar: claudeAdapter.binEnvVar }, note };
+  return { file: launch.file, prefixArgs: launch.prefixArgs, spawnEnv: env, note };
+}
+
 export function createClaudeSpawner(deps: SpawnDeps) {
   // Spawn a fresh claude PTY for this session, register it, and wire its output /
   // exit back to the browser socket. `ws` may be null for a session spawned without
   // a viewer yet (e.g. spawnBackgroundChat) — output just buffers until a client
   // reattaches.
   function spawnClaudePty(sessionId: string, resume: string | null, ws: WebSocket | null, options: SpawnClaudeOptions = {}): PtyEntry {
-    const { initialPrompt, cwd = CLAUDE_CWD, attachGuiMcp = true, draft, launch } = options;
-    const fullGuiMcp = carriesFullGuiMcp(attachGuiMcp, cwd);
+    const { initialPrompt, cwd = CLAUDE_CWD, attachGuiMcp = true, draft, launch, customAgentId } = options;
+    const fullGuiMcp = carriesFullGuiMcp(attachGuiMcp, cwd, "claude");
     // fullGuiMcp picks the MCP mode (see buildClaudeArgs, and its own doc for who earns it): our
     // broker on one all-tools url; a project-directory cell gets none of ours and loads the GUI
     // tools its own directory registered. Either way the user's own MCP servers load.
@@ -122,7 +215,6 @@ export function createClaudeSpawner(deps: SpawnDeps) {
     const canResume = resume !== null && sessionExistsOnDisk(resume, cwd);
 
     const { dir, resolved } = resolveSessionBackend({ cwd, sessionId, launch, canResume });
-
     const addDirs = sessionAddDirs(sessionId, dir.addDirs);
 
     const hookSettings = deps.hookSettingsJson("localhost", sessionId, resolved.env);
@@ -149,7 +241,7 @@ export function createClaudeSpawner(deps: SpawnDeps) {
       // that path never went through our allowlist before.
       allowedTools: fullGuiMcp ? fullGuiAllowedTools(deps.guiMcpTools, getUserMcpServers()) : deps.gridMcpTools,
       addDirs,
-      appendedPrompt: sessionAppendedPrompt(cwd, dir.appendSystemPrompt),
+      appendedPrompt: sessionAppendedPrompt(sessionId, cwd, dir.appendSystemPrompt),
     });
 
     console.log(`[ws] client connected (${canResume ? "resume" : "new"} ${sessionId})`);
@@ -186,15 +278,15 @@ export function createClaudeSpawner(deps: SpawnDeps) {
     function recordCapabilitiesForThisSpawn(): void {
       const reattaching = ptyWouldReattach(sessionId, true);
       if (!reattaching) resetSessionToolGroups(sessionId);
-      claimFullGuiMcp(sessionId, attachGuiMcp, cwd, reattaching);
+      claimFullGuiMcp(sessionId, attachGuiMcp, cwd, reattaching, "claude");
     }
 
     function spawnEntry(): PtyEntry {
       recordCapabilitiesForThisSpawn();
-      const spawnEnv = { unset: resolved.unset, env: guiMcpEnv(sessionId, PORT), binEnvVar: claudeAdapter.binEnvVar };
-      const { term, tmux, reattached } = ptySpawn(sessionId, deps.claudeBin, args, cwd, true, spawnEnv);
-      console.log(ptyStartLine({ agent: "claude", pid: term.pid, cwd, tmux, reattached, sessionId, note: canResume ? `resume ${resume}` : null }));
-      return { term, ws, buffer: "", cwd, tmux, active: false, agent: "claude" };
+      const program = sessionProgram(deps.claudeBin, sessionId, customAgentId, canResume ? resume : null, resolved.unset);
+      const { term, tmux, reattached } = ptySpawn(sessionId, program.file, [...program.prefixArgs, ...args], cwd, true, program.spawnEnv);
+      console.log(ptyStartLine({ agent: "claude", pid: term.pid, cwd, tmux, reattached, sessionId, note: program.note }));
+      return { term, ws, buffer: "", cwd, tmux, active: false, agent: "claude" }; // "claude" whatever wrapper started it — see sessionProgram
     }
     ptys.set(sessionId, entry);
     // Every claude spawn above carries `--settings` with the Pre/PostToolUse hooks, so from here
@@ -215,22 +307,21 @@ export function createClaudeSpawner(deps: SpawnDeps) {
     // newline and the prompt would never run (#1148).
     const scanForDraftReady = attachDraftInjection(entry, initialPrompt, draft, () => submitSequenceForAgent(entry.agent, getTerminalSubmit()));
 
-    // PTY -> browser (buffering a bounded tail for reattach).
-    entry.term.onData((data) => {
-      entry.buffer = appendBoundedOutput(entry.buffer, data, deps.outputBufferLimit);
-      sendFrame(entry.ws, { type: "output", data });
-      scanForDraftReady(data);
-    });
+    // PTY -> browser (buffering a tail for reattach, batching the frames).
+    const output = wireBufferedOutput(entry, deps.outputBufferLimit, scanForDraftReady);
 
     entry.term.onExit(({ exitCode, signal }) => {
       console.log(ptyExitLine({ agent: "claude", exitCode, signal, lifetimeMs: Date.now() - spawnedAtMs, cwd, sessionId }));
+      output.flush(); // a queued batch must not arrive after the exit frame
       sendExitAndClose(entry.ws, exitCode, signal);
       // Clear the dot if it died mid-turn, then tear down everything (deletes
       // ptys/knownSessions/activity and publishes "closed") so a process that
       // exits on its own — e.g. a brand-new session that never persisted —
       // doesn't linger in the sidebar.
       deps.setWorking(sessionId, false);
-      deps.reap(sessionId);
+      // Not always a reap: under tmux this pty is the CLIENT, and one killed from outside leaves
+      // the session running (#1496). handlePtyExit asks tmux which of the two just happened.
+      handlePtyExit(sessionId, deps.reap);
     });
 
     return entry;

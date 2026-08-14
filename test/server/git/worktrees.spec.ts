@@ -4,6 +4,7 @@ import { makeTempDir } from "../../support/tempDir.js";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { writeFileSync, readFileSync, existsSync, symlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { reservedWorktreeEnv } from "../../../server/config/worktree-env.js";
 import path from "node:path";
 import { rmDirRetrying, GIT_TEST_TIMEOUT_MS } from "./wtTestUtil.js";
 import {
@@ -153,20 +154,22 @@ describe("git worktree lifecycle", () => {
     GIT_TEST_TIMEOUT_MS,
   );
 
-  // #1317. `.mulmoterminal.json` is gitignored, so a worktree used to start with no config at
-  // all: the project's colours, name, model and grid rank all stopped at the main checkout.
+  // #1317. A worktree used to start with no config at all: the project's colours, name, model and
+  // grid rank all stopped at the main checkout. Written to the LOCAL override since #1436 — that
+  // is the file a project gitignores, so this keeps working whether or not the shared config is
+  // committed.
   it.skipIf(!hasGit)(
     "gives each new worktree the project's settings, a hue further round each time",
     async () => {
-      writeFileSync(path.join(repo, ".gitignore"), ".mulmoterminal.json\n");
+      writeFileSync(path.join(repo, ".gitignore"), ".mulmoterminal.local.json\n");
       const project = { name: "proj", headerColor: "#2d4ea9", headerTextColor: "#ffffff", orderPriority: 30, model: "qwen3:8b" };
       writeFileSync(path.join(repo, ".mulmoterminal.json"), JSON.stringify(project));
-      await git(["add", ".gitignore"], repo);
-      await git(["commit", "-m", "ignore the local config"], repo);
+      await git(["add", ".gitignore", ".mulmoterminal.json"], repo);
+      await git(["commit", "-m", "commit the shared config, ignore the local one"], repo);
 
       const first = await createWorktree(repo, "first");
       if (!first) throw new Error("expected a worktree");
-      const config = (dir: string): unknown => JSON.parse(readFileSync(path.join(dir, ".mulmoterminal.json"), "utf8"));
+      const config = (dir: string): unknown => JSON.parse(readFileSync(path.join(dir, ".mulmoterminal.local.json"), "utf8"));
       expect(config(first.path)).toEqual({ name: "proj", model: "qwen3:8b", headerColor: "#2d35a9", headerTextColor: "#ffffff", orderPriority: 31 });
       // The file we just wrote must not read as a change. isDirty is what removeWorktree
       // consults, so a worktree dirtied by our own write could no longer be cleaned up.
@@ -185,14 +188,86 @@ describe("git worktree lifecycle", () => {
     GIT_TEST_TIMEOUT_MS,
   );
 
+  // The guard is on the file we WRITE. A project that ignores neither would gain an untracked
+  // file, and `isDirty` — which removeWorktree consults — would then refuse to clean the worktree
+  // up over a change we made ourselves.
   it.skipIf(!hasGit)(
-    "writes no config where git would not ignore it",
+    "writes no config where git would not ignore the local file",
     async () => {
       writeFileSync(path.join(repo, ".mulmoterminal.json"), JSON.stringify({ headerColor: "#2d4ea9" }));
       const wt = await createWorktree(repo, "unignored");
       if (!wt) throw new Error("expected a worktree");
-      expect(existsSync(path.join(wt.path, ".mulmoterminal.json"))).toBe(false);
+      expect(existsSync(path.join(wt.path, ".mulmoterminal.local.json"))).toBe(false);
       expect(await isDirty(wt.path)).toBe(false);
+    },
+    GIT_TEST_TIMEOUT_MS,
+  );
+
+  // Backward compatibility, and the reason the shared file is still a fallback: the setup this
+  // feature SHIPPED with told people to gitignore `.mulmoterminal.json`, and those repositories
+  // exist. Switching the target outright would have turned their worktrees grey with nothing said.
+  it.skipIf(!hasGit)(
+    "still tints a worktree in a repository set up the old way (only the shared file ignored)",
+    async () => {
+      writeFileSync(path.join(repo, ".gitignore"), ".mulmoterminal.json\n");
+      writeFileSync(path.join(repo, ".mulmoterminal.json"), JSON.stringify({ name: "proj", headerColor: "#2d4ea9", orderPriority: 30 }));
+      await git(["add", ".gitignore"], repo);
+      await git(["commit", "-m", "ignore the shared config, the pre-#1436 way"], repo);
+
+      const wt = await createWorktree(repo, "legacy");
+      if (!wt) throw new Error("expected a worktree");
+      // Written to the SHARED file here, since that is the one this repository ignores.
+      expect(existsSync(path.join(wt.path, ".mulmoterminal.local.json"))).toBe(false);
+      expect(JSON.parse(readFileSync(path.join(wt.path, ".mulmoterminal.json"), "utf8"))).toMatchObject({
+        name: "proj",
+        headerColor: "#2d35a9",
+        orderPriority: 31,
+      });
+      expect(await isDirty(wt.path)).toBe(false);
+      expect(await removeWorktree(repo, wt.path, { deleteBranch: true })).toEqual({ ok: true });
+    },
+    GIT_TEST_TIMEOUT_MS,
+  );
+
+  // The regression #1436 exists for: committing the shared config used to switch inheritance off,
+  // because the guard asked about that file rather than the one being written.
+  it.skipIf(!hasGit)(
+    "still tints a worktree whose project COMMITS its shared config",
+    async () => {
+      writeFileSync(path.join(repo, ".gitignore"), ".mulmoterminal.local.json\n");
+      writeFileSync(path.join(repo, ".mulmoterminal.json"), JSON.stringify({ name: "proj", headerColor: "#2d4ea9", orderPriority: 30 }));
+      await git(["add", ".gitignore", ".mulmoterminal.json"], repo);
+      await git(["commit", "-m", "commit the shared config"], repo);
+
+      const wt = await createWorktree(repo, "tinted");
+      if (!wt) throw new Error("expected a worktree");
+      const local: unknown = JSON.parse(readFileSync(path.join(wt.path, ".mulmoterminal.local.json"), "utf8"));
+      expect(local).toMatchObject({ name: "proj", headerColor: "#2d35a9", orderPriority: 31 });
+      // The committed file came along with the checkout and is untouched.
+      expect(JSON.parse(readFileSync(path.join(wt.path, ".mulmoterminal.json"), "utf8"))).toMatchObject({ headerColor: "#2d4ea9" });
+      expect(await isDirty(wt.path)).toBe(false);
+      expect(await removeWorktree(repo, wt.path, { deleteBranch: true })).toEqual({ ok: true });
+    },
+    GIT_TEST_TIMEOUT_MS,
+  );
+
+  // Reserved AT CREATION, not on the first terminal socket (#1367): a worktree started from an
+  // issue has its agent spawned directly (routes/issue-work-routes.ts), so a reservation that only
+  // happened in the ws handlers would miss the one flow this feature is most for.
+  it.skipIf(!hasGit)(
+    "reserves the project's per-tree environment for a worktree it creates",
+    async () => {
+      writeFileSync(path.join(repo, ".gitignore"), ".mulmoterminal.json\n");
+      writeFileSync(path.join(repo, ".mulmoterminal.json"), JSON.stringify({ worktreeEnv: { PORT: { kind: "port", base: 3000 } } }));
+      // Committed, or the worktree's checkout has no .gitignore and the config is never adopted
+      // — which would make this pass for the wrong reason on the day the reservation regressed.
+      await git(["add", ".gitignore"], repo);
+      await git(["commit", "-m", "ignore the local config"], repo);
+
+      const wt = await createWorktree(repo, "needs a port");
+      if (!wt) throw new Error("expected a worktree");
+      // The SYNC read — what a spawner sees, with nothing else having run in between.
+      expect(reservedWorktreeEnv(wt.path)).toEqual({ PORT: "3010" });
     },
     GIT_TEST_TIMEOUT_MS,
   );

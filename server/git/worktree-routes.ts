@@ -4,11 +4,12 @@
 // uses POST (not DELETE) so a request body survives every proxy.
 import type { Express } from "express";
 import { repoRoot, defaultBaseBranch, listWorktrees, createWorktree, removeWorktree, isDirty } from "./worktrees.js";
+import { releaseWorktreeEnv } from "../config/worktree-env.js";
 import { worktreeDiff } from "./worktree-diff.js";
 import { pushWorktree, createOrOpenPR } from "./worktree-pr.js";
 import { requestOriginAllowed } from "../routes/same-origin-guard.js";
 import { isIssueNumber } from "../../common/prPhase.js";
-import { dirSession } from "../session/dir-session.js";
+import { dirSession, survivorSnapshot } from "../session/dir-session.js";
 import { tmuxAttachedCounts } from "../infra/tmux.js";
 import { requestBody } from "../routes/requestBody.js";
 
@@ -39,8 +40,11 @@ export function mountWorktreeRoutes(app: Express, { isAllowedOrigin }: WorktreeR
     if (!repo) return res.json({ isGit: false, base: null, worktrees: [] });
     const list = await listWorktrees(repo);
     const tmuxCounts = tmuxAttachedCounts();
+    const running = await survivorSnapshot();
     const now = Date.now();
-    const worktrees = await Promise.all(list.map(async (w) => ({ ...w, dirty: await isDirty(w.path), session: await dirSession(w.path, tmuxCounts, now) })));
+    const worktrees = await Promise.all(
+      list.map(async (w) => ({ ...w, dirty: await isDirty(w.path), session: await dirSession(w.path, tmuxCounts, now, running) })),
+    );
     res.json({ isGit: true, base: await defaultBaseBranch(repo), worktrees });
   });
 
@@ -82,7 +86,12 @@ export function mountWorktreeRoutes(app: Express, { isAllowedOrigin }: WorktreeR
     // payload (e.g. the string "false") must fall back to the SAFE default — never
     // force-remove a dirty worktree or delete a branch on a malformed request.
     const result = await removeWorktree(repoDir, worktreePath, { deleteBranch: deleteBranch === true, force: force === true });
-    if (result.ok) return res.json(result);
+    // Only once the removal succeeded, and from here rather than inside removeWorktree: releasing
+    // a port a worktree is still using would hand it to the next tree while a dev server holds it.
+    if (result.ok) {
+      releaseWorktreeEnv(worktreePath);
+      return res.json(result);
+    }
     res.status(result.reason === "failed" ? 500 : 409).json(result);
   });
 
